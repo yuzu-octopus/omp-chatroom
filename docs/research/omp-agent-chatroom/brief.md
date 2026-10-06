@@ -167,3 +167,58 @@ stops a high-volume room from drowning its members.
 A second report, `REPORT-v2-hybrid.md`, that supersedes the first report's
 "Considered and rejected → full persistent room" row and its recommendation, and answers:
 room-vs-DM routing rule; wait tool surface; envelope/addressing; attention model.
+
+---
+
+## Addendum B — hierarchical log compression (2026-10-06, after PLAN-build.md)
+
+### Why this round exists
+
+Round 3's plan bounds context with per-agent cursors + caps + a `gap` record, and ships **no**
+hierarchical compression. The user wants the tree after all, with a specific and better shape
+than round 1 considered: **agents read raw messages normally; the tree compresses only the
+backlog**, so a late joiner gets a bounded view instead of a `gap` and a hole.
+
+That inverts round 1's objection. Round 1 rejected "the tree as the room log" because OptChat's
+view never holds a whole message. It did not evaluate "raw log for the hot tail, tree for the
+cold tail, zoom to descend" — which is what the user is describing.
+
+### Revised question
+
+Given an append-only multi-writer room log, design a **two-region** store: a raw tail every
+member reads verbatim, and a compressed tree over the older region that a late joiner reads as
+a bounded view and can `zoom(lo, hi)` to descend. Settle who compacts, how races are avoided,
+what the digest becomes, and what invariants survive.
+
+### Addendum decision
+
+Settle: (a) the store layout and node format; (b) **who runs compaction** in a multi-writer
+system and how concurrent compaction is serialised; (c) the boundary rule (raw vs compressed)
+and how a cursor maps onto it; (d) `zoom` semantics and addressing when a node covers N
+messages; (e) what happens when a compressed node must be invalidated; (f) failure modes —
+a member whose cursor falls below the raw tail, a crashed compactor, a divergent node.
+
+### Addendum angles
+
+14. **Multi-writer hierarchical summarisation** — OptMem/OptChat mechanics re-read as a
+    *two-region* design; who compacts; whether any multi-agent system does this; CRDT/epoch
+    approaches to a shared summarised log; content-defined chunking; Merkle/append-only trees
+    (transparency logs, git, IPLD); and whether a summariser must be a single writer by
+    construction.
+15. **Raw-tail + cold-tree boundary and cursor semantics** — Kafka/NATS retention vs replay;
+    how `zoom` addresses a range; node invalidation; what a `gap` becomes when a tree exists;
+    and whether a late joiner can be *guaranteed* a bounded view.
+
+### Addendum constraints
+
+- The tree must never be required for correctness: the raw log stays authoritative and the
+  tree must be rebuildable from it (OptMem's own property).
+- No agent may be blocked on compaction to make progress.
+- Compaction must not be an unbounded LLM cost sink; it needs a budget.
+- Restricted/plan-mode children still cannot join — unchanged.
+
+### Addendum answer form
+
+A round-4 report `REPORT-v3-tree.md` plus findings F20/F21, and an update to
+`PLAN-build.md` §3 (store) and §5.4 (digest) with the two-region design, marked by confidence
+and with the unmeasured parts called out.
