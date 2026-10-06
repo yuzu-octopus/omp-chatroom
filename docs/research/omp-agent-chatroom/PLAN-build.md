@@ -51,7 +51,10 @@ pull-only T2 is a different object `[R2 §Round 1 revised]`.
 
 ### 1.3 Assumptions (written, non-blocking)
 
-1. Single omp process; one room per session tree, room id = the `local://` root's owner session.
+1. Single omp process; one room per session tree, room id derived from
+   `ctx.sessionManager.getSessionId()` (stable and unique per tree). The `local://` root's last
+   path segment is always `"local"` (`resolveLocalRoot` returns `path.resolve(artifactsDir, "local")`,
+   `local-protocol.ts:229-240`), so it MUST NOT be used as the room id.
 2. Normal `task` subagents are **not** restricted by default (`restrictToolNames = policy.planMode ||
    session.restrictToolNames === true`) `[F0 §plugin]` — so they do get the room tool.
 3. Bun is the runtime and the package manager (`node:fs` compat is available) `[F18 §2]`.
@@ -80,14 +83,16 @@ omp-chatroom/
 ├── README.md
 ├── src/
 │   ├── index.ts                        # default-export ExtensionFactory: wires everything
-│   ├── ids.ts                          # roomIdFor(root), resourceKey(), newMessageId()
+│   ├── ids.ts                          # roomIdFor(sessionId), logPathFor(root,roomId), resourceKey(), newMessageId()
+│   ├── env.d.ts                        # ambient declarations: `*.md` text imports, `bun` globals (§2.3)
 │   ├── store/
 │   │   ├── schema.ts                   # RoomRecord union + envelope types (§3.2)
-│   │   ├── log.ts                      # openRoomLog / appendLine / readSince / replay (§3.3)
+│   │   ├── log.ts                      # roomLogFd / appendLine / readSince / replay / logPathFor (§3.3)
 │   │   ├── room-store.ts               # RoomStore singleton: state + change listeners (§3.1)
 │   │   ├── claims.ts                   # claim arbiter: grant/release/reclaim/expire (§3.4)
 │   │   ├── cursors.ts                  # per-agent cursor map + persistence (§3.5)
 │   │   ├── tree-store.ts               # binary summary tree: getNode/putNode/forget/cover (§3.6)
+│   │   ├── config.ts                   # room config: local://room/config.json load/save + flag overrides (§10 R6)
 │   │   └── compactor.ts                # background job: ctx.setInterval + streamSimple(@smol) (§3.6)
 │   ├── attention/
 │   │   ├── tiers.ts                    # classify(record, viewer) → "T0"|"T1"|"T2" (§5.1)
@@ -111,6 +116,7 @@ omp-chatroom/
 │   │   └── keys.ts                     # key map (§6.6)
 │   ├── cards/
 │   │   ├── message-cards.ts            # registerMessageRenderer ×4 (§7.2)
+│   │   ├── body-lines.ts               # local copy of the private native bodyLines (§7.4, RISK R21)
 │   │   └── tool-cards.ts               # renderCall/renderResult/describeCall/describeResult (§7.5)
 │   └── commands/
 │       └── room-command.ts             # `/room` slash command (§6.1)
@@ -119,8 +125,15 @@ omp-chatroom/
 └── tests/
     ├── store.test.ts                   # append/read/replay/cursor/claim
     ├── attention.test.ts               # tier classify + caps + coalesce
+    ├── tree.test.ts                    # cold tree: cover/putNode/forget/zoom/compactor (P1b)
     └── e2e-room.test.ts                # multi-agent in-process acceptance (§11)
 ```
+
+**Layout is closed** (K18, V9): the four files the prose requires but that were previously unlisted are
+now present — `src/cards/body-lines.ts` (§7.4, RISK R21), `tests/tree.test.ts` (P1b), `src/store/config.ts`
+(§10 R6) and `src/env.d.ts` (§2.3). Every symbol the plan references — `bodyLines`, `MemberState`,
+`bumpCursor`, `cardTypeFor`, `escapeHarnessTags`, `Tier`, `logPathFor`, `roomLogFd` — is assigned to one
+of these files or to a file already in the tree.
 
 ### 2.1.1 `src/index.ts` — ExtensionFactory + `__roomTest` (M-4, M-5)
 
@@ -128,28 +141,29 @@ The default export is an `ExtensionFactory` — a function `(pi: ExtensionAPI) =
 registers everything the plugin provides. It is called once per session tree by
 `bindPreparedExtensions` `[F0 Add.2.1]`.
 
-**What it registers** (gated by manifest features):
+**What it registers.** `ExtensionAPI` has **no `enabledFeatures` property**
+(`types.ts:1357-1696` — only `PluginRuntimeState` has it, consumed by the plugin *loader*, never by
+extension code). There is therefore **no runtime feature gate**: the factory registers everything
+unconditionally. Manifest `features` gates only **which entry files load** — and all three features
+currently point at the same `./src/index.ts` (§2.2), so they gate nothing at runtime.
+For runtime toggles use `registerFlag`/`getFlag` (e.g. `--room-panel-key`, `--room-cold-tree`).
+If per-feature *code* gating is ever wanted, split the entry files
+(`./src/entries/room.ts`, `./src/entries/wait.ts`, `./src/entries/panel.ts`) and point each manifest
+feature at its own file — that is a v2 decision, not a v1 blocker.
 ```ts
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 export default function roomExtension(pi: ExtensionAPI): void {
-  const features = pi.enabledFeatures;   // null = use defaults
-  const has = (f: string) => features === null || features.has(f);
-
-  if (has("room")) {
-    registerRoomTool(pi);               // §4.1 — the op-dispatched `room` tool
-    registerRoomCommand(pi);            // §6.1 — `/room` slash command
-    registerMessageRenderers(pi);       // §7.2 — room:message, room:mention, room:claim, room:board-delta
-    registerHooks(pi);                  // §5.4 — before_agent_start + session_shutdown
-  }
-  if (has("wait-tools")) {
-    registerWaitForAgent(pi);            // §4.2
-    registerWaitForMessage(pi);          // §4.3
-    registerWaitForClaim(pi);            // §4.4
-  }
-  if (has("panel")) {
-    registerPanel(pi);                  // §6.2 — RoomPanel component
-  }
+  registerRoomTool(pi);               // §4.1 — the op-dispatched `room` tool
+  registerRoomCommand(pi);            // §6.1 — `/room` slash command
+  registerMessageRenderers(pi);       // §7.2 — room:message, room:mention, room:claim, room:board-delta
+  registerHooks(pi);                  // §5.4 — before_agent_start + session_shutdown
+  registerWaitForAgent(pi);           // §4.2
+  registerWaitForMessage(pi);         // §4.3
+  registerWaitForClaim(pi);           // §4.4
+  registerPanel(pi);                  // §6.2 — RoomPanel component
+  pi.registerFlag("room-panel-key", { type: "string", default: "" });   // §6.1, RISK R4
+  pi.registerFlag("room-cold-tree", { type: "boolean", default: true }); // §3.6 fallback switch
 }
 ```
 
@@ -172,17 +186,26 @@ In production, `__roomTest` is never imported — it is tree-shaken or ignored.
 
 ```ts
 import * as crypto from "node:crypto";
+/**
+ * Derive the room id from the owning session id.
+ * Rule: the session id, stripped of non-alphanumeric chars, lowercased, capped at 32 chars.
+ * Example: sessionId "20261006-abc123" → "20261006abc123"
+ * Fallback: "room" when the session id is empty.
+ *
+ * NOTE: this MUST NOT use the `local://` root path. `resolveLocalRoot` always ends in
+ * "local" (`local-protocol.ts:229-240`), so a root-derived id collapses every tree onto "local".
+ */
+export function roomIdFor(sessionId: string): string {
+  const id = sessionId.replace(/[^a-zA-Z0-9]/g, "").toLowerCase().slice(0, 32);
+  return id || "room";
+}
 
 /**
- * Derive the room id from the local:// root path.
- * Rule: take the last path segment of the root, strip non-alphanumeric chars, lowercase.
- * Example: /tmp/omp-local/abc123 → "abc123"
- * If the root is empty or "/", fall back to "room".
+ * Canonical room log path: "<root>/room/<roomId>.jsonl".
+ * The single source of truth for the filename — §3.1, §3.3 and §11.1 all call this.
  */
-export function roomIdFor(root: string): string {
-  const seg = root.split("/").filter(Boolean).pop() ?? "";
-  const id = seg.replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-  return id || "room";
+export function logPathFor(root: string, roomId: string): string {
+  return `${root}/room/${roomId}.jsonl`;
 }
 
 /**
@@ -200,10 +223,15 @@ export function newMessageId(): string {
 }
 ```
 
-**`roomIdFor` derivation rule**: the room id is the last segment of the `local://` root
-path, lowercased and stripped of non-alphanumeric characters. This gives a stable,
-human-readable id that matches the session tree. If the root is `/` or empty, the
-fallback is `"room"`.
+**`roomIdFor` derivation rule**: the room id comes from `ctx.sessionManager.getSessionId()`
+(`session-manager.ts:652-679`), stripped of non-alphanumeric characters and lowercased, capped at
+32 chars. The session id is stable per tree and unique per tree, so it gives a stable,
+human-readable id without touching the filesystem path. If the session id is empty, the fallback
+is `"room"`. A manifest/config override (`settings.roomId`, §2.2) wins when non-empty.
+
+**`logPathFor` rule**: the log filename is always `<root>/room/<roomId>.jsonl`, produced by
+`logPathFor(root, roomId)`. There is exactly one filename convention (K14) — do not re-derive it
+inline from a `local://` URL, and do not hardcode `room.jsonl`.
 
 ### 2.2 `package.json` — verbatim manifest shape
 
@@ -247,8 +275,12 @@ fallback is `"room"`.
       "postsPerWindow": { "type": "number",  "description": "Room posts allowed per 2s window (CIR)", "default": 1, "min": 1, "max": 20 },
       "burstPosts":     { "type": "number",  "description": "Token-bucket burst capacity (CBS)", "default": 10, "min": 1, "max": 100 },
       "claimTtlMs":     { "type": "number",  "description": "Default claim lease (ms)", "default": 300000, "min": 5000 },
-      "logMaxRecords":  { "type": "number",  "description": "Room log retention by count", "default": 5000, "min": 100 },
+      "claimSweepMs":   { "type": "number",  "description": "Claim-expiry sweep interval (ms) (K3)", "default": 5000, "min": 1000 },
+      "maxBodyBytes":   { "type": "number",  "description": "Max post/note body size in bytes (K19)", "default": 8192, "min": 256 },
+      "logMaxRecords":  { "type": "number",  "description": "Room log retention by count (in-memory only, K19)", "default": 5000, "min": 100 },
       "logMaxAgeMs":    { "type": "number",  "description": "Room log retention by age (ms)", "default": 604800000, "min": 60000 },
+      "compactionCallsPerDay": { "type": "number", "description": "Compaction call RATE cap (K4)", "default": 20000, "min": 1000 },
+      "digestBudgetTokens":    { "type": "number", "description": "Join-digest token budget, routing rule excluded (K5)", "default": 2500, "min": 500 },
       "panelKey":       { "type": "string",  "description": "KeyId for the panel shortcut; empty disables", "default": "" }
     }
   }
@@ -268,8 +300,11 @@ fallback is `"room"`.
   `local://room/config.json` (read/write via the store), exposed via a `/room config` subcommand,
   with `registerFlag` for per-launch overrides and the manifest `env` field as a fallback.
   See §10 R6.
-- `enabledFeatures: null` means "use `default: true` features"; project overrides win
-  `[F15 §Q3]`.
+- Manifest `features` only gates **which entry files load**: `PluginRuntimeState.enabledFeatures`
+  is consumed by the plugin *loader*, never by extension code, and all three features here point at
+  the same `./src/index.ts` (§2.1.1). `enabledFeatures: null` means "use `default: true` features";
+  project overrides win `[F15 §Q3]`. **Features do not gate runtime behaviour.** Runtime toggles use
+  `registerFlag`/`getFlag` (§2.1.1).
 
 ### 2.3 `tsconfig.json` — P0 deliverable (M-3)
 
@@ -282,7 +317,8 @@ fallback is `"room"`.
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true,
-    "types": ["bun"]
+    "types": ["bun"],
+    "allowArbitraryExtensions": true
   },
   "include": ["src", "tests"]
 }
@@ -292,8 +328,9 @@ fallback is `"room"`.
 match Bun's native TS support (Bun reads TS directly, no transpile step). `noEmit: true`
 because Bun does the execution; `tsc` is only for typechecking. `skipLibCheck: true`
 skips `.d.ts` checking (the host's types are not fully resolvable in a plugin context).
-`types: ["bun"]` adds Bun's global types. `include: ["src", "tests"]` covers the
-implementation and test files.
+`types: ["bun"]` adds Bun's global types. `allowArbitraryExtensions: true` lets the `*.md` text
+imports in §2.1 (`routing-rule.md`, §8) and the `bun` globals in `src/env.d.ts` typecheck.
+`include: ["src", "tests"]` covers the implementation, the ambient declarations and the test files.
 
 ---
 
@@ -301,27 +338,66 @@ implementation and test files.
 
 ### 3.1 Store shape
 
-One module-level singleton per extension module. Child sessions do not re-import the module —
+One module-level singleton per **root**. Child sessions do not re-import the module —
 `bindPreparedExtensions` re-runs the *same factory function object* with a fresh `ExtensionAPI`
 `[F0 Add.2.1]`, `[F18 §4]`. So the store is shared across the whole session tree.
 
+**Store registry** (K9): stores live in a `globalThis`-anchored registry keyed by the absolute
+`local://` root, not in a bare module-level variable — this keeps independent top-level sessions
+(and tests) from sharing state (RISK R10):
+```ts
+const STORES = ((globalThis as any).__roomStores ??= new Map<string, RoomStore>());
+const SESSIONS = ((globalThis as any).__roomSessions ??= new Map<string, Set<string>>()); // root → live agentIds
+export function storeFor(root: string): RoomStore { /* create-on-first-use, keyed by root */ }
+```
+**Eviction** (K9): `storeFor` increments the root's live-session refcount; `dispose()` decrements it.
+When the count reaches zero — the **last** session for that root is shutting down — the store is
+**evicted from the registry** (fd closed per K8, maps dropped). `reset()` remains the test seam and
+does NOT evict the registry entry.
+
 ```ts
 // src/store/room-store.ts
-interface RoomStore {
+export interface MemberState {         // K11 — declared ONCE, here; imported everywhere else
+  agentId: string;
+  joinedAtSeq: number;
+  topics: Set<string>;                 // followed topics
+  muted: Set<string>;                  // muted topics; the sentinel "" means whole-room mute
+  threadRoots: Set<string>;            // thread roots this agent posted in (N1)
+  heldTopics: Set<string>;             // topics with a claim held/held within 1 h `[invented]` (N1)
+  lastMessageId?: string;              // the agent's most recent msg id (replyTo → T0)
+  waitedResource?: string;             // active wait_for_claim resource (M-8 → T1)
+}
+
+export interface RoomStore {
   root: string;                        // absolute local:// root (§3.3)
-  logPath: string;                     // <root>/room/<roomId>.jsonl
+  roomId: string;
+  logPath: string;                     // logPathFor(root, roomId) — §2.1.2 (K14)
   treePath: string;                    // <root>/room/tree/ (cold tree, §3.6)
   records: RoomRecord[];               // in-memory projection, seq-ordered
   byId: Map<string, RoomRecord>;
   claims: Map<string, ClaimState>;     // resource → holder/ttl/seq
   cursors: Map<string, number>;        // agentId → last delivered seq
-  members: Map<string, MemberState>;   // agentId → {joinedAtSeq, topics:Set, muted:Set}
+  members: Map<string, MemberState>;   // agentId → MemberState
   listeners: Set<(r: RoomRecord) => void>;
   seq: number;
   tree: TreeStore;                     // cold tree: binary summary tree over [0, N-R)
+  append(draft: RoomRecordDraft): RoomRecord;   // K15 — mint seq, write log, project, notify; the ONLY write path
+  addListener(fn: (r: RoomRecord) => void): () => void;  // K10 — returns the unsubscribe
+  removeListener(fn: (r: RoomRecord) => void): void;     // K10
+  dispose(): void;                     // refcount--; last session closes the fd + evicts the root
   reset(): void;                       // test seam
 }
+```
 
+**Single write path** (K15): every mutation goes through `store.append(draft)` — it mints `seq`,
+appends the line to the log (§3.3), pushes the projection, and notifies listeners. `claims.ts`
+imports `RoomStore` and calls `append`; `room-store.ts` never imports `claims.ts`, which breaks the
+store↔claims module cycle. `RoomRecordDraft` is `RoomRecord` without `v`/`seq`/`ts`/`id` (§3.2).
+
+**Listeners** (K10): `addListener` returns the unsubscribe closure. Every subscriber
+(`wait_for_message`, `wait_for_claim`, the governor, the panel) MUST call it in its `finally`/`dispose`.
+
+```ts
 // src/store/tree-store.ts
 interface TreeStore {
   // Fixed-width dense prefix per level. Block [lo,hi) at level size=hi-lo
@@ -346,8 +422,12 @@ stays authoritative.
 - **T3** no agent blocked on compaction — raw tail is always readable; cold tree may have
   unbuilt nodes → `gap` + raw-log fallback.
 - **T4** one node per range — `putNode` refuses unless `count == lo//size` (dense prefix).
-- **T5** max spend cap — compaction calls bounded per day (default 1000). When cap hit,
-  compaction pauses until next day.
+- **T5** max spend **rate** cap — `compactionCallsPerDay = 20000` `[calibrate]` calls/day
+  (§5.2, K4). The cap is a *rate*, not a budget for one rebuild: building one retention window
+  (N=5000 records) costs ≈2N ≈ 10 000 calls, and the window turns over in ~17 min at the documented
+  post rate, so a cap below 2× the per-window demand makes the tree unbuildable. At 20 000/day one
+  full rebuild/day is possible; when the cap is hit, compaction pauses until the next day and the
+  **raw tail covers the gap by design** (T2/T3).
 
 **Merge shape** `[R3 §1]`: 2 inputs → 1 output. Block [lo,hi) = merge of [lo,mid) and
 [mid,hi). RAW_MAX=16: blocks ≤ 16 compress from raw log; larger blocks compress from two
@@ -383,25 +463,43 @@ Envelope fields are the round-2 §C set reduced to what a v1 store needs `[R2 §
 `seq` is a monotonic counter minted by the store; **the file is the durable log and `seq` is the
 cursor unit** `[R2 §Components 1]`. One JSON object per line, `\n`-terminated.
 
+**`RoomRecordDraft`** (K15) — what a caller hands to `store.append`, with the store-minted fields
+omitted:
+```ts
+type RoomRecordDraft =
+  | Omit<Extract<RoomRecord, { kind: "msg" }>,     "v" | "seq" | "ts" | "id">
+  | Omit<Extract<RoomRecord, { kind: "claim" }>,   "v" | "seq" | "ts" | "id">
+  | Omit<Extract<RoomRecord, { kind: "release" }>, "v" | "seq" | "ts" | "id">
+  | Omit<Extract<RoomRecord, { kind: "note" }>,    "v" | "seq" | "ts" | "id">
+  | Omit<Extract<RoomRecord, { kind: "member" }>,  "v" | "seq" | "ts" | "id">
+  | Omit<Extract<RoomRecord, { kind: "gap" }>,     "v" | "seq" | "ts" | "id">;
+```
+`append` fills `v:1`, the next `seq`, `ts: Date.now()`, and `id: newMessageId()`.
+
 ### 3.3 Path resolution + atomic append
 
 **Root resolution** — inside any tool `execute()` or event handler:
 
 ```ts
-import { resolveLocalRoot, resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
+import { resolveLocalRoot } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
+import { roomIdFor, logPathFor } from "../ids";
 
 const opts = ctx.localProtocolOptions ?? {
   getArtifactsDir: () => ctx.sessionManager.getArtifactsDir(),
   getSessionId:    () => ctx.sessionManager.getSessionId(),
 };
-const root    = resolveLocalRoot(opts);                                  // absolute dir
-const logPath = resolveLocalUrlToPath(`local://room/${roomId}.jsonl`, opts);
+const root    = resolveLocalRoot(opts);                     // absolute dir — always ends in "local"
+const roomId  = roomIdFor(ctx.sessionManager.getSessionId());  // K7 — never from the root path
+const logPath = logPathFor(root, roomId);                   // "<root>/room/<roomId>.jsonl" (K14)
 ```
 
 - `resolveLocalRoot(options: LocalProtocolOptions, platform = process.platform): string` —
   `src/internal-urls/local-protocol.ts:229-240`; artifacts branch = `path.resolve(artifactsDir,"local")`,
   else `path.join(os.tmpdir(),"omp-local", safeSessionId(options))` `[F18 §1]`.
-- `resolveLocalUrlToPath(input, options, platform?)` — `local-protocol.ts:285-301` `[F18 §1]`.
+  **The last segment is always `"local"`** — never derive the room id from it (K7).
+- `logPathFor(root, roomId)` (§2.1.2) is the **only** filename convention (K14). `resolveLocalUrlToPath`
+  (`local-protocol.ts:285-301`) is still used for *other* `local://` handles (e.g. the digest's
+  raw-file handle), but the room log path comes from `logPathFor`.
 - **Subagents share the parent's root**: `sessionLocalProtocolOptions()` pins parent options and
   `buildExecutorOptions` forwards them into `ExecutorOptions` `[F18 §1]`.
 - **RISK R1** — `ctx.localProtocolOptions` is optional (`types.ts:504-505`) `[F18 §1]`; the
@@ -414,10 +512,29 @@ no fsync `[F18 §2]`:
 ```ts
 // src/store/log.ts
 import * as fs from "node:fs";
+import { logPathFor } from "../ids";
 
-export function openRoomLog(path: string): number {
+// K8 — one fd per process per logPath. `closeSync` has no caller in the plan otherwise:
+// without a registry the fd is leaked for the life of the process.
+const FDS = ((globalThis as any).__roomLogFds ??= new Map<string, number>());
+
+export function roomLogFd(root: string, roomId: string): number {
+  const path = logPathFor(root, roomId);
+  const existing = FDS.get(path);
+  if (existing !== undefined) return existing;
   fs.mkdirSync(path.slice(0, path.lastIndexOf("/")), { recursive: true });
-  return fs.openSync(path, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND);
+  const fd = fs.openSync(path, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND
+                               | fs.constants.O_CLOEXEC);   // O_CLOEXEC: never inherited by children
+  FDS.set(path, fd);
+  return fd;
+}
+
+/** Called ONLY by the last live session's session_shutdown (K8). */
+export function closeRoomLog(root: string, roomId: string): void {
+  const path = logPathFor(root, roomId);
+  const fd = FDS.get(path);
+  if (fd === undefined) return;
+  try { fs.closeSync(fd); } finally { FDS.delete(path); }
 }
 
 export function appendLine(fd: number, line: string): void {   // line MUST end with "\n"
@@ -430,6 +547,11 @@ export function appendLine(fd: number, line: string): void {   // line MUST end 
   }
 }
 ```
+
+**fd lifetime** (K8): the registry is `globalThis`-anchored, so sibling sessions in one process share
+the same fd. `storeFor(root)` refcounts live sessions (K9); `closeRoomLog(root, roomId)` runs in the
+**last** live session's `session_shutdown`, after which the registry entry is dropped. Closing in any
+non-last session would tear a live writer.
 
 Atomicity basis: `write(2)` with `O_APPEND` performs the offset adjustment and the write as an
 atomic step (man7.org, fetch 2026-10-06) `[F18 §2]`. Single-threaded JS means two sessions in one
@@ -470,20 +592,41 @@ A spoofed `from` in a tool call is ignored; the store overwrites it with the aut
 **RISK R2** — `Bun.write` is not an append API and `FileSink` has no documented append mode
 `[F18 §2]`; fallback is the `node:fs` O_APPEND fd above (Bun implements `node:fs`).
 
+**Body size cap** (K19): `post` and `note` bodies are capped at `maxBodyBytes = 8192` (8 KiB)
+`[calibrate]`, enforced **in `post`** before the record is drafted. An oversized body returns
+`{ content:[{type:"text", text:"body too large"}], details:{ok:false, error:"body exceeds maxBodyBytes (8192)"} }`
+— never truncated silently, never thrown. `logMaxRecords` bounds record *count*; `maxBodyBytes`
+bounds record *size*. Both are needed.
+
+**Retention scope** (K19): the pruning job (§3.6) caps the **in-memory `records` array only**. The
+JSONL **file is append-only and never truncated** — it is the durable log (T2). Replay cost
+therefore grows without bound (measured ≈10.7 ms per 5000 records `[F18 §2]`); at ~10⁶ records a cold
+replay costs seconds. Accepted for v1: the raw tail plus cursors keep steady-state reads O(tail), and
+a file rewrite is a v2 maintenance op. This is stated here so no reader assumes retention shrinks
+the file.
+
 **User-visible errors** (U6): missing / unwritable / corrupt room file each returns a normal tool
-result `{ok:false, error}` — never a throw. Missing file → `{ok:false, error:"room file not found"}`;
-unwritable → `{ok:false, error:"room file unwritable"}`; corrupt → `{ok:false, error:"room file corrupt"}`.
+result `{ content, details:{ok:false, error} }` — never a throw. Missing file →
+`details.error:"room file not found"`; unwritable → `"room file unwritable"`; corrupt →
+`"room file corrupt"`. Every tool result carries `content` (K1).
 
 ### 3.4 Claim arbiter
 
 ```ts
 // src/store/claims.ts
-interface ClaimState { resource: string; holder: string; ttlMs: number; acquiredAt: number; seq: number; }
+import type { RoomStore } from "./room-store";
+import type { RoomRecord } from "./schema";
 
-grant(store, resource, holder, ttlMs): { ok: true; claim: ClaimState } | { ok: false; holder: string; expiresAt: number }
-release(store, resource, holder, reason): boolean
-reclaimIfStale(store, resource, now): ClaimState | null   // TTL expired OR holder parked/aborted
-contended(store, resource): string[]                       // agents that asked and lost
+export interface ClaimState { resource: string; holder: string; ttlMs: number; acquiredAt: number; seq: number; }
+export type ReleaseReason = Extract<RoomRecord, { kind: "release" }>["reason"];
+
+// All mutation goes through store.append (K15) — claims.ts imports RoomStore, never the reverse.
+export function grant(store: RoomStore, resource: string, holder: string, ttlMs: number):
+  { ok: true; claim: ClaimState } | { ok: false; holder: string; expiresAt: number };
+export function release(store: RoomStore, resource: string, holder: string, reason: ReleaseReason): boolean;
+export function reclaimIfStale(store: RoomStore, resource: string, now: number): ClaimState | null;
+export function expireStale(store: RoomStore, now: number): Array<{ resource: string; prev: string; next?: string }>;
+export function contended(store: RoomStore, resource: string): string[];
 ```
 
 Rules `[R2 §Components 4]`:
@@ -494,6 +637,25 @@ Rules `[R2 §Components 4]`:
   `[F3 §AgentRef]`) **or** holder idle past `ttlMs`.
 - **Reclaim is explicit and logged** — appends `release{reason:"reclaimed"}` then `claim`, and
   notifies the previous holder at **T0** `[R2 §Components 4]`. Never silent.
+- **Two distinct stale paths (K12).** `reclaimIfStale` is the **contended** path: a waiter wants the
+  resource, so the stale claim is *replaced* (`release{reason:"reclaimed"}` + `claim`) and the
+  previous holder gets a T0 notice. `expireStale` is the **timer** path: nobody is waiting, so the
+  stale claim is merely *dropped* (`release{reason:"expired"}`, no successor) and the previous holder
+  gets a T0 notice. Both are needed — without `expireStale`'s producer,
+  `release{reason:"expired"}` is **unreachable** and a long-TTL claim can be squatted forever (K3).
+- **Claim-expiry sweep** (K3) — the third `ctx.setInterval` job, alongside pruning (§3.6) and the
+  compactor (§3.6). Interval **5 s** `[calibrate]`, **refcounted** (I4/R11/R28), **main session
+  only** (R11):
+  1. call `expireStale(store, Date.now())` over all claims;
+  2. for each newly stale claim, append `release{reason:"expired"}` (§3.2) and drop it from
+     `store.claims`;
+  3. if waiters exist for that resource, **promote the oldest waiter** — grant it the lease with its
+     requested `ttl` (appending a fresh `claim` record via `store.append`, K15) and resolve its
+     `wait_for_claim` promise with `details:{ outcome:"event", acquired:true, claim }` (§4.4);
+  4. fire the **T0 notice** to the previous holder (K12: `release` → T0).
+  This is the producer that makes `release{reason:"expired"}` and `wait_for_claim`'s
+  "resolved on release/reclaim/expiry" (§4.4) reachable. The sweep is idempotent: a resource with no
+  stale claim is a no-op, so a 5 s tick costs nothing when the board is quiet.
 - Claim state is **rebuilt by replaying the log** on first open (§3.3), so it survives a process
   restart and cold revival of a parked agent `[F18 §5]`.
 
@@ -538,12 +700,23 @@ summaries. `[R3 §1]`
 Cold tree covers `[0, N-R)`. The boundary is a sliding window recomputed on every read.
 
 **Compaction** `[R3 §3]`: background job in the main session via `ctx.setInterval`. Model =
-`@smol` via `streamSimple` (deep import from `@oh-my-pi/pi-ai`, not public API). Concurrency
-= JOBS = 8 `[invented]` (basis: F21-W5 saturation analysis — 8 parallel compaction streams
-saturate the LLM throughput without exceeding rate limits). Serialisation = ordered append +
-dense-prefix CAS (copy OptMem's `tree_put`: refuses unless `count == lo//size`). The CAS
-check and the write MUST be in the same synchronous section — `streamSimple` awaits between
-check and write, so an explicit **write mutex** serialises them. Max spend = 1000 calls/day cap. `[R3 §3]`
+`@smol` via `streamSimple` — a **root export of `@oh-my-pi/pi-ai`** (`pi-ai/src/index.ts:43`, K21),
+imported as `import { streamSimple } from "@oh-my-pi/pi-ai"`. Concurrency = JOBS = 8 `[invented]`
+(basis: F21-W5 saturation analysis — 8 parallel compaction streams saturate the LLM throughput
+without exceeding rate limits). Serialisation = ordered append + dense-prefix CAS (copy OptMem's
+`tree_put`: refuses unless `count == lo//size`). The CAS check and the write MUST be in the same
+synchronous section — `streamSimple` awaits between check and write, so an explicit **write mutex**
+serialises them.
+
+**Spend cap is a RATE, not a total** (K4): `compactionCallsPerDay = 20000` `[calibrate]`. The
+arithmetic that forces this: building one retention window costs ≈2N calls; with N =
+`logMaxRecords` = 5000 that is ≈10 000 calls. At the documented post rate (10 agents × 1 post / 2 s)
+the window turns over in **~17 min** (5000 records ÷ 5 posts/s ≈ 16.7 min). A cap below 2× the
+per-window demand makes the tree unbuildable — at the old 1000/day, one window took ~10 days to
+build while the window itself turned over 850× in that period. 20 000/day ≈ 2× the per-window
+demand, so one full rebuild per day is possible, and **the tree lags by design**: it is a
+rebuildable cache (T1), the raw log stays authoritative (T2), and the raw tail covers the gap (T3).
+When the cap is hit, compaction pauses until the next day; readers never block (T3). `[R3 §3]`
 
 **Write mutex across `await`** (T2): the mutex is a promise chain, not a lock:
 ```ts
@@ -570,11 +743,13 @@ It calls `streamSimple(model, context, options)` where `context` is a
 followed by the raw records for the block. **Error policy**: retry up to 3 times
 `[invented]`; if all retries fail, skip the node (leave it unbuilt) and continue
 to the next pending block — do NOT pause the whole tree. A skipped node is simply
-absent; readers fall back to the raw log (T3).
+absent; readers fall back to the raw log (T3). `streamSimple` is a **root export** of
+`@oh-my-pi/pi-ai` (`pi-ai/src/index.ts:43`), so no deep import is required (K21) — the only
+residual risk is that the host's root export set changes across versions (RISK R23).
 
 **Cost** `[R3 §5]`: one LLM call per block. Total blocks over N messages ≤ 2N. Free nodes
-(source already fits TREE_REC) cost nothing. When compaction lags: agents read raw tail
-without waiting; late joiners get `gap` + raw-log fallback. `[R3 §5]`
+(source already fits TREE_REC) cost nothing. When compaction lags (including at the daily rate
+cap), agents read the raw tail without waiting; late joiners get `gap` + raw-log fallback. `[R3 §5]`
 
 **Advisory nature** (S6): cold-tree summaries are ADVISORY. Agents verify against the raw log
 before acting. Every tree node records its covered `[lo,hi)` seq range so the agent knows
@@ -585,7 +760,7 @@ upward, dropping the target and all ancestors. The log is never touched. Rebuild
 re-running compaction. `[R3 §4]`
 
 **Why v1 ships the cold tree anyway** (M-13): the cold tree costs ~400 lines, a background
-job, a write mutex, and a deep import for an advisory, non-critical-path feature. A raw tail
+job, a write mutex, and a host-version dependency for an advisory, non-critical-path feature. A raw tail
 plus `read since=` already serves late joiners. **Decision: ship it in v1.** The user asked for
 it explicitly; late joiners get a bounded 96-line view instead of a `gap` record and a raw-log
 scavenger hunt; and the tree is the only way to answer "what happened in the last week?" without
@@ -595,15 +770,24 @@ the fallback is to gate it behind a `coldTreeEnabled` flag and ship the raw-tail
 path only — but that is a v2 decision, not a v1 blocker.
 
 **Pruning job** (S5): a background job (interval: 60000 ms `[invented]`) enforces both
-`logMaxRecords` and `logMaxAgeMs`. It caps the in-memory `records` array and appends a `gap`
-record on drop. The job runs in the main session via `ctx.setInterval`.
+`logMaxRecords` and `logMaxAgeMs`. It caps the **in-memory `records` array only** (K19) and appends
+a `gap` record on drop. **The JSONL file is never truncated** — it is the durable log (T2); replay
+cost therefore grows without bound (K19, §3.3). The job runs in the main session via `ctx.setInterval`,
+refcounted like every other room timer (I4).
+
+**Three `ctx.setInterval` jobs, all refcounted, all main-session (I4, R11, R28):**
+| Job | Interval | Where | Effect |
+|---|---|---|---|
+| Claim-expiry sweep (K3) | **5 s** `[calibrate]` | §3.4 | `expireStale` → `release{reason:"expired"}` → promote oldest waiter → T0 notice |
+| Log pruning (S5) | 60 s `[invented]` | §3.6 | cap in-memory `records`, append `gap` on drop |
+| Compactor | tick | §3.6 | build pending tree nodes, bounded by `compactionCallsPerDay` |
 
 **Invariants** `[R3 §6]`:
 - **T1** the tree is rebuildable from the log.
 - **T2** the raw log stays authoritative.
 - **T3** no agent blocked on compaction.
 - **T4** one node per range (dense prefix).
-- **T5** max spend cap (1000 calls/day).
+- **T5** max spend **rate** cap: `compactionCallsPerDay = 20000` `[calibrate]` (§3.6, §5.2, K4).
 
 ---
 
@@ -613,31 +797,41 @@ Four tools total: one op-dispatched `room` tool + three wait tools. (Four wait t
 wrong: three distinct intents must not hide behind one name, and `interruptible` is per-tool
 `[R2 §B]`.)
 
-### 4.0 Registration skeleton (all five tools share this)
+### 4.0 Registration skeleton (all four tools share this)
 
 ```ts
 // src/tools/room.ts
 import type { ExtensionAPI, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
+import type { z as zType } from "zod";
+
+// K13 — type each tool's params explicitly. A bare `const tool: ToolDefinition = {...}` erases
+// TParams, so `params.op` is `unknown` inside execute. Annotate the params object and let the
+// tool literal infer its TParams; never annotate the whole literal as `ToolDefinition`.
+const roomParams = (z: typeof zType) => z.object({ /* §4.1 */ });
+type RoomParams = zType.infer<ReturnType<typeof roomParams>>;   // → params.op is the op union
 
 export function registerRoomTool(pi: ExtensionAPI): void {
   const z = pi.zod;                                  // injected schema builder [F15 §Q5, hello.ts:9]
-  const tool: ToolDefinition = {
+  pi.registerTool({
     name: "room",
     label: "Room",
-    description: ROOM_DESCRIPTION,                   // §8 routing rule + op docs
-    parameters: z.object({ /* §4.1 */ }),
+    description: ROOM_DESCRIPTION,                   // K16 — model-facing; §4.0.1
+    parameters: roomParams(z),
     loadMode: "essential",                           // RISK R3: discoverable tools are NOT active [F18 §5]
     approval: "read",                                // matches native wait.ts:57
     strict: true,
-    async execute(toolCallId, params, signal, onUpdate, ctx) { /* … */ },
+    async execute(toolCallId, params: RoomParams, signal, onUpdate, ctx) { /* … */ },
     renderCall:   renderRoomCall,                    // §7.5
     renderResult: renderRoomResult,
     describeCall: describeRoomCall,
     describeResult: describeRoomResult,
-  };
-  pi.registerTool(tool);
+  });
 }
 ```
+
+The same pattern applies to the three wait tools: `WaitForAgentParams`, `WaitForMessageParams`,
+`WaitForClaimParams`, each `z.infer`red from its own schema (§4.2–§4.4), each passed as the explicit
+type of `execute`'s `params` argument (K13).
 
 **Exact `execute` argument order is `(toolCallId, params, signal, onUpdate, ctx)`** —
 `wrapper.ts:116-127` calls `definition.execute(toolCallId, params, signal, onUpdate, ctx)`
@@ -651,45 +845,100 @@ top-level. The room and wait tools are registered `"essential"` because agents m
 directly. If `essential` is ever refused, **fail loudly at registration** — do NOT fall back
 to `pi.setActiveTools([...])` (that replaces the user's whole active set, `session-tools.ts:1734-1744`).
 
+### 4.0.1 Model-facing `description` for every tool (K16)
+
+Every tool carries a `description` the model reads. All four are written so the tool's purpose is
+decidable from the description alone — the waited-on thing is the first clause in each wait tool.
+
+```ts
+export const ROOM_DESCRIPTION = `
+Post to and read the shared room for this session tree: a topic-based claim board plus a bounded
+chat stream. Use it for coordination artifacts several agents must see — claims, releases, shared
+findings, status — NOT for private redirection (use agent://<id> for one recipient; see the
+room-vs-direct routing rule in your prompt).
+Ops: join (first call; mints your cursor), read (records after your cursor), post (send to a topic),
+claim/release (exclusive ownership of "<topic>/<key>" with a mandatory TTL), board (claims + roster +
+per-agent lag), topics, mute/unmute, tree/zoom (cold-tree views), recall (regex over the raw log).
+Before starting work another agent might also start, claim it. Read the board first.`;
+
+export const WAIT_FOR_AGENT_DESCRIPTION = `
+Block until another AGENT changes status or leaves. Use this when you must wait on a peer agent's
+state (e.g. a worker finishing), NOT for room traffic (use wait_for_message) and NOT for a resource
+(use wait_for_claim). Bounded by timeout (default 30 s, max 30 min); returns
+outcome "event" | "timeout" | "aborted". Enumerate the agents you are waiting on explicitly.
+The native wait tool's "NEVER wait on other agents" guidance applies to that tool's own async jobs —
+this tool is the supported way to block on a peer, and it does not poll.`;
+
+export const WAIT_FOR_MESSAGE_DESCRIPTION = `
+Block until a new ROOM MESSAGE arrives that matches your filter (from a given agent, or any message
+that mentions you). Use this when you are waiting on room traffic; use wait_for_agent for a peer's
+status change and wait_for_claim for a resource lease. Bounded by timeout (default 30 s, max 30 min);
+returns outcome "event" | "timeout" | "aborted" plus the matched record. Prefer this over repeatedly
+calling room{op:"read"}.`;
+
+export const WAIT_FOR_CLAIM_DESCRIPTION = `
+Block until you acquire the CLAIM on "<topic>/<key>", or time out. When the holder releases, is
+reclaimed, or its TTL expires, the oldest waiter is resolved AND granted the lease. Use this when a
+peer holds a resource you need; use wait_for_message for chatter and wait_for_agent for peer status.
+Timeout is a normal outcome (acquired:false), not an error. Optional maxWaitMs bounds the wait.`;
+```
+
+The four are mutually distinguishable from the descriptions alone: room = act on the room;
+wait_for_agent = **a peer agent's status**; wait_for_message = **a room message**;
+wait_for_claim = **a resource lease**.
+
 ### 4.1 `room` — op-dispatched
 
 ```ts
-z.object({
+const roomParams = (z: typeof zType) => z.object({
   op: z.enum(["join","read","post","claim","release","board","topics","mute","unmute","tree","zoom","recall"]),
-  topic:    z.string().optional(),        // post/note/mute target
-  body:     z.string().optional(),        // post
+  topic:    z.string().optional(),        // post/mute target
+  body:     z.string().optional(),        // post — capped at maxBodyBytes (8 KiB, §3.3)
   mention:  z.array(z.string()).optional(),// post — agent ids → T0
   replyTo:  z.string().optional(),        // post — message id (thread)
   performative: z.enum(["inform","request","propose","accept","reject","query","failure"]).optional(),
   key:      z.string().optional(),        // claim/release — resource key within the topic
   ttl:      z.number().optional(),        // claim — lease ms; defaults to settings.claimTtlMs
   since:    z.number().optional(),        // read — seq cursor; defaults to the caller's cursor
-  limit:    z.number().optional(),        // read — default 100, max 1000 (Zulip's cap) [F14 §5]
+  limit:    z.number().optional(),        // read — default 50, max 200 (K20; see below)
   lo:       z.number().optional(),        // zoom — first seq in node (exclusive range)
   hi:       z.number().optional(),        // zoom — last seq + 1 (exclusive range)
   pattern:  z.string().optional(),        // recall — regex over raw log
-})
+});
+type RoomParams = zType.infer<ReturnType<typeof roomParams>>;   // K13
 ```
 
-| op | required args | effect | returns |
+Every op returns the uniform tool-result contract (§4.5): `content` (model-facing line) +
+`details` (structured payload, always carrying `ok`). The table gives the **`details` payload**.
+
+| op | required args | effect | `details` |
 |---|---|---|---|
-| `join` | — | register membership, mint a cursor at `logEnd-50` | digest (§5.4) + `cursor` |
-| `read` | `since?`, `limit?` | records after the cursor, bounded | `{ records, cursor, more }` |
-| `post` | `topic`, `body`, `mention?`, `replyTo?`, `performative?` | append `msg`; push only on mention | `{ id, seq, tier }` |
+| `join` | — | register membership, mint a cursor at `logEnd-50` | `{ ok, digest, cursor }` |
+| `read` | `since?`, `limit?` | records after the cursor, bounded | `{ ok, records, cursor, more, tokens }` |
+| `post` | `topic`, `body`, `mention?`, `replyTo?`, `performative?` | append `msg`; push only on mention | `{ ok, id, seq, tier }` |
 | `claim` | `topic`, `key`, `ttl?` | grant or return holder | `{ ok, holder?, expiresAt? }` |
 | `release` | `topic`, `key` | drop a claim the caller holds | `{ ok }` |
-| `board` | — | current claims + roster + per-agent lag | compact view |
-| `topics` | — | topic list with unread counts | `{ topics: [{topic, unread, lastSeq}] }` |
+| `board` | — | current claims + roster + per-agent lag | compact view (below) |
+| `topics` | — | topic list with unread counts | `{ ok, topics: [{topic, unread, lastSeq}] }` |
 | `mute`/`unmute` | `topic?` (omit = whole room) | per-agent mute set | `{ ok }` |
-| `tree` | — | show current `cover()` tiling: which nodes, which seq ranges, raw vs compressed | `[{lo, hi, size, raw, summary?}]` |
-| `zoom` | `lo`, `hi` | descend into a node's two children (one level); each child raw (size 1) or summary | `[{lo, hi, size, raw, text}]` |
-| `recall` | `pattern` | regex search over raw log (newest first, cap 100) | `{ matches: [{seq, record}] }` |
+| `tree` | — | show current `cover()` tiling: which nodes, which seq ranges, raw vs compressed | `{ ok, blocks: [{lo, hi, size, raw, summary?}] }` |
+| `zoom` | `lo`, `hi` | descend into a node's two children (one level); each child raw (size 1) or summary | `{ ok, children: [{lo, hi, size, raw, text}] }` |
+| `recall` | `pattern` | regex search over raw log (newest first, cap 100) | `{ ok, matches: [{seq, record}] }` |
+
+**`read` is budget-routed, not free** (K20): `limit` defaults to **50** and is capped at **200**,
+not 1000. At 1000 records a reply costs ≈97 k tokens — ~47× the T1 per-turn budget (B=2048, §5.2) —
+which would blow the context on the first read. `read` also **routes its result through the
+injection budget**: the returned `records` are truncated to `maxT1Tokens` (2048) by the same
+oldest-first + summary-line rule as §5.2, and `details.tokens` reports the cost actually returned.
+The full records remain available via `since=<seq>` + `zoom` on the cold tree. A `read` at the bound
+(limit 200) is ≈19 k tokens and is **already truncated** to 2048 by the budget — the cap is a
+guard against a pathological single call, not the primary control.
 
 `resource` canonical form is `"<topic>/<key>"` — the same string `wait_for_claim` takes (§4.4).
 
 **`read` + compressed node** (minor): when `since` lands inside a compressed (cold-tree)
 node, `read` returns the node's summary text plus a `zoom` hint:
-`{ records: [{ v:1, seq:<nodeLo>, kind:"note", body:"<summary>", _zoomHint:{lo,hi} }], cursor, more }`.
+`details.records: [{ v:1, seq:<nodeLo>, kind:"note", body:"<summary>", _zoomHint:{lo,hi} }]`.
 The agent then calls `room{op:"zoom", lo, hi}` to descend. The raw records are never
 materialized by `read` — the summary is the bounded view.
 
@@ -714,11 +963,12 @@ means "this block's summary is the raw text, not a compression."
 - `hi - lo` is a power of two (the tree is binary),
 - `lo` is aligned: `lo % (hi - lo) === 0`,
 - `0 <= lo < hi <= N` (within the log).
-If any check fails, return `{ ok:false, error:"invalid zoom range" }` — never throw.
+If any check fails, return `content` + `details:{ ok:false, error:"invalid zoom range" }` — never throw.
 
-**`board` return shape** (minor):
+**`board` return shape** (minor), inside `details`:
 ```ts
 {
+  ok: true;
   claims: Array<{ resource: string; holder: string; ttlMs: number; expiresAt: number;
                   acquiredAt: number; contended: number }>;
   roster: Array<{ agentId: string; status: string; cursor: number; lag: number;
@@ -732,59 +982,73 @@ after the first call — it returns the same digest and cursor without appending
 second `member{action:"join"}` record.
 
 **`release` error cases** (minor):
-- Caller is not the holder → `{ ok:false, error:"not holder", holder:<currentHolder> }`.
-- Resource is unknown (no claim exists) → `{ ok:false, error:"unknown resource" }`.
-Both return normally; neither throws.
+- Caller is not the holder → `details:{ ok:false, error:"not holder", holder:<currentHolder> }`.
+- Resource is unknown (no claim exists) → `details:{ ok:false, error:"unknown resource" }`.
+Both return normally (with a `content` line); neither throws.
 
 ### 4.2 `wait_for_agent`
 
+`description: WAIT_FOR_AGENT_DESCRIPTION` (§4.0.1).
+
 ```ts
-z.object({
+const waitForAgentParams = (z: typeof zType) => z.object({
   agents:  z.array(z.string()),               // REQUIRED — enumerate explicitly
   timeout: z.number().optional(),            // ms; default 30000, min 1000, max 1800000
   require: z.enum(["any","all"]).optional(), // default "any"
-})
+});
+type WaitForAgentParams = zType.infer<ReturnType<typeof waitForAgentParams>>;   // K13
 ```
 
 - Blocks in-tool; **1800000 ms = omp's `WAIT_MAX_MS = 30 * 60_000`** `[wait.ts:25]`; 30000 ms default =
   Codex's `DEFAULT_WAIT_TIMEOUT_MS` `[R2 §B]`.
 - `interruptible: true` — a T0 event cuts it `[R2 §B]`.
 - Resolves from `AgentRegistry.global().onChange` on the matching `status_changed`/`removed` events
-  `[F18 §3]`; `require:"all"` waits for every named agent to leave `running`.
+  `[F18 §3]`; `require:"all"` waits for every named agent to leave `running`. The unsubscribe
+  returned by `onChange` is captured and called in `finally` (K10) — never leaked.
 - **To wait on any agent**, the caller enumerates `AgentRegistry.global().list().map(r => r.id)` explicitly.
 - **Progress heartbeat** (U5): `onUpdate` fires every 500 ms `[invented]` with a `renderCall` showing
   `"Waiting for … (elapsed Ns)"`.
-- **Abort** (U5): returns `{outcome:"aborted", useless:true}` and never throws.
-- Result: `{ outcome: "event" | "timeout" | "aborted", agents: [{id, status, activity?}] }`.
+- **Abort** (U5): returns `details:{ ok:true, outcome:"aborted" }` with `useless:true` and never throws.
+- Result (K1): `content:[{type:"text", text:"…"}]`, `details:{ ok:true, outcome: WaitOutcome, agents:[{id, status, activity?}] }`.
 
 ### 4.3 `wait_for_message`
 
+`description: WAIT_FOR_MESSAGE_DESCRIPTION` (§4.0.1).
+
 ```ts
-z.object({
+const waitForMessageParams = (z: typeof zType) => z.object({
   from:    z.string().optional(),
   mention: z.boolean().optional(),           // default false — only T0 mentions
   source:  z.enum(["room"]).optional(),      // v1 ships only source:"room" (U4)
   timeout: z.number().optional(),            // ms; default 30000, max 1800000
-})
+});
+type WaitForMessageParams = zType.infer<ReturnType<typeof waitForMessageParams>>;   // K13
 ```
 
-- Default `source:"room"` waits on the **room store's** change listener for a new `msg` record
-  matching `from`/`mention`. This is the plugin's own store, so there is no double-delivery risk.
+- Default `source:"room"` waits on the **room store's** change listener (`store.addListener`, K10)
+  for a new `msg` record matching `from`/`mention`. This is the plugin's own store, so there is no
+  double-delivery risk. The listener is removed in `finally` via the returned unsubscribe (K10).
 - **v1 ships only `source:"room"`** (U4). The `"irc"` mode is out of scope (§1.2).
 - **Progress heartbeat** (U5): `onUpdate` fires every 500 ms `[invented]` with a `renderCall` showing
   `"Waiting for … (elapsed Ns)"`.
-- **Abort** (U5): returns `{outcome:"aborted", useless:true}` and never throws.
-- Result: `{ outcome: "event" | "timeout" | "aborted", message?: RoomRecord }`.
+- **Abort** (U5): returns `details:{ ok:true, outcome:"aborted" }` with `useless:true` and never throws.
+- Result (K1): `content:[{type:"text", text}]`, `details:{ ok:true, outcome: WaitOutcome, message?: RoomRecord }`.
 
 ### 4.4 `wait_for_claim`
 
+`description: WAIT_FOR_CLAIM_DESCRIPTION` (§4.0.1).
+
 ```ts
-z.object({
+// src/tools/wait-for-claim.ts — K11: declared ONCE, here; imported by delivery/tiers/governor
+export type WaitOutcome = "event" | "timeout" | "aborted";
+
+const waitForClaimParams = (z: typeof zType) => z.object({
   resource: z.string(),                      // "<topic>/<key>"
   timeout:  z.number().optional(),           // ms; default 20000, min 1000, max 300000
   ttl:      z.number().optional(),           // lease ms granted if free; default 300000
-  maxWaitMs: z.number().optional(),         // optional livelock guard (S7)
-})
+  maxWaitMs: z.number().optional(),          // optional livelock guard (S7)
+});
+type WaitForClaimParams = zType.infer<ReturnType<typeof waitForClaimParams>>;   // K13
 ```
 
 - **20000 ms default = SQS's hard maximum long poll**, the largest wait any well-behaved request/reply
@@ -793,26 +1057,69 @@ z.object({
   waiter's queue position and can livelock a hot claim `[R2 §B]`.
 - **Livelock risk** (S7): a hot claim can livelock if the waiter's queue position is repeatedly
   dropped. Add optional `maxWaitMs` to bound the wait.
-- Timeout is a **normal outcome, not an error** (`{ outcome: "timeout", acquired: false }`), the SQS
-  empty-list / Redis nil shape `[R2 §B]`.
-- Implementation: in-store condition variable; on `release`/`reclaim`/expiry, the oldest waiter for
-  that resource is resolved **and granted the lease** with its `ttl` →
-  `{ outcome: "event", acquired: true, claim: { resource, holder: <waiterAgentId>, ttlMs, expiresAt } }`.
+- Timeout is a **normal outcome, not an error**
+  (`details:{ ok:true, outcome:"timeout", acquired:false }`), the SQS empty-list / Redis nil shape `[R2 §B]`.
+- Implementation: in-store condition variable; on `release`/`reclaim`/**expiry** (§3.4 claim-expiry
+  sweep, K3), the oldest waiter for that resource is resolved **and granted the lease** with its `ttl` →
+  `details:{ ok:true, outcome:"event", acquired:true, claim:{ resource, holder:<waiterAgentId>, ttlMs, expiresAt } }`.
   If another agent takes the resource first (race between the release and a concurrent claim),
   the waiter is **re-queued** (moved to the back of the wait queue) — it does NOT fail and does
   NOT resolve with `acquired:false`. The waiter only resolves with `acquired:false` on timeout.
+- Result (K1): `content:[{type:"text", text}]`, `details:{ ok:true, outcome: WaitOutcome, acquired: boolean, claim? }`.
 
-### 4.5 Shared result contract
+### 4.5 Shared result contract (K1)
+
+**Every** tool — `room` and the three wait tools — returns this shape. It is not advisory: the host
+validates it.
 
 ```ts
-{ outcome: "event" | "timeout" | "aborted", ... }
+{
+  content: [{ type: "text", text: string }],     // model-facing summary. ALWAYS present.
+  details: { ok: boolean; outcome?: WaitOutcome; ...structured payload },
+  isError?: boolean,
+  useless?: boolean,
+}
 ```
 
-Discriminate on explicit `outcome`, never on field presence `[R2 §B]`. Set
-`useless: true` on both non-event paths so compaction can elide them (native `wait` sets it on
-abort only — `wait.ts:164-169`) `[R2 §B]`.
-**`outcome` is self-describing** (U8): the host does NOT read it — the agent discriminates on it.
-The host only sees the tool result as opaque data.
+**Why this exact shape (the host's rule, not a preference).** `pi-agent-core/src/agent-loop.ts:540-562`
+classifies the `execute()` return: if `rawContent` is not an array, the host coerces the result to
+`{ content: [{ type: "text", text: "Tool returned an invalid result: missing content array." }],
+details, isError: true }`. So a return without a `content` array reaches the model as an **error**,
+and the host reads `content`/`details`/`isError`/`useless` *before* the model ever sees it.
+The previous claim that "the host only sees the tool result as opaque data" was **false** and is
+deleted.
+
+Rules:
+- `content` is the model-facing line. **Always present**, on success and failure alike. See §4.5.1.
+- `details` carries **all** structured payload. `details.ok` is always present. The agent
+  discriminates on `details`, never on field presence in `content`.
+- `details.outcome` (`WaitOutcome`, K11) is self-describing (U8) — the **agent** discriminates on it;
+  the host does not interpret it, but it must still be inside `details` to survive the host's coercion.
+- Failures return `content` + `details:{ ok:false, error }`; **never throw from `execute`**.
+- `useless: true` on the non-event paths (`timeout`/`aborted`) so compaction can elide them
+  (native `wait` sets it on abort only — `wait.ts:164-169`) `[R2 §B]`.
+- `isError: true` is reserved for host-level failure (missing room file, corrupt log). A normal
+  tool-level miss is `details.ok:false` **without** `isError`.
+
+### 4.5.1 `content` is a rendered line, not a bare body (K17)
+
+`content[0].text` MUST carry the routing metadata the model needs to act, not just a payload dump:
+
+```
+[T0] room ⟵ agent-1 · topic:build · claim revoked (build/step) — release{reason:"reclaimed"}
+[T1] room ⟵ agent-2 · topic:auth · "found the null deref in session.ts:41"
+[T2] room ⟵ agent-3 · topic:docs · 3 new messages since seq 128
+```
+
+Rules:
+- The line carries **`from`**, **`topic`** (or `resource` for claim/release), the **tier badge**
+  (`T0`/`T1`/`T2`), and the **escaped body** — `escapeHarnessTags(sanitizeText(body))` (S1/S2, §5.3),
+  never the raw body.
+- For non-`msg` kinds the "body" is the derived sentence from §5.3 (`claim`/`release` → rendered
+  sentence; `member`/`gap` → status line).
+- A tool result (`room{op:"…"}`) uses the same rule: the `content` line names the op and the
+  salient fields (e.g. `room claim build/step → granted, expires in 4m 12s`), so a headless reader
+  (§7.6) still sees structured text.
 
 ---
 
@@ -853,8 +1160,49 @@ Maps onto omp's existing three delivery classes: `irc-bridge.ts:222-239` interru
 
 ```ts
 // src/attention/tiers.ts
-export function classify(record: RoomRecord, viewer: MemberState): "T0" | "T1" | "T2";
+// K11 — declared ONCE, here; imported by delivery.ts, governor.ts, panel.
+export type Tier = "T0" | "T1" | "T2";
+
+/** "<topic>/<key>" → "<topic>" (resourceKey's inverse, §2.1.2). */
+const topicOf = (resource: string) => resource.slice(0, resource.indexOf("/"));
+
+// K12 — EXHAUSTIVE over all 6 RoomRecord kinds. The switch has no default and returns on every
+// arm, so a new kind is a compile error rather than a silent T2 fall-through.
+export function classify(record: RoomRecord, viewer: MemberState): Tier {
+  switch (record.kind) {
+    case "msg":
+      if (record.mention?.includes(viewer.agentId)) return "T0";        // @mention → T0
+      if (record.replyTo && record.replyTo === viewer.lastMessageId) return "T0";  // reply to you
+      if (record.topic === viewer.heldTopic) return "T1";               // claim you hold on the topic
+      if (viewer.topics.has(record.topic)) return "T1";                 // followed topic
+      if (record.threadRoot && viewer.threadRoots.has(record.threadRoot)) return "T1";
+      return "T2";
+    case "claim":
+      if (record.resource === viewer.waitedResource) return "T1";       // M-8 waiter
+      if (viewer.topics.has(topicOf(record.resource))) return "T1";
+      return "T2";
+    case "release":
+      if (record.from === viewer.agentId) return "T0";                  // your claim revoked/expired
+      if (record.reason === "reclaimed") return "T0";                   // the T0 notice to the prev holder
+      if (record.reason === "expired") return "T0";                     // K3 sweep — T0 notice
+      if (record.resource === viewer.waitedResource) return "T1";       // wait_for_claim waiter
+      if (record.reason === "released" && viewer.topics.has(topicOf(record.resource))) return "T1";
+      return "T2";                                                      // K12: the missing case
+    case "note":                                                         // system-generated only
+      return viewer.topics.has(record.topic) ? "T1" : "T2";
+    case "member":                                                       // join/leave
+      return "T2";
+    case "gap":
+      return "T1";                                                       // K12: a promised notify, not T2
+  }
+}
 ```
+
+**`classify` is TOTAL (K12).** All six kinds are handled; `gap` → **T1** (the plan promised the
+affected agents are notified, so a `gap` cannot silently sit at T2), and the previously missing
+`release{reason:"released"}` arm is present. No kind falls through. `msg` is the only kind that can
+reach T0 from `mention`/`replyTo`; `release` reaches T0 for the previous holder (revoked / expired /
+reclaimed) — this is the T0 notice the claim-expiry sweep fires (§3.4, K3).
 
 ### 5.2 Caps — the numbers
 
@@ -867,21 +1215,29 @@ export function classify(record: RoomRecord, viewer: MemberState): "T0" | "T1" |
 | Post rate limit (srTCM CIR) | **1 post / 2 s** | RFC 1459 §8.10; Slack 1/s/channel `[F14 §4]` |
 | Burst capacity (CBS) | **10** | Slack's documented burst tolerance `[F14 §4]` |
 | T0 pending interrupts | **1**, then queue-depth notice — **plugin-imposed**, NOT inherited (`IrcBridge.#interrupts` is unbounded) | `[F14 §3]` |
-| Log retention | **5000 records or 7 days**, never below `min(cursor)` | Kafka `retention.ms`/`cleanup.policy`, NATS `MaxMsgs`+`MaxAge` `[F14 §6]` |
+| Log retention (memory only — file never truncated, K19) | **5000 records or 7 days**, never below `min(cursor)` | Kafka `retention.ms`/`cleanup.policy`, NATS `MaxMsgs`+`MaxAge` `[F14 §6]` |
 | Mailbox cap | native `MAILBOX_CAP = 100`, made **tier-aware** | `[F14 §6]`, `[F0]` |
 | Cold tree raw tail (**R**) | **50 messages** | Matches §3.5 join cursor `[R3 §2]` |
 | Cold tree budget (**B**) | **96 lines** | OptMem `WAKE_LINES=96` `[R3 §2]` |
 | Tree node size (**TREE_REC**) | **288 bytes** | OptMem `TREE_REC=288` `[R3 §1]` |
 | Compaction concurrency (**JOBS**) | **8** `[invented]` | F21-W5 saturation analysis — 8 parallel streams saturate LLM throughput `[R3 §3]` |
-| Compaction max spend | **1000 calls/day** | New invariant (no prior system has one) `[R3 §3]` |
+| Compaction max spend (**rate**, not total) | **20000 calls/day** `[calibrate]` | K4 — ≈2× the per-window demand (≈2N ≈ 10 000 calls); a lower cap makes the tree unbuildable `[R3 §3]` |
+| Claim-expiry sweep interval | **5 s** `[calibrate]` | K3 — the only producer of `release{reason:"expired"}`; refcounted, main session |
+| Max body bytes | **8192 (8 KiB)** `[calibrate]` | K19 — enforced in `post`; `logMaxRecords` bounds count, this bounds size |
 
 **Injection cap** — oldest-first, then one summary line:
 `+N more room messages (M mention you) — read with room{op:"read", since:<cursor>}` `[F14 §3]`.
 T0 is exempt from the cap but carries its own 1-pending bound `[F14 §3]`.
+`room{op:"read"}` results are routed through this same budget (K20, §4.1).
 **Oversized message** (N7): a single message exceeding B=2048 tokens is truncated to a head +
 read handle (`… truncated, read with room{op:"read", since:<seq>}`). The full body is
 never lost from the log — `read since=<seq>` returns the complete record. A `local://`
 handle is also returned so the agent can read the raw file if needed.
+
+**Claim-expiry sweep** (K3, §3.4): a third refcounted `ctx.setInterval` job (5 s `[calibrate]`, main
+session) calls `expireStale` over all claims, appends `release{reason:"expired"}`, promotes the oldest
+waiter, and fires the T0 notice. Without it `release{reason:"expired"}` is **unreachable** and a
+long-TTL claim can be squatted forever. See the three-job table in §3.6.
 
 **Rate limit** — RFC 2697 srTCM, per agent, **room posts only**; T0 DMs are exempt (MQTT v5 exempts
 non-PUBLISH control packets; Slack exempts event delivery from write limits) `[F14 §4]`.
@@ -904,20 +1260,48 @@ promotes to T0. Auto-unmute on participation (Zulip verbatim) `[F14 §7]`.
 
 ```ts
 // src/attention/delivery.ts
-export async function deliver(pi: ExtensionAPI, ctx: ExtensionContext, target: string, record: RoomRecord, tier: Tier) {
+export async function deliver(pi: ExtensionAPI, ctx: ExtensionContext,
+                             target: string, record: RoomRecord, tier: Tier) {
   if (tier === "T2") { bumpCursor(target, record.seq); return; }        // never injected
-  const safeBody = escapeHarnessTags(sanitizeText(record.body));         // S1 + S2
+
+  // K2 — dispatch on record.kind FIRST and derive the body per kind. `record.body` exists only on
+  // `msg`/`note`; reading it before the dispatch is TS2339 and a runtime TypeError on exactly the
+  // T0 events ("your claim revoked/contended"). Only the RESULTING string is escaped.
+  const body = roomBodyOf(record);                                     // plain text, unescaped
+  const safeBody = escapeHarnessTags(sanitizeText(body));               // S1 + S2
+  const line = renderLine(record, safeBody, tier);                      // K17 — from · topic · badge
   if (target === ctx.agent.id) {
-    pi.sendMessage({ customType: cardTypeFor(record), content: safeBody,
+    pi.sendMessage({ customType: cardTypeFor(record), content: line,
                      display: true, details: record }, { deliverAs: tier === "T0" ? "steer" : "aside" });
     return;
   }
   const ref = AgentRegistry.global().get(target);
   if (!ref?.session) return;                                            // parked/aborted → skip
   await ref.session.sendCustomMessage(
-    { customType: cardTypeFor(record), content: safeBody, display: true, details: record },
+    { customType: cardTypeFor(record), content: line, display: true, details: record },
     { deliverAs: tier === "T0" ? "steer" : "aside" },
   );
+}
+
+/** K2 — total over all 6 kinds; never reads a field the kind does not have. */
+function roomBodyOf(r: RoomRecord): string {
+  switch (r.kind) {
+    case "msg":
+    case "note":    return r.body;                                     // the only kinds with `body`
+    case "claim":   return `${r.from} claimed ${r.resource} (ttl ${Math.round(r.ttlMs / 1000)}s)`;
+    case "release": return `${r.from} released ${r.resource} — ${r.reason}`;
+    case "member":  return `${r.from} ${r.action === "join" ? "joined" : "left"} the room`;
+    case "gap":     return `${r.skipped} record(s) skipped (${r.reason})`;
+  }
+}
+
+/** K17 — the model-facing line: from · topic/resource · tier badge · escaped body. */
+function renderLine(r: RoomRecord, safeBody: string, tier: Tier): string {
+  const where = r.kind === "claim" || r.kind === "release" ? `resource:${r.resource}`
+              : r.kind === "member" ? "presence"
+              : r.kind === "gap"    ? "retention"
+              : `topic:${r.topic}`;                      // msg | note
+  return `[${tier}] room ⟵ ${r.from} · ${where} · ${safeBody}`;
 }
 ```
 
@@ -929,8 +1313,10 @@ export async function deliver(pi: ExtensionAPI, ctx: ExtensionContext, target: s
 - Never pass `triggerTurn` for T2 — idle + `display:true` renders without starting a turn
   `types.ts:1576-1591` `[F19 §10]`.
 - **T0 `steer` when idle** (N3): starts a turn, not just a wake. Same as T1 aside when idle (N2).
-- **Harness-tag escaping** (S1): `escapeHarnessTags()` on the body before it reaches `sendMessage`
-  and on each rendered line. Native precedent: `src/session/irc-bridge.ts:189`,
+- **Kind-first dispatch is mandatory** (K2): `roomBodyOf` is exhaustive over the 6 kinds, so no path
+  touches a field its kind lacks. `record.body` is read **only** inside the `msg`/`note` arms.
+- **Harness-tag escaping** (S1): `escapeHarnessTags()` on the derived body before it reaches
+  `sendMessage` and on each rendered line. Native precedent: `src/session/irc-bridge.ts:189`,
   `src/session/harness-tags.ts:14-16`.
 - **ANSI sanitisation** (S2): `sanitizeText()` from `@oh-my-pi/pi-utils` (`sanitize-text.ts:23-38`)
   on every rendered line.
@@ -939,7 +1325,8 @@ export async function deliver(pi: ExtensionAPI, ctx: ExtensionContext, target: s
 
 ```ts
 // src/onboarding/digest.ts
-export function buildDigest(store: RoomStore, viewer: MemberState, budgetTokens = 800): string;
+// K5 — budget applies to the DIGEST ONLY; the routing rule is appended separately and is NOT counted.
+export function buildDigest(store: RoomStore, viewer: MemberState, budgetTokens = 2500): string;
 ```
 
 Content order `[R2 §Components 7]`, `[F8]`:
@@ -949,18 +1336,38 @@ Content order `[R2 §Components 7]`, `[F8]`:
 3. Open claims — resource, holder, remaining TTL (top 10).
 4. Bounded backlog — two-region view `[R3 §2]`: raw tail (last R=50 records, T0/T1 first) + cold tree tiled at B=96 lines. If a cold node is unbuilt, show `gap` + raw-log fallback.
 5. Your cursor + lag.
-6. The routing rule block (§8).
-7. Config — the active caps so the agent knows the budget.
+6. Config — the active caps so the agent knows the budget.
 
-Hard cap: **800 tokens** for the digest (native anchors: `memory.summaryInjectionTokenLimit = 5000`
-and the 32-peer roster cap `[R2 §D]`).
+**The routing rule is NOT part of the digest** (K5). `buildDigest` returns items 1–6 only; the
+`before_agent_start` hook appends `routing-rule.md` (§8) **after** the digest. The two are separate
+prompt blocks, so the cap below never truncates the routing rule — this resolves the §5.4 vs §9-P4
+contradiction.
+
+Hard cap: **2500 tokens** `[calibrate]` for the digest (K5). The earlier 800-token cap was
+unsatisfiable: the specified content measures ≈2,700–3,650 tokens, and the truncation order bottoms
+out at a ~665-token floor of untruncatable boilerplate (room identity + cursor/lag + config), so 800
+forced the digest to lose content it must keep. 2500 sits inside the measured band. Native anchor for
+scale: `memory.summaryInjectionTokenLimit = 5000` and the 32-peer roster cap `[R2 §D]`.
 
 **Digest truncation order** (U8): if the digest exceeds the budget, truncate in this order:
 1. Cold-tree backlog (drop oldest nodes first)
 2. Raw-tail backlog (drop oldest records first)
 3. Open claims (drop lowest-TTL first)
 4. Roster (drop idle agents first)
-Never truncate the routing rule block or the cursor/lag line.
+Never truncate the cursor/lag line or the config line. (The routing rule is not in the digest at all.)
+
+**Escaping in the digest** (K22, V1): every **room-authored** string that enters the digest — message
+bodies, note bodies, claim resource keys, agent ids, topic names, tree summaries — is passed through
+`escapeHarnessTags(sanitizeText(...))` before concatenation. Without this, a room post is a
+system-prompt injection vector. The whole agent-derived region (roster + backlog + claims) is wrapped
+in an explicit marker:
+```
+<room-authored untrusted="true">
+… escaped room content only …
+</room-authored>
+```
+so the model can see the boundary between harness text and untrusted room content. Tree summaries are
+**model-generated and untrusted too** — escape them identically.
 
 **Room op cheat-sheet** (U8):
 | Op | Use when |
@@ -1130,17 +1537,19 @@ new message path.
   controller forwards `overlayOptions` verbatim and calls `onHandle(handle)`
   `[F16 §9]`. `showOverlay` sets focus automatically and returns
   `OverlayHandle { hide(); setHidden(hidden); isHidden() }` (`tui.ts:1217-1266`).
-- **Refresh**: three sources, matching agent-hub — (1) `registry.onChange` + the room store's
-  module-level listener set, coalesced through a debounce; (2) a slow unref'd `ctx.setInterval`
-  for relative-age text; (3) `requestRender()` after any local mutation
-  (`agent-hub.ts:496-504,1499-1511`) `[F16 §9]`. `requestRender(force?, options?)` is coalesced via
-  `#renderRequested`; `requestComponentRender(component)` is the scoped variant
-  (`tui.ts:2525-2572`).
+- **Refresh**: three sources, matching agent-hub — (1) `registry.onChange` + `store.addListener`
+  (§3.1), coalesced through a debounce; (2) a slow unref'd `ctx.setInterval` for relative-age text;
+  (3) `requestRender()` after any local mutation (`agent-hub.ts:496-504,1499-1511`) `[F16 §9]`.
+  `requestRender(force?, options?)` is coalesced via `#renderRequested`; `requestComponentRender(component)`
+  is the scoped variant (`tui.ts:2525-2572`).
+- **Unsubscribe** (K10): capture BOTH unsubscribes — `const offRegistry = registry.onChange(…)` and
+  `const offStore = store.addListener(…)` — and call them in `dispose()`. Both are per-mount, so a
+  panel opened and closed repeatedly must not accumulate listeners.
 - **Close**: `Esc` → `done(result)` → controller calls `component.dispose?.()`, hides the overlay,
   restores the editor, refocuses it, resolves the promise
   (`extension-ui-controller.ts:1144-1155,1198-1204`) `[F16 §9]`.
 - **Disposal is explicit**: `showOverlay().hide()` and `TUI.stop()` never call `dispose()`
-  `[F16 §9]`; make `dispose()` idempotent and clear timers + unsubscribe there.
+  `[F16 §9]`; make `dispose()` idempotent and clear timers + call both unsubscribes (K10) there.
 - **Mode fallback**: `custom` is unsupported in RPC (returns `undefined as never`) and a no-op
   without a UI context `[F16 §11]`. Guard with `if (!ctx.hasUI || ctx.mode !== "tui") return;`.
   **RISK R5** — `hasUI === true` does not guarantee `custom` works `[F16 §11]`; wrap in try/catch and
@@ -1354,63 +1763,72 @@ If you have nothing to do but wait for a peer, a claim, or a room message, BLOCK
 Each phase ends with an acceptance check that a later implementer runs before moving on.
 
 ### P0 — Scaffolding, manifest, store core
-**Files**: `package.json`, `tsconfig.json`, `src/index.ts`, `src/store/{schema,log,room-store,cursors}.ts`, `tests/store.test.ts`.
-**Work**: manifest §2.2; `tsconfig.json` §2.3; `openRoomLog`/`appendLine` §3.3; record schema §3.2; replay → in-memory projection; cursor map.
+**Files**: `package.json`, `tsconfig.json`, `src/env.d.ts`, `src/index.ts`, `src/ids.ts`, `src/store/{schema,log,room-store,claims,cursors,config}.ts`, `tests/store.test.ts`.
+**Work**: manifest §2.2; `tsconfig.json` §2.3; `roomIdFor`/`logPathFor` §2.1.2; `roomLogFd`/`appendLine` §3.3 (fd registry, K8); record schema §3.2 + `RoomRecordDraft`; `storeFor` registry + eviction (K9); replay → in-memory projection; cursor map.
 **Accept**: `bun test tests/store.test.ts` green —
 (a) 3 interleaved writers × 200 lines on one fd produce 600 parseable lines with zero torn lines;
 (b) `readSince(seq)` returns exactly the records after `seq`; (c) replay reconstructs `cursors` and `seq`;
-(d) `resolveLocalUrlToPath("local://room/r.jsonl", opts)` points inside `resolveLocalRoot(opts)`.
+(d) `logPathFor(root, roomId)` points inside `resolveLocalRoot(opts)` and equals what the store opened;
+(e) `storeFor(root)` returns the same store for the same root and a different one for another root;
+after the last session's `dispose()` the registry entry is gone and `closeRoomLog(root, roomId)` has run once (K8/K9).
 
 ### P1 — `room` tool + claim arbiter
 **Files**: `src/tools/room.ts`, `src/store/claims.ts`, `src/ids.ts`.
-**Work**: §4.1 ops; §3.4 arbiter; `loadMode:"essential"`.
+**Work**: §4.1 ops; §3.4 arbiter; `loadMode:"essential"`; `RoomParams` typed explicitly (K13); the claim-expiry sweep job (K3, 5 s, refcounted, main session) — `expireStale` → `release{reason:"expired"}` → promote oldest waiter → T0 notice; `maxBodyBytes` enforcement in `post` (K19).
 **Accept**: direct `session.getToolByName("room")!.execute(...)` calls —
-`claim(a,res)` grants; `claim(b,res)` returns `{ok:false, holder:a}`; `release(a,res)` then `claim(b,res)` grants;
+`claim(a,res)` grants; `claim(b,res)` returns `{details:{ok:false, holder:a}}`; `release(a,res)` then `claim(b,res)` grants;
 an expired-TTL claim is reclaimable and appends `release{reason:"reclaimed"}`; `board` shows holder+expiry;
+**with a short TTL and no waiter, the sweep appends `release{reason:"expired"}` within one sweep interval (K3)**;
+an oversized body is rejected with `details.ok:false` and no record appended (K19);
 the JSONL contains exactly the expected `claim`/`release` lines.
 
 ### P1b — Cold tree (binary summary tree)
 **Files**: `src/store/tree-store.ts`, `src/store/compactor.ts`, `tests/tree.test.ts`.
-**Work**: §3.6 tree store; `cover()` tiling; `getNode`/`putNode`/`forget`/`pending`; compactor job (`ctx.setInterval` + `streamSimple` with `@smol`); `room{op:"tree"}`, `room{op:"zoom"}`, `room{op:"recall"}` ops.
+**Work**: §3.6 tree store; `cover()` tiling; `getNode`/`putNode`/`forget`/`pending`; compactor job (`ctx.setInterval` + `streamSimple` from the `@oh-my-pi/pi-ai` ROOT export, K21); `room{op:"tree"}`, `room{op:"zoom"}`, `room{op:"recall"}` ops.
 **Accept**: `bun test tests/tree.test.ts` green —
 (a) `cover(1000, 96)` returns ≤ 96 blocks tiling `[0,1000)` with no gap or overlap;
 (b) `putNode` refuses out-of-order write (`count != lo//size` → `false`);
 (c) `forget(lo, hi)` truncates all level files from `lo//size` upward, log untouched;
 (d) `zoom(lo, hi)` returns two children (raw if size 1, summary otherwise);
 (e) compactor builds a pending node via `streamSimple` with `@smol` (mock the stream, assert called);
-(f) max spend cap: after 1000 calls, compactor pauses.
+(f) spend **rate** cap: after `compactionCallsPerDay` (20 000, K4) calls, the compactor pauses until the next day — and one full window (≈2N ≈ 10 000 calls) is still buildable inside the cap.
 
 ### P2 — Wait tools
 **Files**: `src/tools/wait-for-{agent,message,claim}.ts`.
-**Work**: §4.2–4.4; `interruptible` declared at runtime (RISK R9); `outcome` discrimination; `useless` on non-event paths.
+**Work**: §4.2–4.4; `interruptible` declared at runtime (RISK R9); the K1 result contract (`content` + `details`); `WaitOutcome` (K11); `useless` on non-event paths; unsubscribe the `AgentRegistry.onChange` and `store.addListener` handles in `finally` (K10); typed params per tool (K13); the four `description`s (K16).
 **Accept**: in two sessions — B's `wait_for_claim` starts first and resolves **only after** A claims;
-`wait_for_message` resolves on A's `post` with `mention:true`; each tool returns `outcome:"timeout"`
+`wait_for_message` resolves on A's `post` with `mention:true`; each tool returns `details.outcome:"timeout"`
 (not an error) when nothing happens inside a 1 s test timeout; aborting the session rejects cleanly
-and the promise settles.
+and the promise settles; **every result has a non-empty `content` array (K1)**; a leaked-listener check
+asserts the registry listener count returns to its pre-wait value after each wait settles (K10).
 
 ### P3 — Attention governor
 **Files**: `src/attention/{tiers,governor,delivery}.ts`, `tests/attention.test.ts`.
-**Work**: §5.1 classification; §5.2 caps; srTCM; coalesce; mute; gap records.
-**Accept**: `classify()` table test for all 12 trigger cases; 25 T2 records produce exactly one digest
+**Work**: §5.1 classification (exhaustive, K12); §5.2 caps (K4 rate, K3 sweep, K19 body cap); srTCM; coalesce; mute; gap records; kind-first `deliver()` (K2); `Tier` (K11).
+**Accept**: `classify()` table test for all 6 kinds × the trigger cases, incl. `gap → T1` and `release{reason:"released"}` (K12); 25 T2 records produce exactly one digest
 line; 11 T1 records inject 10 + one summary line; the token bucket emits green/yellow/red in order;
-a muted topic produces zero unread; a forced retention pass appends one `gap` record and notifies.
+a muted topic produces zero unread; a forced retention pass appends one `gap` record and notifies;
+**`deliver()` on a `claim` and a `release` record does not throw and emits a `content` line carrying
+`from`, `topic`/`resource` and the tier badge (K2/K17)**.
 
 ### P4 — Onboarding
 **Files**: `src/onboarding/{digest,routing-rule.md,hook}.ts`.
-**Work**: §5.4 digest; §8 prompt block; `before_agent_start` append; `session_shutdown` prune.
-**Accept**: a spawned subagent's effective prompt contains the digest + the routing rule; the digest is
-≤ 800 tokens (assert by counting); the hook is idempotent per agent (a second `before_agent_start` for
+**Work**: §5.4 digest (2500-token cap, routing rule EXCLUDED, K5); §8 prompt block appended AFTER the digest; escaping + the `room-authored untrusted` marker (K22); `before_agent_start` append; `session_shutdown` prune; the last session closes the fd and evicts the store (K8/K9).
+**Accept**: a spawned subagent's effective prompt contains the digest **followed by** the routing rule; the digest alone is
+≤ 2500 tokens (assert by counting) and the routing rule is present in full regardless of digest size (K5);
+an injected `</room-authored>`/harness-tag string in a room body arrives escaped (K22); the hook is idempotent per agent (a second `before_agent_start` for
 the same agent does not duplicate); `session_shutdown` completes well inside the 2 s budget.
 
 ### P5 — Panel
 **Files**: `src/panel/*.ts`, `src/commands/room-command.ts`.
-**Work**: §6.2–6.9.
+**Work**: §6.2–6.9; unsubscribe both listeners in `dispose()` (K10).
 **Accept**: `/room` opens a fullscreen overlay; `Esc` closes and the promise resolves; a new room post
 appears without a keypress (live refresh); at 80 cols `Tab` toggles chat↔board; `p` opens the composer
-and typing does not move the selection; `dispose()` is idempotent (call twice, no throw).
+and typing does not move the selection; `dispose()` is idempotent (call twice, no throw) and leaves no
+listener behind (K10).
 
 ### P6 — Inline cards + tool cards
-**Files**: `src/cards/{message-cards,tool-cards}.ts`.
+**Files**: `src/cards/{message-cards,body-lines,tool-cards}.ts`.
 **Work**: §7.2–7.7.
 **Accept**: a `room:message` card renders with the IRC-card shape; ctrl+o re-invokes the renderer with
 `expanded:true` and shows more lines; the card survives a session resume; a deliberately throwing
@@ -1418,10 +1836,11 @@ renderer falls back to the default card without hiding the message; `room`/wait 
 both `renderCall/renderResult` and `describeCall/describeResult`.
 
 ### P7 — Packaging polish
-**Files**: `skills/omp-agent-chatroom/SKILL.md`, README, `src/index.ts` feature gating.
-**Work**: `omp plugin link` instructions; feature flags; settings surface; `registerFlag("room-panel-key")`.
+**Files**: `skills/omp-agent-chatroom/SKILL.md`, README, `src/index.ts` (flags).
+**Work**: `omp plugin link` instructions; `registerFlag`/`getFlag` runtime toggles (K6 — there is no `pi.enabledFeatures`); settings surface via `local://room/config.json` + `src/store/config.ts`; `registerFlag("room-panel-key")`.
 **Accept**: `omp plugin link .` creates the symlink at `~/.omp/plugins/node_modules/omp-agent-chatroom`
-and a new session loads the extension; disabling the `panel` feature removes the panel but keeps the room tool.
+and a new session loads the extension; `--room-panel-key` is readable via `getFlag` and `""` disables the shortcut;
+**feature gating is documented as load-time only** (all three features point at `./src/index.ts`, so disabling `panel` does NOT remove the panel at runtime, K6).
 
 ### P8 — Integration + docs
 **Files**: `tests/e2e-room.test.ts`, README.
@@ -1443,7 +1862,7 @@ and a new session loads the extension; disabling the `panel` feature removes the
 | **R7** | `hello.ts` names the `execute` params `(_onUpdate, _ctx, _signal)`, which contradicts the wrapper | `hello.ts:18` vs `wrapper.ts:116-127` `[F19 §14]` | Follow the wrapper: `(toolCallId, params, signal, onUpdate, ctx)` |
 | **R8** | `IrcBus.wait` consumes the message (never reaches the inbox) and resolves the OLDEST waiter | `bus.ts:155-163,296-304` `[F0]`, `[F18 §3]` | v1 ships only `source:"room"`; `"irc"` is out of scope (§1.2) |
 | **R9** | `interruptible` is not in the typed `ToolDefinition` | `types.ts:669-744` has no `interruptible`; the loop reads `tool?.interruptible`; `applyToolProxy` copies own keys `[F18 §5]`, `[F0]` | Declare it on the object literal and cast; **do not rely on it for correctness** — every wait tool also observes `signal` directly and bounds its own timeout |
-| **R10** | Module-level singleton leaks across tests / across independent top-level sessions | `[F18 §5]` | `reset()` seam + key the store by the `local://` root; a store per root, not a bare global |
+| **R10** | Module-level singleton leaks across tests / across independent top-level sessions | `[F18 §5]` | `reset()` seam + `storeFor(root)` on a `globalThis` registry, evicted when the root's last session disposes (K9) |
 | **R11** | A session's `session_shutdown` clears that runner's timers — a room tick scheduled on a subagent dies when it finishes | probe: managed interval froze after `dispose()` `[F18 §4 d]` | Refcount background work per live session; clear only at zero; or run the tick from the main session only |
 | **R12** | `session_shutdown` handlers have a **2 s** budget, run concurrently, and are abandoned after a macrotask of grace | `SESSION_SHUTDOWN_HANDLER_TIMEOUT_MS = 2_000` `[F18 §4]` | All room mutations are synchronous (I1/I5), so shutdown only unsubscribes + clears timers — no flush |
 | **R13** | A late-loaded plugin has no shortcut wiring until the editor is rebuilt | `setupKeyHandlers()` runs only at init and after `setEditorComponent` `[F17 §2]` | Slash command is the primary route; treat the key as best-effort |
@@ -1456,14 +1875,17 @@ and a new session loads the extension; disabling the `panel` feature removes the
 | **R20** | `registerMessageRenderer` never runs without a UI, so renderer side effects are lost | `[F19 §13]` | Keep renderers pure; put all state mutation in the tool/command path |
 | **R21** | The native IRC card's body helper (`bodyLines`), glyph (`ircGlyph`) and age (`messageAge`) are **module-private** in `pi-tui/src/tools/wait.ts:474,478,487` | verified by export grep 2026-10-06 | Ship `src/cards/body-lines.ts` reproducing the documented behaviour (§7.4); use the exported `formatAge` from `@oh-my-pi/pi-utils` for age |
 | **R22** | `pi-tui` and `pi-coding-agent` subpath imports (`/chrome/overlay-box`, `/render/render-utils`, `/tools/wait`) are covered only by the `"./*"` wildcard export — deep, not public API | `pi-tui/package.json` exports map; all six specifiers probe-resolve 2026-10-06 | Prefer root exports (`@oh-my-pi/pi-tui` re-exports every component, `MouseRoutable`, `Ellipsis`, `truncateToWidth`); pin the host version and add an import smoke test |
-| **R23** | `streamSimple` from `@oh-my-pi/pi-ai` is a deep import, not public API | `bench-cli.ts:14`, `dry-balance-cli.ts:14` import it; no `omp://` doc lists it as stable | Wrap in try/catch; fall back to `runEphemeralTurn` with session model (slower but works); pin host version; add import smoke test |
-| **R24** | Compaction cost is unbounded without a cap | No max-spend cap in OptMem, OptChat, or omp `[F21.64]` | 1000 calls/day cap (§3.6 T5); when hit, compaction pauses until next day; expose cap in settings |
+| **R23** | `streamSimple` is a **root export** of `@oh-my-pi/pi-ai` (`pi-ai/src/index.ts:43`), but that export set is not a documented stable contract | `pi-ai/src/index.ts:43` (K21); no `omp://` doc pins the root export set | Import from the package root (K21); wrap the call in try/catch; fall back to `runEphemeralTurn` with the session model (slower but works); pin the host version; add a root-import smoke test |
+| **R24** | Compaction cost is unbounded without a cap | No max-spend cap in OptMem, OptChat, or omp `[F21.64]` | `compactionCallsPerDay = 20000` `[calibrate]` **rate** cap (§3.6 T5, §5.2, K4) — ≈2× the per-window demand (≈2N ≈ 10 000 calls); when hit, compaction pauses until next day and the raw tail covers the gap; expose the cap in settings |
 | **R25** | LLM summarisation is non-deterministic — two honest compactors produce different text | OpenAI: "not guaranteed" even with fixed seed `[F20.52]` | Single-writer compaction (one background job) eliminates divergence by construction; do NOT content-address the tree (hash difference carries no signal about which is right) |
 | **R26** | Cold tree falls behind under high message rate | No formula for JOBS from message rate; `JOBS >= rate × latency` is uncalibrated `[F21.71]` | Agents read raw tail without waiting; late joiners get `gap` + raw-log fallback; monitor compaction lag via `room{op:"board"}` |
 | **R27** | `forget` + rebuild is expensive for large trees | `tree_drop` truncates all level files from `lo//size` upward; rebuild requires re-running compaction for all affected nodes `[F20.16]` | Rebuild lazily (only when a node is read); batch `forget` calls; consider incremental rebuild (only affected branches) |
-| **R28** | `ctx.setInterval` auto-cleared on `session_shutdown` (2s budget) | `[F18 §4 d]` probe: managed interval froze after `dispose()` | Run compactor from the main session only; refcount per live session; clear only at zero (same as R11) |
-| **R29** | Harness-tag injection via room message body | `deliver()` passes `record.body` verbatim; no `escapeHarnessTags` | Apply `escapeHarnessTags()` on delivery + per rendered line (§5.3, §7.4). Native: `irc-bridge.ts:189`, `harness-tags.ts:14-16` |
-| **R30** | ANSI escape injection via room message body | Rendered lines not sanitised | Apply `sanitizeText()` from `@oh-my-pi/pi-utils` on every rendered line (§5.3, §6.3, §7.4) |
+| **R28** | `ctx.setInterval` auto-cleared on `session_shutdown` (2s budget) | `[F18 §4 d]` probe: managed interval froze after `dispose()` | Run all three jobs (claim sweep K3, pruning, compactor) from the main session only; refcount per live session; clear only at zero (same as R11) |
+| **R29** | Harness-tag injection via room message body | `deliver()` originally passed `record.body` verbatim (also a TS2339 for non-`msg` kinds — K2) | Derive the body per kind (K2), then `escapeHarnessTags()` on delivery + per rendered line + on every digest string (K22, §5.3, §5.4, §7.4). Native: `irc-bridge.ts:189`, `harness-tags.ts:14-16` |
+| **R30** | ANSI escape injection via room message body | Rendered lines not sanitised | Apply `sanitizeText()` from `@oh-my-pi/pi-utils` on every rendered line (§5.3, §5.4, §6.3, §7.4) |
+| **R31** | A claim held past its TTL can be squatted forever if nothing sweeps it | the plan defined only 2 timers; `release{reason:"expired"}` was unreachable (K3, V7) | The 5 s `[calibrate]` claim-expiry sweep (§3.4, §3.6, §5.2) — `expireStale` → `release{reason:"expired"}` → promote oldest waiter → T0 notice |
+| **R32** | A room post is a system-prompt injection vector (digest, cards, delivery) | every room-authored string reaches the model (K22, V1) | Escape every room-authored string; wrap the agent-derived digest region in `<room-authored untrusted="true">`; treat tree summaries as untrusted too |
+| **R33** | Unbounded per-record size — `logMaxRecords` bounds count, not bytes | no `maxBody` existed (K19, V8) | `maxBodyBytes = 8192` `[calibrate]` enforced in `post` (§3.3); oversized → `details.ok:false`, no record |
 
 ---
 
@@ -1480,7 +1902,8 @@ import { test, expect } from "bun:test";
 import * as fs from "node:fs"; import * as os from "node:os"; import * as path from "node:path";
 import { createAgentSession, SessionManager, AgentRegistry } from "@oh-my-pi/pi-coding-agent";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
-import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
+import { resolveLocalRoot } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
+import { roomIdFor, logPathFor } from "../src/ids";
 import roomExtension, { __roomTest } from "../src/index";
 
 async function newSession(bus: EventBus, registry: AgentRegistry, root: string, id: string) {
@@ -1515,16 +1938,20 @@ test("room: claim → wait_for_claim → durable log", async () => {
   await roomA.execute("c-release", { op: "release", topic: "build", key: "step" }, undefined, undefined);
   const winner = await Promise.race([waitP, Bun.sleep(1000).then(() => "TIMEOUT")]);
   expect(winner).not.toBe("TIMEOUT");                          // cross-session notification, no polling
-  expect(winner).toMatchObject({ outcome: "event", acquired: true, claim: { holder: "AgentB" } });
+  expect(winner.details).toMatchObject({ ok: true, outcome: "event", acquired: true, claim: { holder: "AgentB" } });
+  expect(Array.isArray(winner.content)).toBe(true);            // K1 — host-valid shape
 
   // First-writer-wins: A's re-claim loses (B now holds it)
   const second = await roomA.execute("c-claim2", { op: "claim", topic: "build", key: "step", ttl: 300000 }, undefined, undefined);
-  expect(second).toMatchObject({ ok: false, holder: "AgentB" });
+  expect(second.details).toMatchObject({ ok: false, holder: "AgentB" });
 
-  // Root sharing: same file read from B's root options
-  const logPathA = resolveLocalUrlToPath("local://room/room.jsonl", { getArtifactsDir: () => root, getSessionId: () => "AgentA" });
-  const logPathB = resolveLocalUrlToPath("local://room/room.jsonl", { getArtifactsDir: () => root, getSessionId: () => "AgentB" });
-  expect(logPathA).toBe(logPathB);
+  // Root sharing: both sessions resolve the SAME room log via logPathFor (K14) — one convention only.
+  const rootA = resolveLocalRoot({ getArtifactsDir: () => root, getSessionId: () => "AgentA" });
+  const rootB = resolveLocalRoot({ getArtifactsDir: () => root, getSessionId: () => "AgentB" });
+  expect(rootA).toBe(rootB);
+  const logPathA = logPathFor(rootA, roomIdFor("AgentA"));
+  const logPathB = logPathFor(rootB, roomIdFor("AgentB"));
+  expect(logPathA).toBe(logPathB);                             // same tree → same room id and file
   const lines = fs.readFileSync(logPathA, "utf8").split("\n").filter(Boolean).map(l => JSON.parse(l));
   expect(lines.map(l => l.kind)).toContain("claim");
   expect(lines.find(l => l.kind === "claim")).toMatchObject({ from: "AgentA", resource: "build/step" });
@@ -1538,10 +1965,11 @@ test("room: claim → wait_for_claim → durable log", async () => {
 | Assertion | Proves |
 |---|---|
 | B's `wait_for_claim` is still pending before A releases | the wait actually blocks (no busy-poll) |
-| It resolves with `{outcome:"event", acquired:true, claim:{holder:"AgentB"}}` after A's release | cross-session notification + auto-grant of the lease |
+| It resolves with `details:{outcome:"event", acquired:true, claim:{holder:"AgentB"}}` after A's release | cross-session notification + auto-grant of the lease |
+| Every result carries a `content` array (K1) | the host does not coerce the result to `isError:true` |
 | The JSONL contains the `claim` line | the O_APPEND append pattern works and is durable |
-| A second `claim` from A returns `{ok:false, holder:"AgentB"}` | first-writer-wins |
-| The same file read from B's root options is identical | subagents share the parent's `local://` root |
+| A second `claim` from A returns `details:{ok:false, holder:"AgentB"}` | first-writer-wins |
+| The same file resolved from both roots via `logPathFor` is identical | subagents share the parent's `local://` root; one filename convention (K14) |
 
 ### 11.3 Additional suites
 
@@ -1576,6 +2004,22 @@ test("room: claim → wait_for_claim → durable log", async () => {
   records survive; the torn line is skipped and a `gap` record is emitted.
 - **Spoofed `from` test** (S4): post with a spoofed `from` → assert the stored record has
   `from = ctx.agent.id`.
+
+- **Result-shape test** (K1): every tool's `execute()` return — success, timeout, abort, and every
+  error path — asserts `Array.isArray(result.content) && result.content[0].type === "text"` and
+  `typeof result.details.ok === "boolean"`.
+- **Kind-dispatch test** (K2): call `deliver()` directly with a `claim`, `release`, `member` and `gap`
+  record — asserts no throw and a `content` line carrying `from` + `topic`/`resource` + the tier badge.
+- **Claim-expiry sweep test** (K3): claim with `ttl: 1000`, no waiter → within one sweep interval the
+  log gains `release{reason:"expired"}`; with a waiter queued → the waiter resolves with
+  `details.acquired:true` and the T0 notice is delivered.
+- **fd/store lifecycle test** (K8/K9): open two sessions on one root, dispose one → the fd registry
+  still holds the entry; dispose the last → the entry is gone and the fd is closed exactly once.
+- **Listener-leak test** (K10): record `registry` listener count and `store.listeners.size`; run each
+  wait tool to settle (event, timeout, abort); assert both counts return to baseline.
+- **Escaping test** (K22): post a body containing `</room-authored>` and a harness tag → the digest
+  and the delivered `content` line contain the escaped form, and the digest's untrusted region is
+  explicitly marked.
 
 ---
 
