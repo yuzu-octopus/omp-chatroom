@@ -36,6 +36,7 @@ pull-only T2 is a different object `[R2 §Round 1 revised]`.
 | 8 | Inline cards: `room:message`, `room:mention`, `room:claim`, `room:board-delta` + tool cards | `F19 §9,14` |
 | 9 | Slash command `/room`, optional configurable key, plugin settings schema, bundled skill | `F15 §Q1,Q4`, `F17 §4` |
 | 10 | Multi-agent integration test (one process) | `F18 §5` |
+| 11 | Cold tree: binary summary tree over `[0, N-R)` + background compactor (`@smol` via `streamSimple`) + `tree`/`zoom`/`recall` ops | `R3 §1–§6` |
 
 ### 1.2 Explicitly out of scope (v1)
 
@@ -75,6 +76,8 @@ omp-chatroom/
 │   │   ├── room-store.ts               # RoomStore singleton: state + change listeners (§3.1)
 │   │   ├── claims.ts                   # claim arbiter: grant/release/reclaim/expire (§3.4)
 │   │   └── cursors.ts                  # per-agent cursor map + persistence (§3.5)
+│   │   ├── tree-store.ts               # binary summary tree: getNode/putNode/forget/cover (§3.6)
+│   │   └── compactor.ts                # background job: ctx.setInterval + streamSimple(@smol) (§3.6)
 │   ├── attention/
 │   │   ├── tiers.ts                    # classify(record, viewer) → "T0"|"T1"|"T2" (§5.1)
 │   │   ├── governor.ts                 # injection cap, coalesce, token bucket, mute, gaps (§5.2)
@@ -184,6 +187,7 @@ One module-level singleton per extension module. Child sessions do not re-import
 interface RoomStore {
   root: string;                        // absolute local:// root (§3.3)
   logPath: string;                     // <root>/room/<roomId>.jsonl
+  treePath: string;                    // <root>/room/tree/ (cold tree, §3.6)
   records: RoomRecord[];               // in-memory projection, seq-ordered
   byId: Map<string, RoomRecord>;
   claims: Map<string, ClaimState>;     // resource → holder/ttl/seq
@@ -191,9 +195,40 @@ interface RoomStore {
   members: Map<string, MemberState>;   // agentId → {joinedAtSeq, topics:Set, muted:Set}
   listeners: Set<(r: RoomRecord) => void>;
   seq: number;
+  tree: TreeStore;                     // cold tree: binary summary tree over [0, N-R)
   reset(): void;                       // test seam
 }
+
+// src/store/tree-store.ts
+interface TreeStore {
+  // Fixed-width dense prefix per level. Block [lo,hi) at level size=hi-lo
+  // lives at offset (lo/size)*TREE_REC in tree/<size>. Position IS identity.
+  // TREE_REC = 288 bytes (matching OptMem). Padding costs ~2x on disk, buys O(1).
+  getNode(lo: number, hi: number): string | null;      // null = not built yet
+  putNode(lo: number, hi: number, summary: string): boolean;  // false = out of order
+  forget(lo: number, hi: number): void;                // drop node + all ancestors
+  pending(limit?: number): Array<[number, number]>;    // blocks that can be built
+  cover(T: number, budget: number): Array<[number, number]>;  // tiling for a view
+}
 ```
+
+**Two-region design** `[R3 §1, R3 §2]`: raw tail (last R=50 messages) read verbatim by all
+agents; cold tree (binary summary tree over [0, N-R)) read as a bounded view by late joiners
+and on `zoom`. The tree is a rebuildable cache, never on the critical path. The raw log
+stays authoritative.
+
+**Tree invariants** `[R3 §1, R3 §6]`:
+- **T1** the tree is rebuildable from the log — `forget` + rebuild from raw log.
+- **T2** the raw log stays authoritative — tree files are never read for correctness.
+- **T3** no agent blocked on compaction — raw tail is always readable; cold tree may have
+  unbuilt nodes → `gap` + raw-log fallback.
+- **T4** one node per range — `putNode` refuses unless `count == lo//size` (dense prefix).
+- **T5** max spend cap — compaction calls bounded per day (default 1000). When cap hit,
+  compaction pauses until next day.
+
+**Merge shape** `[R3 §1]`: 2 inputs → 1 output. Block [lo,hi) = merge of [lo,mid) and
+[mid,hi). RAW_MAX=16: blocks ≤ 16 compress from raw log; larger blocks compress from two
+halves' summaries. Fixed-width nodes (TREE_REC=288) give O(1) lookup by seeking.
 
 **Invariants** `[F18 §4 I1–I6]`:
 - **I1** every mutation is synchronous — no `await` between reading and writing `claims`/`cursors`
@@ -320,6 +355,44 @@ Rules `[R2 §Components 4]`:
   rebuilt from the log's `member`/delivery records on cold start.
 - A per-agent **lag** metric (`logEnd - cursor`) is exposed by `room{op:"board"}` `[F14 §2]`.
 
+### 3.6 Cold tree (binary summary tree)
+
+**Two-region design** `[R3 §1, R3 §2]`: raw tail (last R=50 messages) read verbatim by all
+agents; cold tree (binary summary tree over `[0, N-R)`) read as a bounded view by late joiners
+and on `zoom`. The tree is a rebuildable cache, never on the critical path. The raw log
+stays authoritative.
+
+**Node format:** fixed-width, `TREE_REC = 288` bytes (matching OptMem). Each record is a
+one-line summary. Position IS identity: block `[lo,hi)` at level `size = hi-lo` lives at
+offset `(lo/size) * TREE_REC` in `tree/<size>`. O(1) lookup by seeking. `[R3 §1]`
+
+**Merge shape:** 2 inputs → 1 output. Block `[lo,hi)` = merge of `[lo,mid)` and `[mid,hi)`.
+`RAW_MAX = 16`: blocks ≤ 16 compress from raw log; larger blocks compress from two halves'
+summaries. `[R3 §1]`
+
+**Boundary rule** `[R3 §2]`: raw tail = last R = 50 messages (matching §3.5 join cursor).
+Cold tree covers `[0, N-R)`. The boundary is a sliding window recomputed on every read.
+
+**Compaction** `[R3 §3]`: background job in the main session via `ctx.setInterval`. Model =
+`@smol` via `streamSimple` (deep import from `@oh-my-pi/pi-ai`, not public API). Concurrency
+= JOBS = 4. Serialisation = ordered append + dense-prefix CAS (copy OptMem's `tree_put`:
+refuses unless `count == lo//size`). Max spend = 1000 calls/day cap. `[R3 §3]`
+
+**Cost** `[R3 §5]`: one LLM call per block. Total blocks over N messages ≤ 2N. Free nodes
+(source already fits TREE_REC) cost nothing. When compaction lags: agents read raw tail
+without waiting; late joiners get `gap` + raw-log fallback. `[R3 §5]`
+
+**Invalidation** `[R3 §4]`: `forget(lo, hi)` truncates every level file from `lo//size`
+upward, dropping the target and all ancestors. The log is never touched. Rebuild by
+re-running compaction. `[R3 §4]`
+
+**Invariants** `[R3 §6]`:
+- **T1** the tree is rebuildable from the log.
+- **T2** the raw log stays authoritative.
+- **T3** no agent blocked on compaction.
+- **T4** one node per range (dense prefix).
+- **T5** max spend cap (1000 calls/day).
+
 ---
 
 ## 4. Tool surface
@@ -369,7 +442,7 @@ Fallback if `essential` is ever refused: call `pi.setActiveTools([...])` at `ses
 
 ```ts
 z.object({
-  op: z.enum(["join","read","post","claim","release","board","topics","mute","unmute"]),
+  op: z.enum(["join","read","post","claim","release","board","topics","mute","unmute","tree","zoom","recall"]),
   topic:    z.string().optional(),        // post/note/mute target
   body:     z.string().optional(),        // post
   mention:  z.array(z.string()).optional(),// post — agent ids → T0
@@ -379,6 +452,9 @@ z.object({
   ttl:      z.number().optional(),        // claim — lease ms; defaults to settings.claimTtlMs
   since:    z.number().optional(),        // read — seq cursor; defaults to the caller's cursor
   limit:    z.number().optional(),        // read — default 100, max 1000 (Zulip's cap) [F14 §5]
+  lo:       z.number().optional(),        // zoom — first seq in node (exclusive range)
+  hi:       z.number().optional(),        // zoom — last seq + 1 (exclusive range)
+  pattern:  z.string().optional(),        // recall — regex over raw log
 })
 ```
 
@@ -392,6 +468,9 @@ z.object({
 | `board` | — | current claims + roster + per-agent lag | compact view |
 | `topics` | — | topic list with unread counts | `{ topics: [{topic, unread, lastSeq}] }` |
 | `mute`/`unmute` | `topic?` (omit = whole room) | per-agent mute set | `{ ok }` |
+| `tree` | — | show current `cover()` tiling: which nodes, which seq ranges, raw vs compressed | `[{lo, hi, size, raw, summary?}]` |
+| `zoom` | `lo`, `hi` | descend into a node's two children (one level); each child raw (size 1) or summary | `[{lo, hi, size, raw, text}]` |
+| `recall` | `pattern` | regex search over raw log (newest first, cap 100) | `{ matches: [{seq, record}] }` |
 
 `resource` canonical form is `"<topic>/<key>"` — the same string `wait_for_claim` takes (§4.4).
 
@@ -495,6 +574,11 @@ export function classify(record: RoomRecord, viewer: MemberState): "T0" | "T1" |
 | T0 pending interrupts | **1**, then queue-depth notice | `[F14 §3]` |
 | Log retention | **5000 records or 7 days**, never below `min(cursor)` | Kafka `retention.ms`/`cleanup.policy`, NATS `MaxMsgs`+`MaxAge` `[F14 §6]` |
 | Mailbox cap | native `MAILBOX_CAP = 100`, made **tier-aware** | `[F14 §6]`, `[F0]` |
+| Cold tree raw tail (**R**) | **50 messages** | Matches §3.5 join cursor `[R3 §2]` |
+| Cold tree budget (**B**) | **96 lines** | OptMem `WAKE_LINES=96` `[R3 §2]` |
+| Tree node size (**TREE_REC**) | **288 bytes** | OptMem `TREE_REC=288` `[R3 §1]` |
+| Compaction concurrency (**JOBS**) | **4** | Conservative; room has fewer messages than OptChat `[R3 §3]` |
+| Compaction max spend | **1000 calls/day** | New invariant (no prior system has one) `[R3 §3]` |
 
 **Injection cap** — oldest-first, then one summary line:
 `+N more room messages (M mention you) — read with room{op:"read", since:<cursor>}` `[F14 §3]`.
@@ -552,7 +636,7 @@ Content order `[R2 §Components 7]`, `[F8]`:
 2. Roster — live members from `AgentRegistry.global().list()` with status (cap 32, mirroring the
    native `DEFAULT_PEER_ROSTER_LIMIT = 32` `[F3]`).
 3. Open claims — resource, holder, remaining TTL (top 10).
-4. Bounded backlog — the last `min(20, K)` records, T0/T1 first.
+4. Bounded backlog — two-region view `[R3 §2]`: raw tail (last R=50 records, T0/T1 first) + cold tree tiled at B=96 lines. If a cold node is unbuilt, show `gap` + raw-log fallback.
 5. Your cursor + lag.
 6. The routing rule block (§8).
 7. Config — the active caps so the agent knows the budget.
@@ -943,6 +1027,17 @@ Each phase ends with an acceptance check that a later implementer runs before mo
 an expired-TTL claim is reclaimable and appends `release{reason:"reclaimed"}`; `board` shows holder+expiry;
 the JSONL contains exactly the expected `claim`/`release` lines.
 
+### P1b — Cold tree (binary summary tree)
+**Files**: `src/store/tree-store.ts`, `src/store/compactor.ts`, `tests/tree.test.ts`.
+**Work**: §3.6 tree store; `cover()` tiling; `getNode`/`putNode`/`forget`/`pending`; compactor job (`ctx.setInterval` + `streamSimple` with `@smol`); `room{op:"tree"}`, `room{op:"zoom"}`, `room{op:"recall"}` ops.
+**Accept**: `bun test tests/tree.test.ts` green —
+(a) `cover(1000, 96)` returns ≤ 96 blocks tiling `[0,1000)` with no gap or overlap;
+(b) `putNode` refuses out-of-order write (`count != lo//size` → `false`);
+(c) `forget(lo, hi)` truncates all level files from `lo//size` upward, log untouched;
+(d) `zoom(lo, hi)` returns two children (raw if size 1, summary otherwise);
+(e) compactor builds a pending node via `streamSimple` with `@smol` (mock the stream, assert called);
+(f) max spend cap: after 1000 calls, compactor pauses.
+
 ### P2 — Wait tools
 **Files**: `src/tools/wait-for-{agent,message,claim}.ts`.
 **Work**: §4.2–4.4; `interruptible` declared at runtime (RISK R9); `outcome` discrimination; `useless` on non-event paths.
@@ -1019,6 +1114,12 @@ and a new session loads the extension; disabling the `panel` feature removes the
 | **R20** | `registerMessageRenderer` never runs without a UI, so renderer side effects are lost | `[F19 §13]` | Keep renderers pure; put all state mutation in the tool/command path |
 | **R21** | The native IRC card's body helper (`bodyLines`), glyph (`ircGlyph`) and age (`messageAge`) are **module-private** in `pi-tui/src/tools/wait.ts:474,478,487` | verified by export grep 2026-10-06 | Ship `src/cards/body-lines.ts` reproducing the documented behaviour (§7.4); use the exported `formatAge` from `@oh-my-pi/pi-utils` for age |
 | **R22** | `pi-tui` and `pi-coding-agent` subpath imports (`/chrome/overlay-box`, `/render/render-utils`, `/tools/wait`) are covered only by the `"./*"` wildcard export — deep, not public API | `pi-tui/package.json` exports map; all six specifiers probe-resolve 2026-10-06 | Prefer root exports (`@oh-my-pi/pi-tui` re-exports every component, `MouseRoutable`, `Ellipsis`, `truncateToWidth`); pin the host version and add an import smoke test |
+| **R23** | `streamSimple` from `@oh-my-pi/pi-ai` is a deep import, not public API | `bench-cli.ts:14`, `dry-balance-cli.ts:14` import it; no `omp://` doc lists it as stable | Wrap in try/catch; fall back to `runEphemeralTurn` with session model (slower but works); pin host version; add import smoke test |
+| **R24** | Compaction cost is unbounded without a cap | No max-spend cap in OptMem, OptChat, or omp `[F21.64]` | 1000 calls/day cap (§3.6 T5); when hit, compaction pauses until next day; expose cap in settings |
+| **R25** | LLM summarisation is non-deterministic — two honest compactors produce different text | OpenAI: "not guaranteed" even with fixed seed `[F20.52]` | Single-writer compaction (one background job) eliminates divergence by construction; do NOT content-address the tree (hash difference carries no signal about which is right) |
+| **R26** | Cold tree falls behind under high message rate | No formula for JOBS from message rate; `JOBS >= rate × latency` is uncalibrated `[F21.71]` | Agents read raw tail without waiting; late joiners get `gap` + raw-log fallback; monitor compaction lag via `room{op:"board"}` |
+| **R27** | `forget` + rebuild is expensive for large trees | `tree_drop` truncates all level files from `lo//size` upward; rebuild requires re-running compaction for all affected nodes `[F20.16]` | Rebuild lazily (only when a node is read); batch `forget` calls; consider incremental rebuild (only affected branches) |
+| **R28** | `ctx.setInterval` auto-cleared on `session_shutdown` (2s budget) | `[F18 §4 d]` probe: managed interval froze after `dispose()` | Run compactor from the main session only; refcount per live session; clear only at zero (same as R11) |
 
 ---
 
