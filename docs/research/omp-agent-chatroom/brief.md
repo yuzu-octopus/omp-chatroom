@@ -90,3 +90,15 @@ versioning for a shipped product, market sizing.
 9. **Onboarding and discovery** — how a new agent joins a room, what it must read,
    identity/presence, backpressure, unread budgets, "relevant vs noise" filtering.
    Includes how to make a fresh subagent useful in one turn.
+
+## Manager plan (orchestration)
+
+| Manager | Angles | Findings files |
+|---|---|---|
+| M1 native-omp | 1, 2, 9 (omp half) | F1-native-irc-substrate, F2-omp-plugin-surface, F3-omp-onboarding-discovery |
+| M2 prior-art | 3, 4, 5 | F4-harness-messaging, F5-interagent-protocols, F6-blackboard-claimboard |
+| M3 context-onboarding | 6, 9 (general half) | F7-bounded-context-compression, F8-onboarding-presence |
+| M4 papers-failures | 7, 8 | F9-multiagent-papers, F10-failure-modes-costs |
+
+Primary sources for angles 1/2/9-omp: `omp://` docs plus the installed package source at
+`~/.bun/install/global/node_modules/@oh-my-pi/pi-coding-agent/src` (omp 18.6.1).
