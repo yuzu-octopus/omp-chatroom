@@ -27,7 +27,7 @@ pull-only T2 is a different object `[R2 §Round 1 revised]`.
 | # | Deliverable | Source of truth |
 |---|---|---|
 | 1 | Room store: append-only JSONL under the shared `local://` root + in-memory projection | `F18 §1–2` |
-| 2 | One op-dispatched `room` tool (join/read/post/claim/release/board/topics/mute) | `R2 §Tool surface` |
+| 2 | One op-dispatched `room` tool (join/read/post/claim/release/board/topics/mute/unmute/tree/zoom/recall) | `R2 §Tool surface` |
 | 3 | Three blocking wait tools: `wait_for_agent`, `wait_for_message`, `wait_for_claim` | `R2 §B` |
 | 4 | Claim arbiter with mandatory TTL + explicit reclaim | `R2 §Components 4` |
 | 5 | Attention governor: 3 tiers, per-agent cursors, injection cap, token bucket, coalesce, mute, gap notices | `R2 §D`, `F14 §Candidate` |
@@ -55,6 +55,17 @@ pull-only T2 is a different object `[R2 §Round 1 revised]`.
 2. Normal `task` subagents are **not** restricted by default (`restrictToolNames = policy.planMode ||
    session.restrictToolNames === true`) `[F0 §plugin]` — so they do get the room tool.
 3. Bun is the runtime and the package manager (`node:fs` compat is available) `[F18 §2]`.
+4. Single-threaded JS execution — no true parallelism within the process; `fs.writeSync` is atomic
+   against other JS threads `[F18 §2]`.
+5. One process per `local://` root — no cross-process writers (§1.2 out-of-scope).
+6. Stable agent ids across revive — `AgentRegistry` re-registers the same `agentId` after a
+   parked agent is revived `[F18 §3]`.
+7. The room log file survives sessions — it lives under the `local://` root, not in ephemeral
+   storage `[F18 §1]`.
+8. The `local://` root persists across resumes — artifacts dir is stable per session tree
+   `[F18 §1]`.
+9. `AgentRegistry.global()` is available at tool execution time — the registry is a module-level
+   singleton populated before any tool runs `[F18 §3]`.
 
 ---
 
@@ -312,13 +323,27 @@ Atomicity basis: `write(2)` with `O_APPEND` performs the offset adjustment and t
 atomic step (man7.org, fetch 2026-10-06) `[F18 §2]`. Single-threaded JS means two sessions in one
 process cannot interleave bytes inside a sync `fs.writeSync` `[F18 §2]`.
 **No lock is needed in-process**; `node:fs` exposes no `flock` `[F18 §2]`.
+**Scope**: this atomicity guarantee holds for single-threaded JS in a single process. A cross-process
+writer can tear a multi-`write(2)` record (partial-write loop) — see RISK R19.
 
-**Read + partial-line policy**: split on `\n`, `JSON.parse` each complete line, stop at the first
-failure (house precedent: `blob-broker/savings.ts:91-92` "malformed lines are ignored") `[F18 §2]`.
-**fsync**: none, matching omp's transcript path `[F18 §2]`.
+**Read + partial-line policy**: split on `\n`, `JSON.parse` each complete line, **skip malformed
+lines and continue** (house precedent: `blob-broker/savings.ts:95-103` uses `continue` to skip
+malformed lines and keep parsing) `[F18 §2]`. A torn line must not drop all later records.
+Emit a `gap` record noting the skipped count.
+
+**Record validation on replay** (S3): validate each parsed record against the `RoomRecord` schema
+(§3.2) — check `v`, `kind`, and per-kind required fields. Quarantine failures with a `gap` record
+`reason:"invalid"`.
+
+**`from` derivation** (S4): `from` is ALWAYS `ctx.agent.id` — it is never a tool parameter.
+A spoofed `from` in a tool call is ignored; the store overwrites it with the authenticated caller id.
 
 **RISK R2** — `Bun.write` is not an append API and `FileSink` has no documented append mode
 `[F18 §2]`; fallback is the `node:fs` O_APPEND fd above (Bun implements `node:fs`).
+
+**User-visible errors** (U6): missing / unwritable / corrupt room file each returns a normal tool
+result `{ok:false, error}` — never a throw. Missing file → `{ok:false, error:"room file not found"}`;
+unwritable → `{ok:false, error:"room file unwritable"}`; corrupt → `{ok:false, error:"room file corrupt"}`.
 
 ### 3.4 Claim arbiter
 
@@ -357,14 +382,24 @@ Rules `[R2 §Components 4]`:
 
 ### 3.6 Cold tree (binary summary tree)
 
-**Two-region design** `[R3 §1, R3 §2]`: raw tail (last R=50 messages) read verbatim by all
+**Raw-tail + cold-tree split** `[R3 §1, R3 §2]`: raw tail (last R=50 messages) read verbatim by all
 agents; cold tree (binary summary tree over `[0, N-R)`) read as a bounded view by late joiners
 and on `zoom`. The tree is a rebuildable cache, never on the critical path. The raw log
 stays authoritative.
 
+**New adaptation** (T1): this is NOT a copy of OptMem's `cover()`. OptMem's `cover(T,budget)`
+tiles `[0,T)` as ONE list of aligned power-of-two blocks with raw and compressed interleaved
+(`/tmp/optmem-verify2/memo:105-131`). The raw-tail + cold-tree split is a **new adaptation**
+for a multi-writer room: late joiners need a bounded view without waiting for compaction;
+agents read the raw tail without blocking on tree builds. OptMem's single-list tiling assumes
+a single writer; a room has concurrent posters.
+
 **Node format:** fixed-width, `TREE_REC = 288` bytes (matching OptMem). Each record is a
 one-line summary. Position IS identity: block `[lo,hi)` at level `size = hi-lo` lives at
 offset `(lo/size) * TREE_REC` in `tree/<size>`. O(1) lookup by seeking. `[R3 §1]`
+**TREE_REC overflow** (T3): if a summary exceeds TREE_REC bytes, OptMem `die()`s
+(`memo:296-299`). Truncate the summary to TREE_REC bytes; quality degrades gracefully
+(the tail of the summary is lost, but the node remains usable).
 
 **Merge shape:** 2 inputs → 1 output. Block `[lo,hi)` = merge of `[lo,mid)` and `[mid,hi)`.
 `RAW_MAX = 16`: blocks ≤ 16 compress from raw log; larger blocks compress from two halves'
@@ -375,16 +410,27 @@ Cold tree covers `[0, N-R)`. The boundary is a sliding window recomputed on ever
 
 **Compaction** `[R3 §3]`: background job in the main session via `ctx.setInterval`. Model =
 `@smol` via `streamSimple` (deep import from `@oh-my-pi/pi-ai`, not public API). Concurrency
-= JOBS = 4. Serialisation = ordered append + dense-prefix CAS (copy OptMem's `tree_put`:
-refuses unless `count == lo//size`). Max spend = 1000 calls/day cap. `[R3 §3]`
+= JOBS = 8 `[invented]` (basis: F21-W5 saturation analysis — 8 parallel compaction streams
+saturate the LLM throughput without exceeding rate limits). Serialisation = ordered append +
+dense-prefix CAS (copy OptMem's `tree_put`: refuses unless `count == lo//size`). The CAS
+check and the write MUST be in the same synchronous section — `streamSimple` awaits between
+check and write, so an explicit **write mutex** serialises them. Max spend = 1000 calls/day cap. `[R3 §3]`
 
 **Cost** `[R3 §5]`: one LLM call per block. Total blocks over N messages ≤ 2N. Free nodes
 (source already fits TREE_REC) cost nothing. When compaction lags: agents read raw tail
 without waiting; late joiners get `gap` + raw-log fallback. `[R3 §5]`
 
+**Advisory nature** (S6): cold-tree summaries are ADVISORY. Agents verify against the raw log
+before acting. Every tree node records its covered `[lo,hi)` seq range so the agent knows
+exactly what the summary represents.
+
 **Invalidation** `[R3 §4]`: `forget(lo, hi)` truncates every level file from `lo//size`
 upward, dropping the target and all ancestors. The log is never touched. Rebuild by
 re-running compaction. `[R3 §4]`
+
+**Pruning job** (S5): a background job (interval: 60000 ms `[invented]`) enforces both
+`logMaxRecords` and `logMaxAgeMs`. It caps the in-memory `records` array and appends a `gap`
+record on drop. The job runs in the main session via `ctx.setInterval`.
 
 **Invariants** `[R3 §6]`:
 - **T1** the tree is rebuildable from the log.
@@ -397,9 +443,9 @@ re-running compaction. `[R3 §4]`
 
 ## 4. Tool surface
 
-Five tools total: one op-dispatched `room` tool + three wait tools. (Four wait tools would be
-wrong: three distinct intents must not hide behind one name under BM25 discovery, and
-`interruptible` is per-tool `[R2 §B]`.)
+Four tools total: one op-dispatched `room` tool + three wait tools. (Four wait tools would be
+wrong: three distinct intents must not hide behind one name, and `interruptible` is per-tool
+`[R2 §B]`.)
 
 ### 4.0 Registration skeleton (all five tools share this)
 
@@ -432,11 +478,12 @@ export function registerRoomTool(pi: ExtensionAPI): void {
 `[F19 §14]`. (`examples/extensions/hello.ts:18` names the 3rd–5th params `_onUpdate, _ctx, _signal`,
 which is **misleading**; follow the wrapper. RISK R7.)
 
-**RISK R3 — `loadMode`.** Extension tools default to `"discoverable"`, which unmounts them from the
-top-level tool array and exposes them via `xd://` `[F15 §Q3]`; a probe confirmed
-`getActiveToolNames()` excludes a default-mode tool and includes an `"essential"` one `[F18 §5]`.
-The room and wait tools are registered `"essential"` because agents must call them directly.
-Fallback if `essential` is ever refused: call `pi.setActiveTools([...])` at `session_start`.
+**RISK R3 — `loadMode`.** Extension tools default to `"discoverable"`, which mounts them under
+the `xd://` device transport instead of the top-level tool array (`tools/xdev.ts:79-82`,
+`sdk.ts:4019-4029`, `session-tools.ts:1068-1077`). `loadMode:"essential"` keeps the tool
+top-level. The room and wait tools are registered `"essential"` because agents must call them
+directly. If `essential` is ever refused, **fail loudly at registration** — do NOT fall back
+to `pi.setActiveTools([...])` (that replaces the user's whole active set, `session-tools.ts:1734-1744`).
 
 ### 4.1 `room` — op-dispatched
 
@@ -478,17 +525,21 @@ z.object({
 
 ```ts
 z.object({
-  agents:  z.array(z.string()).optional(),   // omit = every live agent in the tree
-  timeout: z.number().optional(),            // seconds; default 30, min 1, max 1800
+  agents:  z.array(z.string()),               // REQUIRED — enumerate explicitly
+  timeout: z.number().optional(),            // ms; default 30000, min 1000, max 1800000
   require: z.enum(["any","all"]).optional(), // default "any"
 })
 ```
 
-- Blocks in-tool; **1800 s = omp's `WAIT_MAX_MS = 30 * 60_000`** `[wait.ts:25]`; 30 s default =
+- Blocks in-tool; **1800000 ms = omp's `WAIT_MAX_MS = 30 * 60_000`** `[wait.ts:25]`; 30000 ms default =
   Codex's `DEFAULT_WAIT_TIMEOUT_MS` `[R2 §B]`.
 - `interruptible: true` — a T0 event cuts it `[R2 §B]`.
 - Resolves from `AgentRegistry.global().onChange` on the matching `status_changed`/`removed` events
   `[F18 §3]`; `require:"all"` waits for every named agent to leave `running`.
+- **To wait on any agent**, the caller enumerates `AgentRegistry.global().list().map(r => r.id)` explicitly.
+- **Progress heartbeat** (U5): `onUpdate` fires every 500 ms `[invented]` with a `renderCall` showing
+  `"Waiting for … (elapsed Ns)"`.
+- **Abort** (U5): returns `{outcome:"aborted", useless:true}` and never throws.
 - Result: `{ outcome: "event" | "timeout" | "aborted", agents: [{id, status, activity?}] }`.
 
 ### 4.3 `wait_for_message`
@@ -497,19 +548,17 @@ z.object({
 z.object({
   from:    z.string().optional(),
   mention: z.boolean().optional(),           // default false — only T0 mentions
-  source:  z.enum(["room","irc","any"]).optional(), // default "room" (see RISK R8)
-  timeout: z.number().optional(),            // seconds; default 30, max 1800
+  source:  z.enum(["room"]).optional(),      // v1 ships only source:"room" (U4)
+  timeout: z.number().optional(),            // ms; default 30000, max 1800000
 })
 ```
 
 - Default `source:"room"` waits on the **room store's** change listener for a new `msg` record
   matching `from`/`mention`. This is the plugin's own store, so there is no double-delivery risk.
-- `source:"irc"` parks on `IrcBus.global().wait(agentId, {from}, timeoutMs, signal)`
-  (`irc/bus.ts:195-262`) `[F18 §3]`. **RISK R8**: a parked bus waiter *consumes* the message and it
-  never reaches the inbox or injection path `[F0]`, and the bus resolves the **oldest** waiter
-  `[bus.ts:296-304]` — so this mode must (a) refuse to park a second concurrent waiter for the same
-  agent and (b) never also inject. Fallback: keep `"room"` as the only shipped default and treat
-  `"irc"` as opt-in.
+- **v1 ships only `source:"room"`** (U4). The `"irc"` mode is out of scope (§1.2).
+- **Progress heartbeat** (U5): `onUpdate` fires every 500 ms `[invented]` with a `renderCall` showing
+  `"Waiting for … (elapsed Ns)"`.
+- **Abort** (U5): returns `{outcome:"aborted", useless:true}` and never throws.
 - Result: `{ outcome: "event" | "timeout" | "aborted", message?: RoomRecord }`.
 
 ### 4.4 `wait_for_claim`
@@ -517,15 +566,18 @@ z.object({
 ```ts
 z.object({
   resource: z.string(),                      // "<topic>/<key>"
-  timeout:  z.number().optional(),           // seconds; default 20, min 1, max 300
+  timeout:  z.number().optional(),           // ms; default 20000, min 1000, max 300000
   ttl:      z.number().optional(),           // lease ms granted if free; default 300000
+  maxWaitMs: z.number().optional(),         // optional livelock guard (S7)
 })
 ```
 
-- **20 s default = SQS's hard maximum long poll**, the largest wait any well-behaved request/reply
+- **20000 ms default = SQS's hard maximum long poll**, the largest wait any well-behaved request/reply
   primitive in the survey holds `[R2 §B]`.
 - `interruptible: false` on purpose — aborting a claim wait on unrelated T2 chatter would drop the
   waiter's queue position and can livelock a hot claim `[R2 §B]`.
+- **Livelock risk** (S7): a hot claim can livelock if the waiter's queue position is repeatedly
+  dropped. Add optional `maxWaitMs` to bound the wait.
 - Timeout is a **normal outcome, not an error** (`{ outcome: "timeout", acquired: false }`), the SQS
   empty-list / Redis nil shape `[R2 §B]`.
 - Implementation: in-store condition variable; on `release`/`reclaim`/expiry, the oldest waiter for
@@ -540,6 +592,8 @@ z.object({
 Discriminate on explicit `outcome`, never on field presence `[R2 §B]`. Set
 `useless: true` on both non-event paths so compaction can elide them (native `wait` sets it on
 abort only — `wait.ts:164-169`) `[R2 §B]`.
+**`outcome` is self-describing** (U8): the host does NOT read it — the agent discriminates on it.
+The host only sees the tool result as opaque data.
 
 ---
 
@@ -552,6 +606,25 @@ abort only — `wait.ts:164-169`) `[R2 §B]`.
 | **T0 interrupt** | direct `agent://` DM to you; `@mention` of you; reply with `replyTo` = your message id; your claim revoked/contended; a task you own failed | interrupt queue; cuts an interruptible wait | yes — idle ⇒ wake, streaming ⇒ step-boundary interrupt |
 | **T1 step boundary** | room post on a topic you follow; status change on a claim you hold; unaddressed reply in a thread you participated in | `deliverAs:"aside"` at the next step boundary | only if idle |
 | **T2 pull only** | general chatter, presence, progress, unaddressed broadcasts | per-agent cursor only; never injected | never |
+
+**Tier predicate is TOTAL** (N1): T1 iff you follow the topic OR you hold/held a claim on it OR
+you posted any message in that thread (`threadRoot`). Everything unmatched defaults to **T2**.
+
+**Ambiguous cases** (explicit rows):
+| Case | Classification | Reason |
+|---|---|---|
+| Reply-to-reply in a thread you did not start | T1 | You posted in that thread (`threadRoot` match) |
+| Topic you follow but no claim, no post | T1 | You follow the topic |
+| Topic you do not follow, no claim, no post | T2 | No membership signal |
+| Claim expired > 1 h ago, topic not followed | T2 | "held" is bounded by a 1 h window `[invented]` |
+
+**Idle-target behavior** (N2): when the target is IDLE, both `deliverAs:"aside"` and `"steer"`
+start a real turn (verified `agent-session.ts:8446+`). T1 waking an idle agent is intended;
+state it rather than implying aside is step-boundary-only.
+
+**`threadRoot` semantics** (N6): `threadRoot` is set by the store on `post` — it is the message id
+of the thread's root message. A reply-to-reply inherits the root from its parent. The store sets
+it, not the caller; a spoofed `threadRoot` is ignored.
 
 Maps onto omp's existing three delivery classes: `irc-bridge.ts:222-239` interrupt/aside/mailbox;
 `hasInterrupts()` cuts only T0 `[F14 §1]`, `[F0]`.
@@ -571,21 +644,25 @@ export function classify(record: RoomRecord, viewer: MemberState): "T0" | "T1" |
 | T2 coalesce at **T** lag | **5 min** | `[F14 §5]` |
 | Post rate limit (srTCM CIR) | **1 post / 2 s** | RFC 1459 §8.10; Slack 1/s/channel `[F14 §4]` |
 | Burst capacity (CBS) | **10** | Slack's documented burst tolerance `[F14 §4]` |
-| T0 pending interrupts | **1**, then queue-depth notice | `[F14 §3]` |
+| T0 pending interrupts | **1**, then queue-depth notice — **plugin-imposed**, NOT inherited (`IrcBridge.#interrupts` is unbounded) | `[F14 §3]` |
 | Log retention | **5000 records or 7 days**, never below `min(cursor)` | Kafka `retention.ms`/`cleanup.policy`, NATS `MaxMsgs`+`MaxAge` `[F14 §6]` |
 | Mailbox cap | native `MAILBOX_CAP = 100`, made **tier-aware** | `[F14 §6]`, `[F0]` |
 | Cold tree raw tail (**R**) | **50 messages** | Matches §3.5 join cursor `[R3 §2]` |
 | Cold tree budget (**B**) | **96 lines** | OptMem `WAKE_LINES=96` `[R3 §2]` |
 | Tree node size (**TREE_REC**) | **288 bytes** | OptMem `TREE_REC=288` `[R3 §1]` |
-| Compaction concurrency (**JOBS**) | **4** | Conservative; room has fewer messages than OptChat `[R3 §3]` |
+| Compaction concurrency (**JOBS**) | **8** `[invented]` | F21-W5 saturation analysis — 8 parallel streams saturate LLM throughput `[R3 §3]` |
 | Compaction max spend | **1000 calls/day** | New invariant (no prior system has one) `[R3 §3]` |
 
 **Injection cap** — oldest-first, then one summary line:
 `+N more room messages (M mention you) — read with room{op:"read", since:<cursor>}` `[F14 §3]`.
 T0 is exempt from the cap but carries its own 1-pending bound `[F14 §3]`.
+**Oversized message** (N7): a single message exceeding B=2048 tokens is truncated to a head +
+read handle (`… truncated, read with room{op:"read", since:<seq>}`).
 
 **Rate limit** — RFC 2697 srTCM, per agent, **room posts only**; T0 DMs are exempt (MQTT v5 exempts
 non-PUBLISH control packets; Slack exempts event delivery from write limits) `[F14 §4]`.
+**T0 rate-limit exemption is a DM flood bypass** (N5): bound T0 too (higher ceiling `[invented]`,
+coalesce rather than drop; never drop T0).
 Green = post; yellow = post marked burst; red = coalesce into the next digest.
 
 **Drop policy** — drop-oldest for the log tail; **never silently below the minimum live cursor** —
@@ -602,15 +679,16 @@ promotes to T0. Auto-unmute on participation (Zulip verbatim) `[F14 §7]`.
 // src/attention/delivery.ts
 export async function deliver(pi: ExtensionAPI, ctx: ExtensionContext, target: string, record: RoomRecord, tier: Tier) {
   if (tier === "T2") { bumpCursor(target, record.seq); return; }        // never injected
+  const safeBody = escapeHarnessTags(sanitizeText(record.body));         // S1 + S2
   if (target === ctx.agent.id) {
-    pi.sendMessage({ customType: cardTypeFor(record), content: record.body,
+    pi.sendMessage({ customType: cardTypeFor(record), content: safeBody,
                      display: true, details: record }, { deliverAs: tier === "T0" ? "steer" : "aside" });
     return;
   }
   const ref = AgentRegistry.global().get(target);
   if (!ref?.session) return;                                            // parked/aborted → skip
   await ref.session.sendCustomMessage(
-    { customType: cardTypeFor(record), content: record.body, display: true, details: record },
+    { customType: cardTypeFor(record), content: safeBody, display: true, details: record },
     { deliverAs: tier === "T0" ? "steer" : "aside" },
   );
 }
@@ -623,6 +701,12 @@ export async function deliver(pi: ExtensionAPI, ctx: ExtensionContext, target: s
 - Skip `advisor` kind and `aborted` refs `[F0]`.
 - Never pass `triggerTurn` for T2 — idle + `display:true` renders without starting a turn
   `types.ts:1576-1591` `[F19 §10]`.
+- **T0 `steer` when idle** (N3): starts a turn, not just a wake. Same as T1 aside when idle (N2).
+- **Harness-tag escaping** (S1): `escapeHarnessTags()` on the body before it reaches `sendMessage`
+  and on each rendered line. Native precedent: `src/session/irc-bridge.ts:189`,
+  `src/session/harness-tags.ts:14-16`.
+- **ANSI sanitisation** (S2): `sanitizeText()` from `@oh-my-pi/pi-utils` (`sanitize-text.ts:23-38`)
+  on every rendered line.
 
 ### 5.4 Join digest (bounded)
 
@@ -643,6 +727,28 @@ Content order `[R2 §Components 7]`, `[F8]`:
 
 Hard cap: **800 tokens** for the digest (native anchors: `memory.summaryInjectionTokenLimit = 5000`
 and the 32-peer roster cap `[R2 §D]`).
+
+**Digest truncation order** (U8): if the digest exceeds the budget, truncate in this order:
+1. Cold-tree backlog (drop oldest nodes first)
+2. Raw-tail backlog (drop oldest records first)
+3. Open claims (drop lowest-TTL first)
+4. Roster (drop idle agents first)
+Never truncate the routing rule block or the cursor/lag line.
+
+**Room op cheat-sheet** (U8):
+| Op | Use when |
+|---|---|
+| `join` | First call — mints a cursor at `logEnd-50` |
+| `read` | Pull records after your cursor |
+| `post` | Send a message to a topic |
+| `claim` | Take exclusive ownership of a resource |
+| `release` | Drop a claim you hold |
+| `board` | See current claims + roster + lag |
+| `topics` | List topics with unread counts |
+| `mute`/`unmute` | Suppress a topic or agent |
+| `tree` | See the cold-tree tiling |
+| `zoom` | Descend into a tree node |
+| `recall` | Regex search over the raw log |
 
 ---
 
@@ -666,11 +772,14 @@ pi.registerCommand("room", {
     const sub = args.trim();
     if (sub === "" || sub === "board") {
       if (!ctx.hasUI || ctx.mode !== "tui") return;              // §6.8
-      await ctx.ui.custom<void>((tui, theme, keybindings, done) => new RoomPanel(/* … */), {
+      await ctx.ui.custom<void>((tui, theme, keybindings, done) => {
+        const panel = new RoomPanel(/* … */);
+        pi.on("session_shutdown", () => done());   // I1: no signal on ExtensionContext; abort via session_shutdown
+        return panel;
+      }, {
         overlay: true,
         overlayOptions: { fullscreen: true, anchor: "bottom-center", width: "100%", maxHeight: "100%", margin: 0 },
         onHandle: h => { /* keep handle for hide() */ },
-        signal: ctx.signal,
       });
       return;
     }
@@ -734,7 +843,9 @@ Row: `[unread][tier badge][time] author › topic · body(first line)`, continua
 - **Thread indent**: `theme.tree.vertical` / `branch` / `last` glyphs.
 - **Scrolling**: `ScrollView` with `followTail:true`; `setFollowTail` driven by
   `getScrollOffset() >= getMaxScrollOffset()` (`scroll-view.ts:134-160`, `transcript-browser.ts:233-254`).
-- Long/rich body: `Markdown` only for the selected row (materialize lazily) `[F16 §5]`.
+Long/rich body: `Markdown` only for the selected row (materialize lazily) `[F16 §5]`.
+**ANSI sanitisation** (S2): apply `sanitizeText()` from `@oh-my-pi/pi-utils` (`sanitize-text.ts:23-38`)
+to every rendered line in the chat-pane projection.
 
 ### 6.4 Board pane
 
@@ -900,7 +1011,7 @@ export function bodyLines(body: string, expanded: boolean, theme: Theme,
                           opts: { indent: string; collapsedLines: number }): string[] {
   const cap = expanded ? 12 : opts.collapsedLines;
   const quote = theme.fg("dim", theme.md.quoteBorder);
-  const all = body.replace(/\r/g, "").split("\n").map(l => `${opts.indent}${quote} ${theme.fg("toolOutput", replaceTabs(l).slice(0, 100))}`);
+  const all = body.replace(/\r/g, "").split("\n").map(l => `${opts.indent}${quote} ${theme.fg("toolOutput", escapeHarnessTags(sanitizeText(replaceTabs(l))).slice(0, 100))}`);   // S1 + S2
   if (all.length <= cap) return all;
   return [...all.slice(0, cap), `${opts.indent}${quote} ${theme.fg("dim", `… +${all.length - cap} more lines`)}`];
 }
@@ -983,12 +1094,16 @@ Use `agent://<id>` (peer message) when:
 
 Use the room (`room{op:"post"}`) when:
 6. Several recipients must see the message AND each other's responses.
-7. It is a coordination artifact — a claim, release, shared finding, or status.
-8. It is an async, non-urgent update.
-9. It is a question that wants cross-critique or diverse input.
+7. It is a coordination artifact — a claim, release, shared finding, status, or async non-urgent update.
+8. It is a question that wants cross-critique or diverse input.
 
-Tie-break:
-10. If the token budget is tight and the task is not decomposable, prefer `agent://<id>`.
+When in doubt, use the room.
+
+Corrections:
+- A correction for a RUNNING agent goes to `agent://<id>` — a room mention does not hard-steer
+  a streaming agent.
+- A directed correction inside a multi-recipient collaboration goes to `agent://<id>` — the
+  room is for shared context, not private redirection.
 
 Asymmetry to remember: an interrupt *intent* is not an interrupt *strength*. A parent `agent://`
 message hard-steers a running agent. A room mention is T0 — it wakes an idle agent and cuts an
@@ -1094,12 +1209,12 @@ and a new session loads the extension; disabling the `panel` feature removes the
 |---|---|---|---|
 | **R1** | `ctx.localProtocolOptions` may be `undefined` | `types.ts:504-505`, `internal-urls/context.ts:33-36` `[F18 §1]` | Derive from `ctx.sessionManager.getArtifactsDir()/getSessionId()` (§3.3) |
 | **R2** | Deep subpath imports (`/internal-urls/local-protocol`, `/registry/agent-registry`, `/irc/bus`, `/utils/event-bus`) are not public API | `package.json` `"./*"`; probe-verified resolving; a `src/`-prefixed specifier does NOT resolve `[F18 §3]` | Prefer `pi.pi` (the whole root namespace) for everything it exports; only `local-protocol`, `EventBus` and `IrcBus` genuinely need a subpath. Pin the host version; add a smoke test that imports each specifier |
-| **R3** | `loadMode:"discoverable"` (the extension default) leaves the tool inactive | probe: `getActiveToolNames()` excludes it; includes it with `"essential"` `[F18 §5]` | Register `"essential"`; else `pi.setActiveTools([...])` in `session_start` |
+| **R3** | `loadMode:"discoverable"` (the extension default) mounts the tool under `xd://` instead of top-level | `tools/xdev.ts:79-82`, `sdk.ts:4019-4029`, `session-tools.ts:1068-1077` `[F18 §5]` | Register `"essential"`; if refused, fail loudly at registration — do NOT fall back to `setActiveTools` (replaces user's whole set) |
 | **R4** | `ctrl+s` is unwinnable — the built-in `app.session.observe` handler overwrites the extension handler (last `Map.set` wins, no layering) | executed simulation `[F17 §1]` | Use a non-reserved key; default `panelKey:""`; document that the user must clear `app.session.observe` in `keybindings.yml` for a `ctrl+s` binding |
 | **R5** | `ctx.ui.custom` is unsupported in RPC and a no-op without a UI context; `hasUI===true` does not guarantee it works | `extension-ui-controller.ts`, `omp://extensions.md` `[F16 §11]` | Guard `if (!ctx.hasUI \|\| ctx.mode !== "tui") return;` + try/catch → `ctx.ui.notify` |
 | **R6** | `ExtensionAPI` has no `settings` property; the registry is reachable only via a subpath import | `types.ts:1357-1696` has no `settings`; **corrected**: `"./config/*"` is an explicit export and `src/config/registry.ts` exists, so `lookup(id)` → `handle.get(pi.pi.settings)` works (matches `omp://extensions.md`) | Prefer the registry; fall back to `local://room/config.json` + `registerFlag` + manifest `env` if the subpath changes |
 | **R7** | `hello.ts` names the `execute` params `(_onUpdate, _ctx, _signal)`, which contradicts the wrapper | `hello.ts:18` vs `wrapper.ts:116-127` `[F19 §14]` | Follow the wrapper: `(toolCallId, params, signal, onUpdate, ctx)` |
-| **R8** | `IrcBus.wait` consumes the message (never reaches the inbox) and resolves the OLDEST waiter | `bus.ts:155-163,296-304` `[F0]`, `[F18 §3]` | Ship `wait_for_message` with `source:"room"` default; `"irc"` is opt-in, refuses a second concurrent waiter, and never also injects |
+| **R8** | `IrcBus.wait` consumes the message (never reaches the inbox) and resolves the OLDEST waiter | `bus.ts:155-163,296-304` `[F0]`, `[F18 §3]` | v1 ships only `source:"room"`; `"irc"` is out of scope (§1.2) |
 | **R9** | `interruptible` is not in the typed `ToolDefinition` | `types.ts:669-744` has no `interruptible`; the loop reads `tool?.interruptible`; `applyToolProxy` copies own keys `[F18 §5]`, `[F0]` | Declare it on the object literal and cast; **do not rely on it for correctness** — every wait tool also observes `signal` directly and bounds its own timeout |
 | **R10** | Module-level singleton leaks across tests / across independent top-level sessions | `[F18 §5]` | `reset()` seam + key the store by the `local://` root; a store per root, not a bare global |
 | **R11** | A session's `session_shutdown` clears that runner's timers — a room tick scheduled on a subagent dies when it finishes | probe: managed interval froze after `dispose()` `[F18 §4 d]` | Refcount background work per live session; clear only at zero; or run the tick from the main session only |
@@ -1120,6 +1235,8 @@ and a new session loads the extension; disabling the `panel` feature removes the
 | **R26** | Cold tree falls behind under high message rate | No formula for JOBS from message rate; `JOBS >= rate × latency` is uncalibrated `[F21.71]` | Agents read raw tail without waiting; late joiners get `gap` + raw-log fallback; monitor compaction lag via `room{op:"board"}` |
 | **R27** | `forget` + rebuild is expensive for large trees | `tree_drop` truncates all level files from `lo//size` upward; rebuild requires re-running compaction for all affected nodes `[F20.16]` | Rebuild lazily (only when a node is read); batch `forget` calls; consider incremental rebuild (only affected branches) |
 | **R28** | `ctx.setInterval` auto-cleared on `session_shutdown` (2s budget) | `[F18 §4 d]` probe: managed interval froze after `dispose()` | Run compactor from the main session only; refcount per live session; clear only at zero (same as R11) |
+| **R29** | Harness-tag injection via room message body | `deliver()` passes `record.body` verbatim; no `escapeHarnessTags` | Apply `escapeHarnessTags()` on delivery + per rendered line (§5.3, §7.4). Native: `irc-bridge.ts:189`, `harness-tags.ts:14-16` |
+| **R30** | ANSI escape injection via room message body | Rendered lines not sanitised | Apply `sanitizeText()` from `@oh-my-pi/pi-utils` on every rendered line (§5.3, §6.3, §7.4) |
 
 ---
 
@@ -1199,6 +1316,25 @@ test("room: claim → wait_for_claim → durable log", async () => {
 - **Eval path**: `agent()`/`workpool` spawn through the same host bridge into the same process and
   `AgentRegistry.global()` `[F18 §5]`; the eval cell runs in a subprocess kernel, so use the host
   bridge, not an in-cell import.
+- **Delivery adapter tests** (P7): all four paths — T2 (cursor bump only), T1 self (aside),
+  T1 sibling (aside), T0 sibling (steer). Assert `sendMessage`/`sendCustomMessage` called with
+  correct `deliverAs` and sanitised body.
+- **`wait_for_agent` test** (P7): spawn two agents, call `wait_for_agent` on one, assert it
+  resolves when the other changes status.
+- **Rate limiting test** (P7): srTCM — assert green/yellow/red transitions at the configured
+  CIR/CBS values.
+- **Cursor persistence test** (P7): `appendEntry("chatroom:cursor", ...)` — assert the cursor
+  survives a session resume.
+- **Tree rebuild test** (P7): write N records, build tree, `forget` a node, rebuild from log,
+  assert the tree is identical.
+- **No-UI fallback test** (P7): register renderers, assert they degrade gracefully when
+  `FramedMessageComponent` is absent.
+- **Card tests** (P7): `room:mention`, `room:claim`, `room:board-delta` — assert each renders
+  with the correct collapsed/expanded shape.
+- **Torn-line test** (C3): 100 valid lines, one torn line, 100 more valid lines → all 200 valid
+  records survive; the torn line is skipped and a `gap` record is emitted.
+- **Spoofed `from` test** (S4): post with a spoofed `from` → assert the stored record has
+  `from = ctx.agent.id`.
 
 ---
 

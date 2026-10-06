@@ -22,7 +22,7 @@ else is evidence behind it.
 |---|---|---|
 | R1 | `REPORT.md` | Gap is **semantics, not transport**. Rejected an unbounded shared chat log on measured evidence. |
 | R2 | `REPORT-v2-hybrid.md` | Revised: keep `agent://` intact, add room + board + blocking waits. |
-| R3 | `PLAN-build.md` | Build-ready plan: repo layout, store, tools, panel, cards, 9 phases. |
+| R3 | `PLAN-build.md` | Build-ready plan: repo layout, store, tools, panel, cards, 10 phases (P0–P8 + P1b). |
 | R4 | `REPORT-v3-tree.md` | Two-region log: raw tail + compressed tree over the cold backlog. |
 
 ## Architecture & Data Flow
