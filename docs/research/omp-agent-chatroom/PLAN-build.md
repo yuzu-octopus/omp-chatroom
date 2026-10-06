@@ -86,7 +86,7 @@ omp-chatroom/
 │   │   ├── log.ts                      # openRoomLog / appendLine / readSince / replay (§3.3)
 │   │   ├── room-store.ts               # RoomStore singleton: state + change listeners (§3.1)
 │   │   ├── claims.ts                   # claim arbiter: grant/release/reclaim/expire (§3.4)
-│   │   └── cursors.ts                  # per-agent cursor map + persistence (§3.5)
+│   │   ├── cursors.ts                  # per-agent cursor map + persistence (§3.5)
 │   │   ├── tree-store.ts               # binary summary tree: getNode/putNode/forget/cover (§3.6)
 │   │   └── compactor.ts                # background job: ctx.setInterval + streamSimple(@smol) (§3.6)
 │   ├── attention/
@@ -121,6 +121,89 @@ omp-chatroom/
     ├── attention.test.ts               # tier classify + caps + coalesce
     └── e2e-room.test.ts                # multi-agent in-process acceptance (§11)
 ```
+
+### 2.1.1 `src/index.ts` — ExtensionFactory + `__roomTest` (M-4, M-5)
+
+The default export is an `ExtensionFactory` — a function `(pi: ExtensionAPI) => void` that
+registers everything the plugin provides. It is called once per session tree by
+`bindPreparedExtensions` `[F0 Add.2.1]`.
+
+**What it registers** (gated by manifest features):
+```ts
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+
+export default function roomExtension(pi: ExtensionAPI): void {
+  const features = pi.enabledFeatures;   // null = use defaults
+  const has = (f: string) => features === null || features.has(f);
+
+  if (has("room")) {
+    registerRoomTool(pi);               // §4.1 — the op-dispatched `room` tool
+    registerRoomCommand(pi);            // §6.1 — `/room` slash command
+    registerMessageRenderers(pi);       // §7.2 — room:message, room:mention, room:claim, room:board-delta
+    registerHooks(pi);                  // §5.4 — before_agent_start + session_shutdown
+  }
+  if (has("wait-tools")) {
+    registerWaitForAgent(pi);            // §4.2
+    registerWaitForMessage(pi);          // §4.3
+    registerWaitForClaim(pi);            // §4.4
+  }
+  if (has("panel")) {
+    registerPanel(pi);                  // §6.2 — RoomPanel component
+  }
+}
+```
+
+**`__roomTest` named export** (M-4): a test-only seam for deterministic multi-agent
+testing. It does NOT change production behaviour — it is a plain object with a `reset()`
+method that clears the in-memory store between tests:
+```ts
+export const __roomTest = {
+  store: {
+    reset(): void {
+      // clears RoomStore singleton: records, claims, cursors, members, seq
+    }
+  }
+};
+```
+The test harness calls `__roomTest.store.reset()` before each test to get a clean slate.
+In production, `__roomTest` is never imported — it is tree-shaken or ignored.
+
+### 2.1.2 `src/ids.ts` — id derivation (M-6)
+
+```ts
+import * as crypto from "node:crypto";
+
+/**
+ * Derive the room id from the local:// root path.
+ * Rule: take the last path segment of the root, strip non-alphanumeric chars, lowercase.
+ * Example: /tmp/omp-local/abc123 → "abc123"
+ * If the root is empty or "/", fall back to "room".
+ */
+export function roomIdFor(root: string): string {
+  const seg = root.split("/").filter(Boolean).pop() ?? "";
+  const id = seg.replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+  return id || "room";
+}
+
+/**
+ * Canonical resource key: "<topic>/<key>"
+ */
+export function resourceKey(topic: string, key: string): string {
+  return `${topic}/${key}`;
+}
+
+/**
+ * Unique message id (UUID v4).
+ */
+export function newMessageId(): string {
+  return crypto.randomUUID();
+}
+```
+
+**`roomIdFor` derivation rule**: the room id is the last segment of the `local://` root
+path, lowercased and stripped of non-alphanumeric characters. This gives a stable,
+human-readable id that matches the session tree. If the root is `/` or empty, the
+fallback is `"room"`.
 
 ### 2.2 `package.json` — verbatim manifest shape
 
@@ -176,12 +259,41 @@ omp-chatroom/
 - There is **no `keybindings` field** and **no `skills` field** in `PluginManifest` `[F15 §Q1]`.
   Keybindings register at runtime via `registerShortcut`; skills are found by conventional
   `skills/` directory scan `[F15 §Q1]`.
-- **`ExtensionAPI` has no `settings` property**, but the settings registry IS reachable:
-  `lookup(id)` from the exported `@oh-my-pi/pi-coding-agent/config/registry` subpath
-  (explicit `"./config/*"` export; `src/config/registry.ts` exists), used as
-  `handle.get(pi.pi.settings)`. See §10 R6 for the fallback if that surface changes.
+- **`ExtensionAPI` has no `settings` property**, and the manifest `settings` field is
+  **CLI-facing documentation/validation only** — it is read by `cli/plugin-cli.ts:898+`
+  for `omp plugin validate` and `omp plugin info`, NOT by the extension at runtime.
+  `getPluginSettings` is a loader function (`plugins/loader.ts:482`), not on `ExtensionAPI`.
+  `lookup(id)` resolves *core* registry ids from `config/registry`, not plugin manifest settings.
+  **The 11 manifest settings are unreachable from extension code.** The plugin owns
+  `local://room/config.json` (read/write via the store), exposed via a `/room config` subcommand,
+  with `registerFlag` for per-launch overrides and the manifest `env` field as a fallback.
+  See §10 R6.
 - `enabledFeatures: null` means "use `default: true` features"; project overrides win
   `[F15 §Q3]`.
+
+### 2.3 `tsconfig.json` — P0 deliverable (M-3)
+
+```json
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "Preserve",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "types": ["bun"]
+  },
+  "include": ["src", "tests"]
+}
+```
+
+**Why these options**: `target: ESNext` + `module: Preserve` + `moduleResolution: bundler`
+match Bun's native TS support (Bun reads TS directly, no transpile step). `noEmit: true`
+because Bun does the execution; `tsc` is only for typechecking. `skipLibCheck: true`
+skips `.d.ts` checking (the host's types are not fully resolvable in a plugin context).
+`types: ["bun"]` adds Bun's global types. `include: ["src", "tests"]` covers the
+implementation and test files.
 
 ---
 
@@ -262,7 +374,7 @@ type RoomRecord =
   | { v: 1; seq: number; ts: number; kind: "release"; id: string; from: string; resource: string; reason: "released" | "expired" | "reclaimed" | "aborted" }
   | { v: 1; seq: number; ts: number; kind: "note";    id: string; from: string; topic: string; body: string }
   | { v: 1; seq: number; ts: number; kind: "member";  id: string; from: string; action: "join" | "leave" }
-  | { v: 1; seq: number; ts: number; kind: "gap";     id: string; from: string; skipped: number; reason: "retention" };
+  | { v: 1; seq: number; ts: number; kind: "gap";     id: string; from: string; skipped: number; reason: "retention" | "invalid" | "corrupt" };
 
 type Performative = "inform" | "request" | "propose" | "accept" | "reject" | "query" | "failure";
 ```
@@ -334,6 +446,23 @@ Emit a `gap` record noting the skipped count.
 **Record validation on replay** (S3): validate each parsed record against the `RoomRecord` schema
 (§3.2) — check `v`, `kind`, and per-kind required fields. Quarantine failures with a `gap` record
 `reason:"invalid"`.
+
+**`seq` assignment** (M-2): only a **successfully parsed** record consumes a `seq`.
+A skipped or malformed line does NOT consume a `seq` — the `gap` record receives the next
+available `seq`. This prevents a skip from shifting later cursors: if a malformed line
+consumed a `seq`, every subsequent record would have a `seq` off by one, and `read since=<cursor>`
+would return wrong results. The `gap` record is a first-class record with its own `seq`.
+
+**Per-kind required fields** (S3): validation checks these fields on replay:
+| kind | required fields |
+|---|---|
+| `msg` | `v`, `seq`, `ts`, `kind`, `id`, `from`, `topic`, `body` |
+| `claim` | `v`, `seq`, `ts`, `kind`, `id`, `from`, `resource`, `ttlMs` |
+| `release` | `v`, `seq`, `ts`, `kind`, `id`, `from`, `resource`, `reason` |
+| `note` | `v`, `seq`, `ts`, `kind`, `id`, `from`, `topic`, `body` |
+| `member` | `v`, `seq`, `ts`, `kind`, `id`, `from`, `action` |
+| `gap` | `v`, `seq`, `ts`, `kind`, `id`, `from`, `skipped`, `reason` |
+Any missing field or wrong type → quarantine with `gap{reason:"invalid"}`.
 
 **`from` derivation** (S4): `from` is ALWAYS `ctx.agent.id` — it is never a tool parameter.
 A spoofed `from` in a tool call is ignored; the store overwrites it with the authenticated caller id.
@@ -416,6 +545,33 @@ dense-prefix CAS (copy OptMem's `tree_put`: refuses unless `count == lo//size`).
 check and the write MUST be in the same synchronous section — `streamSimple` awaits between
 check and write, so an explicit **write mutex** serialises them. Max spend = 1000 calls/day cap. `[R3 §3]`
 
+**Write mutex across `await`** (T2): the mutex is a promise chain, not a lock:
+```ts
+let queue: Promise<void> = Promise.resolve();
+function withWriteMutex<T>(criticalSection: () => Promise<T>): Promise<T> {
+  const result = queue.then(criticalSection);
+  queue = result.then(() => undefined, () => undefined);  // keep chain alive on error
+  return result;
+}
+```
+This protects the CAS-check-then-write sequence: `withWriteMutex(async () => {
+  if (count !== lo//size) return false;       // CAS check
+  const summary = await streamSimple(...);    // await inside the mutex
+  writeNode(lo, hi, summary);                // write
+  return true;
+})`. No two compaction streams can interleave their check-and-write.
+
+**`@smol` invocation** (minor): the compactor resolves the model via
+`ctx.models.resolve("@smol")` (the model registry is on `ExtensionContext`, not a global).
+It calls `streamSimple(model, context, options)` where `context` is a
+`{ messages: [{ role: "user", content: prompt }] }` shape and `options` carries
+`{ maxTokens: 288 }` (one TREE_REC worth of summary). The prompt is:
+`"Summarize the following room messages in ≤288 bytes. Cover: who, what, decisions, open questions."`
+followed by the raw records for the block. **Error policy**: retry up to 3 times
+`[invented]`; if all retries fail, skip the node (leave it unbuilt) and continue
+to the next pending block — do NOT pause the whole tree. A skipped node is simply
+absent; readers fall back to the raw log (T3).
+
 **Cost** `[R3 §5]`: one LLM call per block. Total blocks over N messages ≤ 2N. Free nodes
 (source already fits TREE_REC) cost nothing. When compaction lags: agents read raw tail
 without waiting; late joiners get `gap` + raw-log fallback. `[R3 §5]`
@@ -427,6 +583,16 @@ exactly what the summary represents.
 **Invalidation** `[R3 §4]`: `forget(lo, hi)` truncates every level file from `lo//size`
 upward, dropping the target and all ancestors. The log is never touched. Rebuild by
 re-running compaction. `[R3 §4]`
+
+**Why v1 ships the cold tree anyway** (M-13): the cold tree costs ~400 lines, a background
+job, a write mutex, and a deep import for an advisory, non-critical-path feature. A raw tail
+plus `read since=` already serves late joiners. **Decision: ship it in v1.** The user asked for
+it explicitly; late joiners get a bounded 96-line view instead of a `gap` record and a raw-log
+scavenger hunt; and the tree is the only way to answer "what happened in the last week?" without
+reading 5000 lines. The cost is contained: the tree is rebuildable (T1), never blocks readers (T3),
+and the raw log stays authoritative (T2). If the compactor ever becomes a maintenance burden,
+the fallback is to gate it behind a `coldTreeEnabled` flag and ship the raw-tail + `read since=`
+path only — but that is a v2 decision, not a v1 blocker.
 
 **Pruning job** (S5): a background job (interval: 60000 ms `[invented]`) enforces both
 `logMaxRecords` and `logMaxAgeMs`. It caps the in-memory `records` array and appends a `gap`
@@ -521,6 +687,55 @@ z.object({
 
 `resource` canonical form is `"<topic>/<key>"` — the same string `wait_for_claim` takes (§4.4).
 
+**`read` + compressed node** (minor): when `since` lands inside a compressed (cold-tree)
+node, `read` returns the node's summary text plus a `zoom` hint:
+`{ records: [{ v:1, seq:<nodeLo>, kind:"note", body:"<summary>", _zoomHint:{lo,hi} }], cursor, more }`.
+The agent then calls `room{op:"zoom", lo, hi}` to descend. The raw records are never
+materialized by `read` — the summary is the bounded view.
+
+**`note` and `member{action:"leave"}`** (minor): both are **system-generated only**.
+The store emits `note` for gap notices and compaction events; it emits
+`member{action:"leave"}` when a session shuts down. There is no `op:"note"` or
+`op:"leave"` — callers cannot create these records. `member{action:"join"}` is
+created by `join`.
+
+**`to` field** (minor): the `msg` schema's `to?` field is **reserved for v2**
+(directed room messages). v1 always leaves it `undefined`; `post` does not accept
+it. The field exists so the schema does not need a breaking change when directed
+messages land.
+
+**`tree`'s `raw` field** (minor): the `raw` boolean in `tree`'s return is `true`
+only for blocks in the **cold-tree tiling** that are ≤ RAW_MAX=16 and have not yet
+been compressed. It does **not** include the raw tail (the last R=50 records) —
+the raw tail is always readable via `read` and is not part of the tree. `raw:true`
+means "this block's summary is the raw text, not a compression."
+
+**`zoom` validation** (minor): `lo` and `hi` must satisfy:
+- `hi - lo` is a power of two (the tree is binary),
+- `lo` is aligned: `lo % (hi - lo) === 0`,
+- `0 <= lo < hi <= N` (within the log).
+If any check fails, return `{ ok:false, error:"invalid zoom range" }` — never throw.
+
+**`board` return shape** (minor):
+```ts
+{
+  claims: Array<{ resource: string; holder: string; ttlMs: number; expiresAt: number;
+                  acquiredAt: number; contended: number }>;
+  roster: Array<{ agentId: string; status: string; cursor: number; lag: number;
+                  topics: string[] }>;
+  topics: Array<{ topic: string; lastSeq: number; unread: number }>;
+}
+```
+
+**`join` idempotency** (minor): calling `join` twice for the same agent is a no-op
+after the first call — it returns the same digest and cursor without appending a
+second `member{action:"join"}` record.
+
+**`release` error cases** (minor):
+- Caller is not the holder → `{ ok:false, error:"not holder", holder:<currentHolder> }`.
+- Resource is unknown (no claim exists) → `{ ok:false, error:"unknown resource" }`.
+Both return normally; neither throws.
+
 ### 4.2 `wait_for_agent`
 
 ```ts
@@ -581,7 +796,11 @@ z.object({
 - Timeout is a **normal outcome, not an error** (`{ outcome: "timeout", acquired: false }`), the SQS
   empty-list / Redis nil shape `[R2 §B]`.
 - Implementation: in-store condition variable; on `release`/`reclaim`/expiry, the oldest waiter for
-  that resource is resolved `[R2 §Components 5]`.
+  that resource is resolved **and granted the lease** with its `ttl` →
+  `{ outcome: "event", acquired: true, claim: { resource, holder: <waiterAgentId>, ttlMs, expiresAt } }`.
+  If another agent takes the resource first (race between the release and a concurrent claim),
+  the waiter is **re-queued** (moved to the back of the wait queue) — it does NOT fail and does
+  NOT resolve with `acquired:false`. The waiter only resolves with `acquired:false` on timeout.
 
 ### 4.5 Shared result contract
 
@@ -607,8 +826,10 @@ The host only sees the tool result as opaque data.
 | **T1 step boundary** | room post on a topic you follow; status change on a claim you hold; unaddressed reply in a thread you participated in | `deliverAs:"aside"` at the next step boundary | only if idle |
 | **T2 pull only** | general chatter, presence, progress, unaddressed broadcasts | per-agent cursor only; never injected | never |
 
-**Tier predicate is TOTAL** (N1): T1 iff you follow the topic OR you hold/held a claim on it OR
-you posted any message in that thread (`threadRoot`). Everything unmatched defaults to **T2**.
+**Tier predicate is TOTAL** (N1): T1 iff you follow the topic OR you hold/held a claim on it
+(within the last 1 h `[invented]`) OR you posted any message in that thread (`threadRoot`) OR
+you are currently waiting on this resource (a `wait_for_claim` waiter — see M-8).
+Everything unmatched defaults to **T2**.
 
 **Ambiguous cases** (explicit rows):
 | Case | Classification | Reason |
@@ -616,7 +837,8 @@ you posted any message in that thread (`threadRoot`). Everything unmatched defau
 | Reply-to-reply in a thread you did not start | T1 | You posted in that thread (`threadRoot` match) |
 | Topic you follow but no claim, no post | T1 | You follow the topic |
 | Topic you do not follow, no claim, no post | T2 | No membership signal |
-| Claim expired > 1 h ago, topic not followed | T2 | "held" is bounded by a 1 h window `[invented]` |
+| Claim expired > 1 h ago, topic not followed | T2 | "held" is bounded by the 1 h window now in the predicate (M-1) |
+| You are waiting on a resource you do not hold | T1 | Active `wait_for_claim` waiter — gets claim/release events (M-8) |
 
 **Idle-target behavior** (N2): when the target is IDLE, both `deliverAs:"aside"` and `"steer"`
 start a real turn (verified `agent-session.ts:8446+`). T1 waking an idle agent is intended;
@@ -657,12 +879,17 @@ export function classify(record: RoomRecord, viewer: MemberState): "T0" | "T1" |
 `+N more room messages (M mention you) — read with room{op:"read", since:<cursor>}` `[F14 §3]`.
 T0 is exempt from the cap but carries its own 1-pending bound `[F14 §3]`.
 **Oversized message** (N7): a single message exceeding B=2048 tokens is truncated to a head +
-read handle (`… truncated, read with room{op:"read", since:<seq>}`).
+read handle (`… truncated, read with room{op:"read", since:<seq>}`). The full body is
+never lost from the log — `read since=<seq>` returns the complete record. A `local://`
+handle is also returned so the agent can read the raw file if needed.
 
 **Rate limit** — RFC 2697 srTCM, per agent, **room posts only**; T0 DMs are exempt (MQTT v5 exempts
 non-PUBLISH control packets; Slack exempts event delivery from write limits) `[F14 §4]`.
 **T0 rate-limit exemption is a DM flood bypass** (N5): bound T0 too (higher ceiling `[invented]`,
-coalesce rather than drop; never drop T0).
+coalesce rather than drop; never drop T0). The ceiling is a **coalescing** threshold: when
+T0 interrupts exceed the ceiling (default 50 `[invented]`), batch them into one digest
+interrupt rather than dropping any. The batch is delivered as a single T0 with a summary
+count. This is NOT a drop — every interrupt is eventually delivered.
 Green = post; yellow = post marked burst; red = coalesce into the next digest.
 
 **Drop policy** — drop-oldest for the log tail; **never silently below the minimum live cursor** —
@@ -1128,7 +1355,7 @@ Each phase ends with an acceptance check that a later implementer runs before mo
 
 ### P0 — Scaffolding, manifest, store core
 **Files**: `package.json`, `tsconfig.json`, `src/index.ts`, `src/store/{schema,log,room-store,cursors}.ts`, `tests/store.test.ts`.
-**Work**: manifest §2.2; `openRoomLog`/`appendLine` §3.3; record schema §3.2; replay → in-memory projection; cursor map.
+**Work**: manifest §2.2; `tsconfig.json` §2.3; `openRoomLog`/`appendLine` §3.3; record schema §3.2; replay → in-memory projection; cursor map.
 **Accept**: `bun test tests/store.test.ts` green —
 (a) 3 interleaved writers × 200 lines on one fd produce 600 parseable lines with zero torn lines;
 (b) `readSince(seq)` returns exactly the records after `seq`; (c) replay reconstructs `cursors` and `seq`;
@@ -1212,7 +1439,7 @@ and a new session loads the extension; disabling the `panel` feature removes the
 | **R3** | `loadMode:"discoverable"` (the extension default) mounts the tool under `xd://` instead of top-level | `tools/xdev.ts:79-82`, `sdk.ts:4019-4029`, `session-tools.ts:1068-1077` `[F18 §5]` | Register `"essential"`; if refused, fail loudly at registration — do NOT fall back to `setActiveTools` (replaces user's whole set) |
 | **R4** | `ctrl+s` is unwinnable — the built-in `app.session.observe` handler overwrites the extension handler (last `Map.set` wins, no layering) | executed simulation `[F17 §1]` | Use a non-reserved key; default `panelKey:""`; document that the user must clear `app.session.observe` in `keybindings.yml` for a `ctrl+s` binding |
 | **R5** | `ctx.ui.custom` is unsupported in RPC and a no-op without a UI context; `hasUI===true` does not guarantee it works | `extension-ui-controller.ts`, `omp://extensions.md` `[F16 §11]` | Guard `if (!ctx.hasUI \|\| ctx.mode !== "tui") return;` + try/catch → `ctx.ui.notify` |
-| **R6** | `ExtensionAPI` has no `settings` property; the registry is reachable only via a subpath import | `types.ts:1357-1696` has no `settings`; **corrected**: `"./config/*"` is an explicit export and `src/config/registry.ts` exists, so `lookup(id)` → `handle.get(pi.pi.settings)` works (matches `omp://extensions.md`) | Prefer the registry; fall back to `local://room/config.json` + `registerFlag` + manifest `env` if the subpath changes |
+| **R6** | `ExtensionAPI` has no `settings` property; manifest `settings` is CLI-facing only | `types.ts:1357-1696` has no `settings`; `PluginManifest.settings` is read only by `cli/plugin-cli.ts:898+`; `getPluginSettings` is a loader function (`plugins/loader.ts:482`), not on `ExtensionAPI`; `lookup(id)` resolves *core* registry ids, not plugin settings | Plugin owns `local://room/config.json` (read/write via the store), exposed via a `/room config` subcommand, with `registerFlag` for per-launch overrides and the manifest `env` field as a fallback |
 | **R7** | `hello.ts` names the `execute` params `(_onUpdate, _ctx, _signal)`, which contradicts the wrapper | `hello.ts:18` vs `wrapper.ts:116-127` `[F19 §14]` | Follow the wrapper: `(toolCallId, params, signal, onUpdate, ctx)` |
 | **R8** | `IrcBus.wait` consumes the message (never reaches the inbox) and resolves the OLDEST waiter | `bus.ts:155-163,296-304` `[F0]`, `[F18 §3]` | v1 ships only `source:"room"`; `"irc"` is out of scope (§1.2) |
 | **R9** | `interruptible` is not in the typed `ToolDefinition` | `types.ts:669-744` has no `interruptible`; the loop reads `tool?.interruptible`; `applyToolProxy` copies own keys `[F18 §5]`, `[F0]` | Declare it on the object literal and cast; **do not rely on it for correctness** — every wait tool also observes `signal` directly and bounds its own timeout |
@@ -1273,18 +1500,32 @@ test("room: claim → wait_for_claim → durable log", async () => {
   const a = await newSession(bus, registry, root, "AgentA");
   const b = await newSession(bus, registry, root, "AgentB");
   const roomA = a.getToolByName("room")!, roomB = b.getToolByName("room")!;
+  const waitClaimB = b.getToolByName("wait_for_claim")!;
 
-  const waitP = roomB.execute("c-wait", { op: "wait_claim", resource: "build/step" }, undefined, undefined);
+  // A claims first
+  await roomA.execute("c-claim", { op: "claim", topic: "build", key: "step", ttl: 300000 }, undefined, undefined);
+
+  // B waits for the claim to be released — still blocked
+  const waitP = waitClaimB.execute("c-wait", { resource: "build/step", ttl: 300000 }, undefined, undefined);
   let done = false; waitP.then(() => { done = true; });
   await Promise.resolve();
   expect(done).toBe(false);                                    // still blocked
 
-  await roomA.execute("c-claim", { op: "claim", topic: "build", key: "step", ttl: 300000 }, undefined, undefined);
+  // A releases → B's waiter is resolved AND granted the lease
+  await roomA.execute("c-release", { op: "release", topic: "build", key: "step" }, undefined, undefined);
   const winner = await Promise.race([waitP, Bun.sleep(1000).then(() => "TIMEOUT")]);
   expect(winner).not.toBe("TIMEOUT");                          // cross-session notification, no polling
+  expect(winner).toMatchObject({ outcome: "event", acquired: true, claim: { holder: "AgentB" } });
 
-  const logPath = resolveLocalUrlToPath("local://room/room.jsonl", { getArtifactsDir: () => root, getSessionId: () => "AgentA" });
-  const lines = fs.readFileSync(logPath, "utf8").split("\n").filter(Boolean).map(l => JSON.parse(l));
+  // First-writer-wins: A's re-claim loses (B now holds it)
+  const second = await roomA.execute("c-claim2", { op: "claim", topic: "build", key: "step", ttl: 300000 }, undefined, undefined);
+  expect(second).toMatchObject({ ok: false, holder: "AgentB" });
+
+  // Root sharing: same file read from B's root options
+  const logPathA = resolveLocalUrlToPath("local://room/room.jsonl", { getArtifactsDir: () => root, getSessionId: () => "AgentA" });
+  const logPathB = resolveLocalUrlToPath("local://room/room.jsonl", { getArtifactsDir: () => root, getSessionId: () => "AgentB" });
+  expect(logPathA).toBe(logPathB);
+  const lines = fs.readFileSync(logPathA, "utf8").split("\n").filter(Boolean).map(l => JSON.parse(l));
   expect(lines.map(l => l.kind)).toContain("claim");
   expect(lines.find(l => l.kind === "claim")).toMatchObject({ from: "AgentA", resource: "build/step" });
 
@@ -1296,10 +1537,10 @@ test("room: claim → wait_for_claim → durable log", async () => {
 
 | Assertion | Proves |
 |---|---|
-| B's `wait_for_claim` is still pending before A claims | the wait actually blocks (no busy-poll) |
-| It resolves with holder `AgentA` after A's claim | cross-session notification through the shared module store |
+| B's `wait_for_claim` is still pending before A releases | the wait actually blocks (no busy-poll) |
+| It resolves with `{outcome:"event", acquired:true, claim:{holder:"AgentB"}}` after A's release | cross-session notification + auto-grant of the lease |
 | The JSONL contains the `claim` line | the O_APPEND append pattern works and is durable |
-| A second `claim` from B returns `{ok:false, holder:"AgentA"}` | first-writer-wins |
+| A second `claim` from A returns `{ok:false, holder:"AgentB"}` | first-writer-wins |
 | The same file read from B's root options is identical | subagents share the parent's `local://` root |
 
 ### 11.3 Additional suites
