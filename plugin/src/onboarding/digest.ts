@@ -123,10 +123,3 @@ export function buildDigest(
   }
   return out;
 }
-
-export const DIGEST_TRUNCATION_ORDER: readonly ["cold-tree", "raw-tail", "claims", "roster"] = [
-  "cold-tree",
-  "raw-tail",
-  "claims",
-  "roster",
-]; // §5.4 U8

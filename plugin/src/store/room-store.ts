@@ -54,11 +54,6 @@ export interface RoomStore {
   reset(): void; // test seam (§2.1.1) — never evicts the registry entry
 }
 
-export interface RoomStoreOptions {
-  root: string;
-  roomId: string;
-} // [invented]
-
 // K9 — the globalThis-anchored registries, keyed by the absolute root; create-on-first-use. [invented]
 const STORES = globalMap<string, RoomStore>("__roomStores");
 
@@ -163,7 +158,6 @@ function createStore(root: string, roomId: string): RoomStore {
       }
       // Last live session: stop the background jobs, close the shared fd (K8), evict the root (K9).
       roomTimers.stop(root);
-      claimSweeper.stop(root);
       stopCompactor(root);
       closeRoomLog(root, roomId);
       STORES.delete(root);
@@ -249,7 +243,6 @@ export function resetRoomStores(): void {
   // [invented] __roomTest
   for (const [root, store] of STORES) {
     roomTimers.stop(root);
-    claimSweeper.stop(root);
     stopCompactor(root);
     closeRoomLog(root, store.roomId);
   }
@@ -277,22 +270,10 @@ export function enforceRetention(store: RoomStore, now: number): RoomRecord | nu
   // The drop is itself a record — the file is never truncated, only the projection (K19).
   return store.append({ kind: "gap", from: "system", skipped: dropped, reason: "retention" });
 }
-export function startPruneJob(store: RoomStore, ctx: ExtensionContext): void {
-  // [invented placement]
-  ctx.setInterval(() => {
-    enforceRetention(store, Date.now());
-  }, PRUNE_INTERVAL_MS);
-}
 
 // K3 — the third refcounted ctx.setInterval job: expireStale → release{reason:"expired"} →
 // promote the oldest waiter → T0 notice. The ONLY producer of release{reason:"expired"}.
 export const CLAIM_SWEEP_INTERVAL_MS = 5_000; // [invented] [calibrate]
-export function startClaimSweep(store: RoomStore, ctx: ExtensionContext): void {
-  // [invented]
-  ctx.setInterval(() => {
-    expireStale(store, Date.now());
-  }, CLAIM_SWEEP_INTERVAL_MS);
-}
 
 // [invented] — the refcounted timer registry (I4/R11/R28). One entry per root; the tick runs in the
 // main session only and is cleared when the last live session disposes.
@@ -321,33 +302,5 @@ export const roomTimers: RoomTimerRegistry = {
     if (handles === undefined) return;
     for (const handle of handles) clearInterval(handle);
     TIMERS.delete(root);
-  },
-};
-
-// K3 — the claim-expiry sweep as a named lifecycle object, so the three jobs (sweep, prune,
-// compactor) are symmetric and the timer registry can drive them from one place.
-export interface ClaimSweeper {
-  // [invented]
-  start(store: RoomStore, ctx: ExtensionContext): void;
-  stop(root: string): void;
-}
-const SWEEPERS = globalMap<string, Timer>("__roomSweepers");
-
-export const claimSweeper: ClaimSweeper = {
-  // [invented]
-  start(store: RoomStore, ctx: ExtensionContext): void {
-    if (SWEEPERS.has(store.root)) return;
-    SWEEPERS.set(
-      store.root,
-      ctx.setInterval(() => {
-        expireStale(store, Date.now());
-      }, CLAIM_SWEEP_INTERVAL_MS),
-    );
-  },
-  stop(root: string): void {
-    const handle = SWEEPERS.get(root);
-    if (handle === undefined) return;
-    clearInterval(handle);
-    SWEEPERS.delete(root);
   },
 };

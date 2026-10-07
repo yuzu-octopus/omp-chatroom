@@ -16,7 +16,6 @@ export interface TreeStore {
 export const TREE_REC = 288; // §5.2
 export const RAW_MAX = 16; // §3.6 merge shape
 export const COVER_BUDGET_LINES = 96; // §5.2 (OptMem WAKE_LINES)
-export const RAW_TAIL_R = 50; // §5.2 (matches §3.5 join cursor)
 
 /** Bytes of summary text a record can hold (OptMem reserves the last byte for the newline). */
 const SUMMARY_BYTES = TREE_REC - 1;

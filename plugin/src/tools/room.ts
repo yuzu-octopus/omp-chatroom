@@ -1,8 +1,17 @@
 import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent";
 import { deliver } from "../attention/delivery";
-import { admitPost, isMuted, selectT1 } from "../attention/governor";
-import { classify } from "../attention/tiers";
+import {
+  admitPost,
+  isMuted,
+  muteRoom,
+  muteTopic,
+  selectT1,
+  unmuteRoom,
+  unmuteTopic,
+  unreadCounts,
+} from "../attention/governor";
+import { classify, type Tier } from "../attention/tiers";
 import { buildDigest } from "../onboarding/digest";
 import { safeRoomText } from "../onboarding/escape";
 import { contended, grant, reclaimIfStale, release } from "../store/claims";
@@ -10,6 +19,13 @@ import { resolveRoomConfig } from "../store/config";
 import { bumpCursor, cursorFor, initCursor, lagFor } from "../store/cursors";
 import { type MemberState, type RoomStore, roomStoreFor } from "../store/room-store";
 import type { BoardResult, Performative, RoomRecord, TopicRow } from "../store/schema";
+import {
+  COVER_BUDGET_LINES,
+  openTreeStore,
+  RAW_MAX,
+  validateZoomRange,
+  zoom,
+} from "../store/tree-store";
 export const ROOM_TOOL_NAME = "room";
 export const ROOM_DESCRIPTION: string = `Post to and read the shared room for this session tree: a
 topic-based claim board plus a bounded chat stream. Use it for coordination artifacts several agents
@@ -21,9 +37,20 @@ per-agent lag).
 Before starting work another agent might also start, claim it. Read the board first.`; // K16 — §4.0.1, trimmed to the Option A op set (§1.4)
 export const ROOM_LOAD_MODE = "essential"; // RISK R3
 
-// Option A (§1.4) ships six of the twelve §4.1 ops; the rest (topics/mute/unmute/tree/zoom/recall)
-// belong to dropped rows and are not advertised, not schematized and not dispatched.
-export type RoomOp = "join" | "read" | "post" | "claim" | "release" | "board";
+// §4.1 — all 11 ops: join/read/post/claim/release/board/topics/mute/unmute/tree/zoom/recall
+export type RoomOp =
+  | "join"
+  | "read"
+  | "post"
+  | "claim"
+  | "release"
+  | "board"
+  | "topics"
+  | "mute"
+  | "unmute"
+  | "tree"
+  | "zoom"
+  | "recall";
 
 // K13 — the params type is explicit so `params.op` is not `unknown`; never annotate the tool object
 // with a bare `ToolDefinition` (that erases TParams).
@@ -38,16 +65,33 @@ export interface RoomParams {
   ttl?: number;
   since?: number;
   limit?: number;
+  lo?: number;
+  hi?: number;
+  pattern?: string;
 }
 
 // K1 — the `details` payload. `ok` is always present; `outcome` only on the wait tools.
 export type RoomToolDetails =
   | { ok: true; op: "join"; digest: string; cursor: number }
   | { ok: true; op: "read"; records: RoomRecord[]; cursor: number; more: boolean }
-  | { ok: true; op: "post"; id: string; seq: number; deliveryError?: string }
+  | { ok: true; op: "post"; id: string; seq: number; tier: Tier; deliveryError?: string }
   | { ok: true; op: "claim"; holder: string; expiresAt: number; deliveryError?: string }
   | { ok: true; op: "release"; deliveryError?: string }
   | { ok: true; op: "board"; board: BoardResult }
+  | { ok: true; op: "topics"; topics: TopicRow[] }
+  | { ok: true; op: "mute" }
+  | { ok: true; op: "unmute" }
+  | {
+      ok: true;
+      op: "tree";
+      blocks: Array<{ lo: number; hi: number; size: number; raw: boolean; summary?: string }>;
+    }
+  | {
+      ok: true;
+      op: "zoom";
+      children: Array<{ lo: number; hi: number; size: number; raw: boolean; text: string }>;
+    }
+  | { ok: true; op: "recall"; matches: Array<{ seq: number; record: RoomRecord }> }
   | { ok: false; error: string; holder?: string; expiresAt?: number }; // "not holder" carries the expiry
 
 // K1 — the uniform tool result. `content` is ALWAYS present (the host coerces a result without a
@@ -241,7 +285,20 @@ export function registerRoomTool(pi: ExtensionAPI): void {
   // §2.1.1
   const z = pi.zod;
   const params = z.object({
-    op: z.enum(["join", "read", "post", "claim", "release", "board"]),
+    op: z.enum([
+      "join",
+      "read",
+      "post",
+      "claim",
+      "release",
+      "board",
+      "topics",
+      "mute",
+      "unmute",
+      "tree",
+      "zoom",
+      "recall",
+    ]),
     topic: z.string().optional(),
     body: z.string().optional(),
     mention: z.array(z.string()).optional(),
@@ -253,6 +310,9 @@ export function registerRoomTool(pi: ExtensionAPI): void {
     ttl: z.number().optional(),
     since: z.number().optional(),
     limit: z.number().optional(),
+    lo: z.number().optional(),
+    hi: z.number().optional(),
+    pattern: z.string().optional(),
   });
 
   pi.registerTool({
@@ -333,7 +393,13 @@ export function registerRoomTool(pi: ExtensionAPI): void {
           viewer.topics.add(topic);
           const failure = await notifyRecipients(pi, ctx, store, [record], agentId);
           return okWithDelivery(
-            { ok: true, op: "post", id: record.id, seq: record.seq },
+            {
+              ok: true,
+              op: "post",
+              id: record.id,
+              seq: record.seq,
+              tier: classify(record, viewer),
+            },
             `room post → ${safe(topic)} · seq ${record.seq}`,
             failure,
           );
@@ -425,6 +491,103 @@ export function registerRoomTool(pi: ExtensionAPI): void {
           return ok(
             { ok: true, op: "board", board },
             `room board → ${board.claims.length} claim(s), ${board.roster.length} member(s), ${board.topics.length} topic(s)`,
+          );
+        }
+
+        case "topics": {
+          const viewer = viewerFor(store, agentId);
+          const counts = unreadCounts(store, viewer);
+          const byTopic = new Map<string, TopicRow>();
+          const topics: TopicRow[] = [];
+          for (const record of store.records) {
+            if (record.kind !== "msg" && record.kind !== "note") continue;
+            let row = byTopic.get(record.topic);
+            if (!row) {
+              row = { topic: record.topic, lastSeq: record.seq, unread: 0 };
+              byTopic.set(record.topic, row);
+              topics.push(row);
+            }
+            row.lastSeq = record.seq;
+            row.unread = counts.get(record.topic) ?? 0;
+          }
+          return ok({ ok: true, op: "topics", topics }, `room topics → ${topics.length} topic(s)`);
+        }
+
+        case "mute": {
+          if (p.topic === undefined) {
+            muteRoom(store, agentId);
+          } else {
+            muteTopic(store, agentId, p.topic);
+          }
+          return ok(
+            { ok: true, op: "mute" },
+            `room mute → ${p.topic !== undefined ? safe(p.topic) : "whole room"}`,
+          );
+        }
+
+        case "unmute": {
+          if (p.topic === undefined) {
+            unmuteRoom(store, agentId);
+          } else {
+            unmuteTopic(store, agentId, p.topic);
+          }
+          return ok(
+            { ok: true, op: "unmute" },
+            `room unmute → ${p.topic !== undefined ? safe(p.topic) : "whole room"}`,
+          );
+        }
+
+        case "tree": {
+          const tree = openTreeStore(store.treePath, store.records.length);
+          const tiling = tree.cover(store.records.length, COVER_BUDGET_LINES);
+          const blocks = tiling.map(([lo, hi]) => {
+            const size = hi - lo;
+            const raw = size <= RAW_MAX;
+            const summary = raw ? undefined : (tree.getNode(lo, hi) ?? undefined);
+            return { lo, hi, size, raw, ...(summary !== undefined ? { summary } : {}) };
+          });
+          return ok({ ok: true, op: "tree", blocks }, `room tree → ${blocks.length} block(s)`);
+        }
+
+        case "zoom": {
+          const lo = p.lo;
+          const hi = p.hi;
+          if (lo === undefined || hi === undefined) return fail("zoom requires lo and hi");
+          const n = store.records.length;
+          const validation = validateZoomRange(lo, hi, n);
+          if (!validation.ok) return fail(validation.error);
+          const tree = openTreeStore(store.treePath, n);
+          const children = zoom(tree, lo, hi, (seq) => {
+            const record = store.records[seq];
+            return record !== undefined ? recordLine(record) : "";
+          });
+          return ok(
+            { ok: true, op: "zoom", children },
+            `room zoom → ${children.length} child(ren)`,
+          );
+        }
+
+        case "recall": {
+          const pattern = p.pattern;
+          if (pattern === undefined) return fail("recall requires a pattern");
+          let regex: RegExp;
+          try {
+            regex = new RegExp(pattern);
+          } catch {
+            return fail("invalid regex pattern");
+          }
+          const matches: Array<{ seq: number; record: RoomRecord }> = [];
+          for (let i = store.records.length - 1; i >= 0; i--) {
+            const record = store.records[i]!;
+            const text = recordLine(record);
+            if (regex.test(text)) {
+              matches.push({ seq: record.seq, record });
+              if (matches.length >= RECALL_LIMIT_MAX) break;
+            }
+          }
+          return ok(
+            { ok: true, op: "recall", matches },
+            `room recall → ${matches.length} match(es)`,
           );
         }
       }

@@ -84,6 +84,18 @@ function roomResultSummary(result: AgentToolResult<RoomToolDetails>): {
           `${details.board.roster.length} member(s)`,
         ],
       };
+    case "topics":
+      return { meta: [`${details.topics.length} topic(s)`] };
+    case "mute":
+      return { meta: ["muted"] };
+    case "unmute":
+      return { meta: ["unmuted"] };
+    case "tree":
+      return { meta: [`${details.blocks.length} block(s)`] };
+    case "zoom":
+      return { meta: [`${details.children.length} child(ren)`] };
+    case "recall":
+      return { meta: [`${details.matches.length} match(es)`] };
   }
 }
 

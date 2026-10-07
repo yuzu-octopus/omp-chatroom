@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { AgentRegistry, type ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import {
   contended,
@@ -22,6 +23,7 @@ import {
   roomStoreFor,
   storeFor,
 } from "../src/store/room-store";
+import { registerRoomTool } from "../src/tools/room";
 
 // §3.1 — a real store over a real temp root; the real JSONL log is written (§3.3).
 const ROOM_ID = "rtool";
@@ -402,4 +404,298 @@ test("idempotent accessor: 50 roomStoreFor calls return the same store object", 
   for (let i = 0; i < 49; i++) {
     expect(roomStoreFor(ctx)).toBe(first);
   }
+});
+
+// --- §4.1 Option B ops: topics/mute/unmute/tree/zoom/recall + post tier ---
+
+/** Invoke the room tool with a specific ctx. */
+function invokeRoom(
+  ctx: ExtensionContext,
+  params: Record<string, unknown>,
+): Promise<{ content: Array<{ type: string; text?: string }>; details?: Record<string, unknown> }> {
+  let tool:
+    | {
+        execute: (
+          id: string,
+          params: Record<string, unknown>,
+          signal: AbortSignal,
+          onUpdate: (u: unknown) => void,
+          ctx: ExtensionContext,
+        ) => Promise<{
+          content: Array<{ type: string; text?: string }>;
+          details?: Record<string, unknown>;
+        }>;
+      }
+    | undefined;
+  const pi = {
+    zod: {
+      object: (shape: Record<string, unknown>) => shape,
+      enum: (values: string[]) => ({
+        values,
+        optional: function (this: { optional: unknown }) {
+          return this;
+        },
+      }),
+      string: () => ({
+        optional: function (this: { optional: unknown }) {
+          return this;
+        },
+      }),
+      number: () => ({
+        optional: function (this: { optional: unknown }) {
+          return this;
+        },
+      }),
+      array: (t: unknown) => ({
+        t,
+        optional: function (this: { optional: unknown }) {
+          return this;
+        },
+      }),
+      optional: (t: unknown) => ({ t }),
+    },
+    registerTool: (def: {
+      name: string;
+      execute: typeof tool extends infer T ? (T extends { execute: infer E } ? E : never) : never;
+    }) => {
+      if (def.name === "room") tool = def as typeof tool;
+    },
+  } as unknown as ExtensionAPI;
+  registerRoomTool(pi);
+  if (!tool) throw new Error("room tool not registered");
+  return tool.execute("test-call", params, new AbortController().signal, () => {}, ctx);
+}
+
+/** Create a test store with a fakeCtx. */
+function newTestStore(): { store: RoomStore; ctx: ExtensionContext } {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "room-tool-"));
+  const ctx = fakeCtx(root, "AgentA");
+  const store = roomStoreFor(ctx);
+  return { store, ctx };
+}
+
+// --- topics ---
+
+test("topics: returns topic list with unread counts and lastSeq", async () => {
+  const { store, ctx } = newTestStore();
+  store.append({ kind: "msg", from: "AgentA", topic: "build", body: "hello" });
+  store.append({ kind: "msg", from: "AgentB", topic: "build", body: "world" });
+  store.append({ kind: "msg", from: "AgentA", topic: "test", body: "foo" });
+
+  const result = await invokeRoom(ctx, { op: "topics" });
+  expect(result.details).toMatchObject({ ok: true, op: "topics" });
+  const topics = result.details?.topics as Array<{
+    topic: string;
+    unread: number;
+    lastSeq: number;
+  }>;
+  expect(topics).toHaveLength(2);
+  const build = topics.find((t) => t.topic === "build");
+  const test = topics.find((t) => t.topic === "test");
+  expect(build).toMatchObject({ topic: "build", unread: 2, lastSeq: 2 });
+  expect(test).toMatchObject({ topic: "test", unread: 1, lastSeq: 3 });
+});
+
+test("topics: empty room returns empty array", async () => {
+  const { ctx } = newTestStore();
+  const result = await invokeRoom(ctx, { op: "topics" });
+  expect(result.details).toMatchObject({ ok: true, op: "topics", topics: [] });
+});
+
+// --- mute / unmute ---
+
+test("mute: topic mute adds to muted set", async () => {
+  const { store, ctx } = newTestStore();
+  const result = await invokeRoom(ctx, { op: "mute", topic: "build" });
+  expect(result.details).toMatchObject({ ok: true, op: "mute" });
+  const member = store.members.get("AgentA");
+  expect(member?.muted.has("build")).toBe(true);
+});
+
+test("mute: whole-room mute adds empty string sentinel", async () => {
+  const { store, ctx } = newTestStore();
+  const result = await invokeRoom(ctx, { op: "mute" });
+  expect(result.details).toMatchObject({ ok: true, op: "mute" });
+  const member = store.members.get("AgentA");
+  expect(member?.muted.has("")).toBe(true);
+});
+
+test("unmute: removes topic from muted set", async () => {
+  const { store, ctx } = newTestStore();
+  await invokeRoom(ctx, { op: "mute", topic: "build" });
+  const result = await invokeRoom(ctx, { op: "unmute", topic: "build" });
+  expect(result.details).toMatchObject({ ok: true, op: "unmute" });
+  const member = store.members.get("AgentA");
+  expect(member?.muted.has("build")).toBe(false);
+});
+
+test("unmute: whole-room unmute removes sentinel", async () => {
+  const { store, ctx } = newTestStore();
+  await invokeRoom(ctx, { op: "mute" });
+  const result = await invokeRoom(ctx, { op: "unmute" });
+  expect(result.details).toMatchObject({ ok: true, op: "unmute" });
+  const member = store.members.get("AgentA");
+  expect(member?.muted.has("")).toBe(false);
+});
+
+test("mute: muting a non-existent topic is allowed", async () => {
+  const { store, ctx } = newTestStore();
+  const result = await invokeRoom(ctx, { op: "mute", topic: "nonexistent" });
+  expect(result.details).toMatchObject({ ok: true, op: "mute" });
+  const member = store.members.get("AgentA");
+  expect(member?.muted.has("nonexistent")).toBe(true);
+});
+
+test("mute: does not persist to the log file (in-memory only)", async () => {
+  const { store, ctx } = newTestStore();
+  // Join first to create a member record in the log
+  await invokeRoom(ctx, { op: "join" });
+  await invokeRoom(ctx, { op: "mute", topic: "build" });
+  expect(store.members.get("AgentA")?.muted.has("build")).toBe(true);
+
+  // Verify the muted set is NOT in the log file (in-memory only)
+  const logContent = fs.readFileSync(store.logPath, "utf8");
+  const logLines = logContent
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => JSON.parse(l));
+  // No mute record should exist in the log
+  expect(logLines.some((r: Record<string, unknown>) => r.kind === "mute")).toBe(false);
+  // The member record should exist
+  expect(logLines.some((r: Record<string, unknown>) => r.kind === "member")).toBe(true);
+});
+
+// --- tree ---
+
+test("tree: returns cover tiling with blocks", async () => {
+  const { store, ctx } = newTestStore();
+  for (let i = 0; i < 10; i++) {
+    store.append({ kind: "msg", from: "AgentA", topic: "t", body: `msg ${i}` });
+  }
+  const result = await invokeRoom(ctx, { op: "tree" });
+  expect(result.details).toMatchObject({ ok: true, op: "tree" });
+  const blocks = result.details?.blocks as Array<{
+    lo: number;
+    hi: number;
+    size: number;
+    raw: boolean;
+  }>;
+  expect(blocks.length).toBeGreaterThan(0);
+  // All blocks should be within [0, 10)
+  for (const b of blocks) {
+    expect(b.lo).toBeGreaterThanOrEqual(0);
+    expect(b.hi).toBeLessThanOrEqual(10);
+    expect(b.size).toBe(b.hi - b.lo);
+  }
+});
+
+test("tree: empty room returns empty blocks", async () => {
+  const { ctx } = newTestStore();
+  const result = await invokeRoom(ctx, { op: "tree" });
+  expect(result.details).toMatchObject({ ok: true, op: "tree", blocks: [] });
+});
+
+// --- zoom ---
+
+test("zoom: returns children of a valid range", async () => {
+  const { store, ctx } = newTestStore();
+  for (let i = 0; i < 8; i++) {
+    store.append({ kind: "msg", from: "AgentA", topic: "t", body: `msg ${i}` });
+  }
+  const result = await invokeRoom(ctx, { op: "zoom", lo: 0, hi: 8 });
+  expect(result.details).toMatchObject({ ok: true, op: "zoom" });
+  const children = result.details?.children as Array<{
+    lo: number;
+    hi: number;
+    size: number;
+    raw: boolean;
+    text: string;
+  }>;
+  expect(children).toHaveLength(2);
+  expect(children[0]).toMatchObject({ lo: 0, hi: 4, size: 4 });
+  expect(children[1]).toMatchObject({ lo: 4, hi: 8, size: 4 });
+});
+
+test("zoom: invalid range returns error", async () => {
+  const { store, ctx } = newTestStore();
+  for (let i = 0; i < 8; i++) {
+    store.append({ kind: "msg", from: "AgentA", topic: "t", body: `msg ${i}` });
+  }
+  // lo=1 is not aligned for size=8
+  const result = await invokeRoom(ctx, { op: "zoom", lo: 1, hi: 9 });
+  expect(result.details).toMatchObject({ ok: false, error: "invalid zoom range" });
+});
+
+test("zoom: missing lo/hi returns error", async () => {
+  const { ctx } = newTestStore();
+  const result = await invokeRoom(ctx, { op: "zoom" });
+  expect(result.details).toMatchObject({ ok: false });
+});
+
+// --- recall ---
+
+test("recall: regex search returns matches newest first", async () => {
+  const { store, ctx } = newTestStore();
+  store.append({ kind: "msg", from: "AgentA", topic: "t", body: "hello world" });
+  store.append({ kind: "msg", from: "AgentB", topic: "t", body: "goodbye world" });
+  store.append({ kind: "msg", from: "AgentA", topic: "t", body: "hello again" });
+
+  const result = await invokeRoom(ctx, { op: "recall", pattern: "hello" });
+  expect(result.details).toMatchObject({ ok: true, op: "recall" });
+  const matches = result.details?.matches as Array<{ seq: number; record: { body: string } }>;
+  expect(matches).toHaveLength(2);
+  // Newest first
+  expect(matches[0].seq).toBe(3);
+  expect(matches[0].record.body).toBe("hello again");
+  expect(matches[1].seq).toBe(1);
+  expect(matches[1].record.body).toBe("hello world");
+});
+
+test("recall: invalid regex returns error", async () => {
+  const { ctx } = newTestStore();
+  const result = await invokeRoom(ctx, { op: "recall", pattern: "[invalid" });
+  expect(result.details).toMatchObject({ ok: false, error: "invalid regex pattern" });
+});
+
+test("recall: missing pattern returns error", async () => {
+  const { ctx } = newTestStore();
+  const result = await invokeRoom(ctx, { op: "recall" });
+  expect(result.details).toMatchObject({ ok: false });
+});
+
+test("recall: caps at 100 matches", async () => {
+  const { store, ctx } = newTestStore();
+  for (let i = 0; i < 150; i++) {
+    store.append({ kind: "msg", from: "AgentA", topic: "t", body: "match me" });
+  }
+  const result = await invokeRoom(ctx, { op: "recall", pattern: "match" });
+  expect(result.details).toMatchObject({ ok: true, op: "recall" });
+  const matches = result.details?.matches as Array<{ seq: number }>;
+  expect(matches).toHaveLength(100);
+});
+
+// --- post tier ---
+
+test("post: returns tier in details", async () => {
+  const { ctx } = newTestStore();
+  const result = await invokeRoom(ctx, { op: "post", topic: "build", body: "hello" });
+  expect(result.details).toMatchObject({ ok: true, op: "post" });
+  expect(result.details).toHaveProperty("tier");
+  const tier = result.details?.tier as string;
+  expect(["T0", "T1", "T2"]).toContain(tier);
+});
+
+test("post: tier is T1 for a new topic (poster auto-follows)", async () => {
+  const { ctx } = newTestStore();
+  const result = await invokeRoom(ctx, { op: "post", topic: "new-topic", body: "first message" });
+  expect(result.details).toMatchObject({ ok: true, op: "post", tier: "T1" });
+});
+
+test("post: tier is T1 for a followed topic", async () => {
+  const { ctx } = newTestStore();
+  // First post creates the topic and follows it
+  await invokeRoom(ctx, { op: "post", topic: "build", body: "first" });
+  // Second post on same topic should be T1 (followed)
+  const result = await invokeRoom(ctx, { op: "post", topic: "build", body: "second" });
+  expect(result.details).toMatchObject({ ok: true, op: "post", tier: "T1" });
 });

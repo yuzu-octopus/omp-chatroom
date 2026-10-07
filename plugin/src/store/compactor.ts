@@ -8,7 +8,6 @@ import { openTreeStore, RAW_MAX, TREE_REC } from "./tree-store";
 
 export const COMPACT_JOBS = 8; // §5.2 [invented]
 export const COMPACT_MAX_CALLS_PER_DAY = 20_000; // K4 — a RATE cap [calibrate]
-export const SUMMARY_MAX_BYTES = 288; // = TREE_REC
 export const COMPACT_INTERVAL_MS = 5_000; // [invented]
 export const COMPACT_MAX_RETRIES = 3; // §3.6 [invented]
 

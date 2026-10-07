@@ -1,6 +1,6 @@
 ---
 name: omp-agent-chatroom
-description: Use when coordinating with peer agents in one omp session tree — claiming a shared resource, checking who holds a file or step, posting a shared finding, reading the room board, or blocking on a claim. Triggers on: claim a resource, who owns this file, is anyone working on this, coordinate with other agents, check the room, room board, post to the room, avoid duplicate work, wait for a claim, release my claim, shared status board.
+description: Use when coordinating with peer agents in one omp session tree — claiming a shared resource, checking who holds a file or step, posting a shared finding, reading the room board, muting a noisy topic, searching the room log, or blocking until a peer, a message, or a claim arrives. Triggers on: claim a resource, who owns this file, is anyone working on this, coordinate with other agents, check the room, room board, post to the room, avoid duplicate work, wait for a claim, wait for an agent, wait for a message, release my claim, shared status board, mute a topic.
 ---
 
 # Agent Chatroom
@@ -69,9 +69,8 @@ Rules that are not optional:
 
 One tool, `room`, dispatched on `op`. All ops return a `content` line plus `details` with `ok`.
 
-This build ships **six ops**: `join`, `read`, `post`, `claim`, `release`, `board`. There is no
-`topics`, `mute`, `unmute`, `tree`, `zoom`, or `recall`, and no `wait_for_agent` /
-`wait_for_message` — do not call them.
+This build ships the full **eleven ops**: `join`, `read`, `post`, `claim`, `release`, `board`,
+`topics`, `mute`, `unmute`, `tree`, `zoom`, `recall` — plus all three wait tools.
 
 | op | use when | key args |
 |---|---|---|
@@ -81,6 +80,11 @@ This build ships **six ops**: `join`, `read`, `post`, `claim`, `release`, `board
 | `claim` | take exclusive ownership of `"<topic>/<key>"` | `topic`, `key`, `ttl?` (ms) |
 | `release` | drop a claim you hold | `topic`, `key` |
 | `board` | see claims, roster, per-agent lag, unread topics | — |
+| `topics` | list topics with unread counts | — |
+| `mute` / `unmute` | silence a topic, or the whole room when `topic` is omitted | `topic?` |
+| `tree` | see the cold-tree tiling (which ranges are compressed) | — |
+| `zoom` | descend one level into a tree node | `lo`, `hi` |
+| `recall` | regex search over the raw log, newest first, cap 100 | `pattern` |
 
 Resource keys are always `"<topic>/<key>"` — the same string `wait_for_claim` takes.
 
@@ -92,8 +96,9 @@ and should be referenced by id.
 
 ## Human-facing
 
-A human can run `/room board`, `/room join`, `/room claim <topic> <key> [ttlMs]`,
-`/room release <topic> <key>`, `/room post <topic> <body>`, or `/room config` from the prompt.
+A human can run `/room` (opens the panel), `/room board`, `/room join`,
+`/room claim <topic> <key> [ttlMs]`, `/room release <topic> <key>`, `/room post <topic> <body>`,
+or `/room config` from the prompt.
 
 ## Limits to design around
 
@@ -101,4 +106,34 @@ A human can run `/room board`, `/room join`, `/room claim <topic> <key> [ttlMs]`
   record and does not replace artifacts.
 - Agents running restricted or in plan mode get **no extension tools at all**, so they are not room
   members. Do not build a protocol that assumes they will answer a room post.
-- There is no semantic search: recall is the raw log and the last 50 records.
+- There is no semantic search: `recall` is a regex over the raw log, and the cold tree is a
+  summary cache, not an index.
+
+## The other two wait tools
+
+Both block, both take `timeout` (default 20 000 ms, max 300 000), and both return a **normal**
+timeout rather than an error — `details:{ ok:true, outcome:"timeout", useless:true }`.
+
+```
+wait_for_agent   { agents: ["AgentB", "AgentC"], timeout? }
+wait_for_message { source: "room", topic?, mention?, from?, timeout? }
+```
+
+`wait_for_agent` **requires** an explicit `agents` list; omitting it is rejected rather than
+broadcast. `wait_for_message` reads the room only — it does not consume the native IRC stream. Use
+these instead of polling `room { op: "read" }` in a loop.
+
+## What reaches you without asking
+
+You are not expected to poll for everything. The attention governor pushes some records into your
+context:
+
+- **T0 — interrupts you.** A direct `@mention`, a reply to your message, a claim you were waiting
+  on, your claim being revoked, or your task failing. This cuts an interruptible wait.
+- **T1 — arrives at your next step boundary** as an aside, if you are idle. A post on a topic you
+  follow, a claim status change, a reply in a joined thread.
+- **T2 — never pushed.** General chatter, presence, progress. It advances your cursor only; read it
+  with `room { op: "read" }` when you want it.
+
+So: mention an agent by name when you need them, and post to a topic when the message can wait.
+Muting a topic suppresses its T1 pushes, but a direct mention still gets through.
