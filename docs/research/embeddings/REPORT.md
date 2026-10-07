@@ -1,8 +1,10 @@
 # Embedding models for a local, CPU-only retrieval layer
 
-**Answer:** Qwen3-Embedding-0.6B served via a self-hosted OpenAI-compatible endpoint (llama.cpp GGUF or TEI) is the primary recommendation — it is the best CPU-feasible model on the room's primary job, semantic retrieval (MTEB(eng, v2) Retrieval 61.83), while also being strong on classification (84.58), at 0.6 B params (~600 MB int8, official GGUF), Apache-2.0, 32K context. The 7 models already whitelisted in omp are not competitive: the best whitelisted option (bge-base-en-v1.5) trails by 7.1 retrieval and 6.9 classification points. A hybrid architecture (BM25/FTS + dense with RRF) is strongly recommended over dense-only, because the room's identifier-heavy agent chatter is exactly where dense retrieval fails. **Round 2 confirmed the pick, and did not revise it** — two serious candidates were added (jina-embeddings-v5-text-nano, EmbeddingGemma-2 text encoder); the one that would beat Qwen3-0.6B on overall/classification quality, jina-v5-text-nano, is **CC-BY-NC-4.0 and therefore not commercially usable**.
+**Answer:** With the size constraint relaxed but a **<1 s per embedding call** budget, the pick **changes from round 2**. On the target CPU the two 0.6 B qwen3-architecture models (Qwen3-Embedding-0.6B and jina-v5-text-small) are **derived at 2.7–5.9 s per 512-token call** — they break the 1 s budget from roughly **128 tokens upward** [49]. The **EmbeddingGemma family** is the only competitive family that stays under 1 s across its supported range (0.42–0.89 s at 512 tokens), because its llama.cpp graph skips a wasted `lm_head` pass that the qwen3-arch models pay (26 % of their FLOPs, verified in llama.cpp source) [49][50].
 
-**Confidence:** medium-high. MTEB scores are from the live leaderboard backend (snapshot 2026-10-05, fetched 2026-10-07) [1]. CPU feasibility is inferred from published benchmarks on different hardware (i7-13700K desktop, not the i5-1135G7 laptop) — **no published 4-core-laptop CPU benchmark exists for any embedding model** [2]. The counter-angle (BM25 vs dense) is well-supported but no benchmark covers agent-chat-log retrieval specifically [3].
+**Recommended:** `google/embeddinggemma-300m` (308 M, 2 K ctx, `gemma` licence, Path 3, GGUF + ONNX + fastembed + Ollama) as the **primary**, with Qwen3-Embedding-0.6B retained as the **quality fallback** for cases where its 512-token latency is acceptable (e.g. short queries, or batched offline indexing where throughput — not single-call latency — is what matters). For code retrieval specifically, Qwen3-0.6B is the stronger and harness-verified model (MTEB(Code, v1) **75.42** vs EmbeddingGemma-v1's 68.76) [51] — so if the room's content is code-dominant *and* calls can be kept short, Qwen3-0.6B is still defensible.
+
+**Confidence:** medium on the ranking, **low-medium on the absolute latency numbers**. MTEB scores are from the live leaderboard backend (snapshot 2026-10-05, fetched 2026-10-07) [1]. **No published CPU benchmark exists for any of these models on a 4-core Intel laptop** — the latency figures are derived with a 2× uncertainty band, calibrated against real CPU llama.cpp runs on other hardware [49]. The 1 s verdict is robust at the order-of-magnitude level; the exact crossing point is not.
 
 ## Licence is a hard filter
 
@@ -27,6 +29,55 @@ Non-commercial (`cc-by-nc-*`) models are **unusable for commercial use** and are
 | Licence mentioned once (jina-v3) | Licence column in **every** ranked table; non-commercial set stated up front | jina-v5, NV-Embed-v2, SFR-2_R, jina-v3 excluded from the primary pick |
 | No GGUF/Path-3 audit | Full per-model GGUF/ONNX/TEI/Ollama audit | Confirms Qwen3-0.6B, jina-v5, LFM2.5, embeddinggemma-* all have CPU builds; **stella_en_400M_v5 has none** [47] |
 | `multilingual-e5-large` row quoted the `-instruct` variant's scores | Corrected to the non-instruct model's actual cells | Whitelisted-set comparison slightly worse than round 1 showed [1] |
+
+## Round 3 — the size constraint relaxed, latency budget added
+
+The user relaxed size ("we aren't aiming for small") and set the real constraint: **<1 s per embedding call**, generously. This changes the pick.
+
+| Round 2 | Round 3 | Effect on the recommendation |
+|---|---|---|
+| Qwen3-Embedding-0.6B primary; size optimised | **Latency measured/derived on the target CPU**: Qwen3-0.6B 2.7–5.3 s at 512 tokens [49] | **CHANGED** — Qwen3-0.6B breaks the 1 s budget from ~128 tokens up |
+| No Code benchmark comparison | Qwen3-0.6B **75.42** on MTEB(Code, v1) — harness-verified; EmbeddingGemma-v1 68.76; jina-v5 absent [51] | Qwen3-0.6B keeps the **Code** crown; EmbeddingGemma-2's 78.68 is self-reported only |
+| Larger models out of scope | Qwen3-4B/8B checked: **no model >1.5 B meets <1 s at 2048 tokens** [52] | Size relaxation buys nothing — latency, not size, is binding |
+| EmbeddingGemma-2 dismissed | Text layer is a genuine **270 M** (not 740 M); Apache-2.0; stays <1 s to ~1 K tokens [53] | Becomes the **primary** |
+| jina-v5 quality-per-parameter noted | Still wins Classification/STS, still **CC-BY-NC-4.0** | Excluded from the commercial pick |
+
+### Head-to-head — the three CPU candidates, one scale
+
+MTEB(eng, v2), live board snapshot 2026-10-05, fetched 2026-10-07 [1]. All values × 100.
+
+| Model | Params (text) | Dim | Max ctx | Mean(Task) | Retrieval | Classification | Clustering | STS | PairClass | **Code (MTEB Code v1)** | Licence | CPU @512 tok `[derived]` |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| jina-v5-text-small | 0.596 B | 1024 | 32 K | null (38/41) | 60.07 | — | 54.69 | 88.13 | 84.95 | **absent** | **CC-BY-NC-4.0** | 3.0–5.9 s |
+| jina-v5-text-nano | 0.212 B | 768 | 8 K | **71.11** | 58.80 | **90.07** | 53.49 | **88.28** | 84.74 | **absent** | **CC-BY-NC-4.0** | 0.71–1.42 s |
+| jina-v5-omni-small *(text)* | 0.596 B text | 1024 | 32 K | 71.78 | 60.07 | 90.75 | 54.69 | 88.13 | 84.95 | **absent** | **CC-BY-NC-4.0** | 3.0–5.9 s |
+| **Qwen3-Embedding-0.6B** | 0.596 B | 1024 | 32 K | 70.47 | **61.83** | 84.58 | 54.05 | 86.57 | 84.37 | **75.42** ✓harness | **Apache-2.0** | 2.7–5.3 s |
+| google/embeddinggemma-300m | 0.308 B | 768 | 2 K | 69.67 | 55.69 | 87.55 | **56.55** | 83.61 | **87.29** | **68.76** ✓harness | gemma (gated) | **0.45–0.89 s** |
+| **EmbeddingGemma-2 (text-270M)** | **0.270 B text** / 0.740 B total | 768 | 8 K | 68.46 *(self-rep.)* | — | — | — | — | — | 78.68 *(self-rep.)* | **Apache-2.0** | **0.42–0.84 s** |
+
+**On the user's hypothesis** ("no way embeddinggemma is better than these larger ones"): **confirmed for EmbeddingGemma v1** — Qwen3-0.6B beats it on Retrieval (61.83 vs 55.69), on Code (75.42 vs 68.76), and at 2× the params it is the stronger model per parameter on the room's primary job. **Not confirmed for EmbeddingGemma-2**: its self-reported 68.46 Eng-v2 / 78.68 Code would beat Qwen3-0.6B on Code — but it has **zero harness rows** and must be treated as unverified [51][53].
+
+**The 740 M figure is misleading in the user's favour:** 270 M text + 170 M vision + 300 M audio. Under the text-only rule the model is a **270 M text encoder**, and the standalone export `jayyun98/embeddinggemma-2-text-270m` (271 M params, 542 MB bf16) exists with verified tensor equality [53].
+
+### CPU latency — where each model crosses the 1 s line
+
+All `[derived]` from per-token FLOPs calibrated against real CPU llama.cpp runs; band 115–230 GFLOP/s on the i5-1135G7. **No published 4-core-laptop benchmark exists for any of these models** [49].
+
+| Model | 128 tok | 512 tok | 2048 tok | Crosses 1 s at | Verdict |
+|---|---|---|---|---|---|
+| **EmbeddingGemma-2 text-270M** | 0.10–0.21 s | **0.42–0.84 s** | 1.7–3.4 s | ~605–1210 tok | **within budget** to ~1 K tok |
+| **embeddinggemma-300m** | 0.11–0.22 s | **0.45–0.89 s** | 1.8–3.6 s | ~575–1150 tok | **within budget** across its 2 K ctx (borderline at top) |
+| **jina-v5-text-nano** | 0.18–0.36 s | 0.71–1.42 s | 2.8–5.7 s | ~360–720 tok | safe for chunks ≤512 |
+| **Qwen3-Embedding-0.6B** | 0.66–1.32 s | **2.7–5.3 s** | 11–21 s | **~100–190 tok** | **breaks budget from ~128 tok** |
+| **jina-v5-text-small** | 0.74–1.48 s | 3.0–5.9 s | 12–24 s | ~85–175 tok | **breaks budget** |
+| bge-base-en-v1.5 INT8 | 0.09–0.19 s | 0.38–0.75 s | n/a (512 cap) | never | safe by construction |
+| multilingual-e5-large INT8 | 0.48–0.96 s | 1.9–3.8 s | n/a (512 cap) | ~135–270 tok | over budget at its own cap |
+
+**Why the qwen3-arch models are structurally slower:** llama.cpp builds and then discards the `lm_head` projection in embedding mode for every architecture except `llama` — verified in `src/models/qwen3.cpp` at master, which builds `build_lora_mm(model.output, cur)` unconditionally. For Qwen3-Embedding-0.6B that is **26 % of all CPU FLOPs, wasted**. `src/models/gemma-embedding.cpp` never builds lm_head, so the EmbeddingGemma family does not pay it. The upstream fix (issue #24713) was **closed without merging** [50].
+
+**Larger models do not help.** Under the relaxed size constraint, no model >1.5 B meets the budget at 2048 tokens, and Qwen3-Embedding-4B is borderline even at 512 (0.28–1.0 s, then 2.2–8.0 s at 2048). All candidates fit 15 GB RAM at Q4–Q8 — memory is not binding, latency is [52].
+
+**Caveat on the whole table:** the band is 2× wide and irreducible without a local run. A 10-minute `llama-bench -m <model>.gguf -embd 1 -ngl 0 -t 4 -p 128,512,2048 -n 0 -r 5` settles it [49].
 
 ## Why
 
@@ -213,37 +264,39 @@ The room's content is agent chatter full of identifiers, file paths, and code.
 
 ### The two-jobs question: one model or two?
 
-- Qwen3-0.6B is the only permissively licensed, CPU-feasible model that is simultaneously the best CPU-feasible option on Retrieval (61.83) and within 3.0 points of the best on Classification (84.58 vs EmbeddingGemma-300M's 87.55), with the best PairClass of the permissive CPU set tied at 84.37–84.95 [1].
+- **The latency constraint now dominates this decision.** Qwen3-0.6B is the best *permissive* model on Retrieval (61.83) and Code (75.42), but it breaks the 1 s budget from ~128 tokens on the target CPU [49][51]. EmbeddingGemma-300M is 5.7 points behind on Retrieval and 6.7 behind on Code, but answers in 0.45–0.89 s at 512 tokens [49].
 - Task conditioning is the mechanism: Qwen3-Embedding is instruction-aware ("1% to 5%" improvement) [37]; Cohere exposes per-call `input_type` [38]; Gemini assigns duplicate detection to `SEMANTIC_SIMILARITY` [39].
 - Dedup is measured as Pair Classification, not retrieval [40] — same embedding space, different metric.
 - jina-v3 demonstrates one model with five task adapters scoring well on both jobs [41] — but it is non-commercial and GPU-only.
 - The 2022 "no model dominates" finding is stale at the top (Qwen3-8B leads both) but holds across subsets [42]; MTEB-BR shows cross-category rank transfer is imperfect (classification ρ=0.68) [43].
 
-**Recommendation:** start with one model (Qwen3-0.6B). If classification quality proves insufficient after deployment, add a specialized classifier — published evidence says the within-family gap is small.
+**Recommendation:** still one model, but which one depends on the workload split. EmbeddingGemma-300M for latency-bound single-call retrieval/classification; Qwen3-0.6B where code-retrieval quality matters most and inputs can be kept short, or for offline batch indexing where throughput rather than per-call latency is the metric.
 
 ## What would change this
 
-1. **A published i5-1135G7 CPU benchmark** showing Qwen3-0.6B is too slow → flips the pick to bge-base-en-v1.5 (Path 1).
-2. **A permissive (Apache/MIT) model with jina-v5-nano's quality-per-parameter** → jina-v5-nano's 71.11 / 90.07 at 212M is the target to beat; today it is licence-blocked.
-3. **Independent MTEB verification of EmbeddingGemma-2's text encoder** — if Google's self-reported 68.46 Eng-v2 holds on the harness, it becomes a strong permissive alternative.
-4. **omp adding Qwen3-Embedding-0.6B to `KNOWN_MODEL_NAMES`** → makes it Path 1 (zero config).
-5. **A published benchmark on agent-chat-log retrieval** showing dense-only suffices → weakens the hybrid recommendation.
+1. **A local `llama-bench -embd 1 -ngl 0 -t 4` run** — the single cheapest thing that would settle the latency question. If Qwen3-0.6B lands near the optimistic end (~2.7 s at 512 tokens) it is still over budget; if it lands under 1 s at 512, Qwen3-0.6B becomes the primary again on quality grounds [49].
+2. **Harness verification of EmbeddingGemma-2's text encoder** — if Google's self-reported 68.46 Eng-v2 / 78.68 Code holds on the MTEB harness, EmbeddingGemma-2 (270 M text, Apache-2.0, <1 s) wins outright [51][53].
+3. **A build carrying the llama.cpp `lm_head` skip** (issue #24713) — removes 26 % of Qwen3-0.6B's FLOPs and pulls its 1 s crossing out to ~150–260 tokens. Still short of 512 [50].
+4. **ONNX Runtime / OpenVINO instead of llama.cpp** — batched GEMM reaches 60–75 % efficiency vs llama.cpp's ~30 %, which would roughly halve the Qwen3 numbers; single-call still uses the pessimistic end [49].
+5. **An Apache/MIT model with jina-v5-nano's quality-per-parameter** (71.11 / 90.07 at 212 M) — today licence-blocked.
 6. **Evidence the room is English-only** → removes the multilingual premium.
 
 ## Considered and rejected
 
 | Model | Why rejected |
 |---|---|
-| **jina-embeddings-v5-text-nano** | **Best quality-per-parameter** (212M, 71.11 Mean(Task), 90.07 Classification) and has an official 157 MB GGUF — but **CC-BY-NC-4.0, not commercially usable**, and Retrieval (58.80) trails Qwen3-0.6B (61.83) [1][44] |
-| **jina-embeddings-v5-text-small / -omni-small** | Same licence block; omni-small's text encoder equals text-small (71.78 / 60.07) [44] |
-| **EmbeddingGemma-2 (740M; 270M text)** | Apache-2.0, 8192 ctx, card 68.46 Eng-v2 — but **self-reported, zero live-board rows**, no text-only GGUF (only multimodal with mmproj), and the 270M text export has never been benchmarked [46] |
-| Qwen3-Embedding-8B / -4B | Best scores but 7.57B / 4.02B → ~16–32 GB fp16 — impractical on 15 GB [2] |
-| nvidia/NV-Embed-v2 | Retrieval 62.84 (best in table) but 7.85B and **CC-BY-NC-4.0** [1] |
-| Salesforce/SFR-Embedding-2_R | Highest Classification (90.54) but Retrieval 53.75 and **CC-BY-NC-4.0** [1] |
-| NovaSearch/stella_en_400M_v5 | 435M, Classification 88.25, MIT — but **no usable GGUF** (arch `new`/`NewModel` unsupported by llama.cpp), so it needs Path 4 [47] |
-| jina-embeddings-v3 | CC-BY-NC-4.0 **and** card states CUDA required for production throughput [10][45] |
-| gte-Qwen2-7B-instruct / e5-mistral-7b-instruct | 7B-class → impractical on 15 GB [2] |
+| **Qwen3-Embedding-0.6B (as primary)** | **Demoted to fallback, not rejected.** Best permissive Retrieval (61.83) and Code (75.42, harness-verified), Apache-2.0, 32 K ctx — but **2.7–5.3 s per 512-token call** on the target CPU `[derived]`, breaking the 1 s budget from ~128 tokens [49][51] |
+| **jina-embeddings-v5-text-nano** | Best quality-per-parameter (212 M, 71.11 Mean(Task), 90.07 Classification), official 157 MB GGUF, and within budget to ~512 tokens — but **CC-BY-NC-4.0, not commercially usable** [1][44] |
+| **jina-embeddings-v5-text-small / -omni-small** | Same licence block; omni-small's text encoder equals text-small (71.78 / 60.07); 3.0–5.9 s at 512 tokens [44][49] |
+| **EmbeddingGemma-2 (740 M; 270 M text)** | *Promoted, not rejected* — Apache-2.0, 8 K ctx, 270 M text layer, 0.42–0.84 s at 512 tokens. Held out of the primary slot only because its scores are **self-reported with zero harness rows** [51][53] |
+| Qwen3-Embedding-8B / -4B | Best scores (75.23 / 74.61) but **no model >1.5 B meets <1 s at 2048 tokens**; 4B is borderline even at 512 [52] |
+| nvidia/NV-Embed-v2 | Retrieval 62.84 but 7.85 B, **CC-BY-NC-4.0**, and **no CPU build** [1][52] |
+| Salesforce/SFR-Embedding-2_R | Highest Classification (90.54) but Retrieval 53.75, **CC-BY-NC-4.0**, no CPU build [1][52] |
+| NovaSearch/stella_en_400M_v5 | 435 M, Classification 88.25, MIT — but **no usable GGUF** (arch `new`/`NewModel` unsupported by llama.cpp), and *below* Qwen3-0.6B on meanTask [47][52] |
+| jina-embeddings-v3 | CC-BY-NC-4.0 **and** 0.55 sentences/s on CPU (~1.8 s/call, 480× slower than bge-base) [10][45][49] |
+| gte-Qwen2-7B-instruct / e5-mistral-7b-instruct | 7 B-class → 0.65–2.0 s at 512 tokens `[derived]` [52] |
 | voyage-4-nano | Apache-2.0 but only 9/131 MMTEB tasks — aggregate unverified [36]; Path 3 via community GGUF or TEI [47] |
+| codefuse-ai/F2LLM-v2-0.6B / -1.7B | **New in round 3:** harness-verified Code 77.41 / 78.76 (Apache-2.0, GGUF available) — the best code-per-parameter found. Not adopted because their eng-v2 Retrieval is *lower* than Qwen3-0.6B (54.31 / 56.65 vs 61.83) and they inherit the same qwen3-arch latency penalty [51] |
 
 ## Findings
 
@@ -253,29 +306,32 @@ Four suites exist, each with three aggregations. `MTEB(eng, v2)` = 41 tasks / 7 
 
 ### B. Hybrid architecture recommendation
 
-The room already has FTS. Published evidence supports hybrid: BM25 is robust zero-shot [16]; dense fails on identifiers [17][18]; RRF fusion beats both parents on most datasets [25][26][27][28][29]; fusion is rank-based and cheap [25]; BM25 adds 0.4 GB / 20 ms at 1M docs [31]. **Recommended:** BM25 (FTS) + Qwen3-0.6B (dense) with RRF fusion.
+The room already has FTS. Published evidence supports hybrid: BM25 is robust zero-shot [16]; dense fails on identifiers [17][18]; RRF fusion beats both parents on most datasets [25][26][27][28][29]; fusion is rank-based and cheap [25]; BM25 adds 0.4 GB / 20 ms at 1M docs [31]. **Recommended:** BM25 (FTS) + the chosen dense model with RRF fusion. Hybrid is *more* important now, not less: the dense model that fits the latency budget (EmbeddingGemma-300M, Retrieval 55.69) is weaker on retrieval than Qwen3-0.6B (61.83), so the lexical channel carries more of the load.
 
 ### C. The tradeoff curve
 
-| Tier | Model | Params | Size | Retrieval | Classification | Context | Licence | Path |
-|---|---|---|---|---|---|---|---|---|
-| Best quality | Qwen3-8B | 7.57B | ~16 GB fp16 | 69.44 | 90.43 | 32K | Apache-2.0 | 4 |
-| **Best CPU-feasible** | **Qwen3-0.6B** | **0.596B** | **0.64 GB Q8_0** | **61.83** | **84.58** | **32K** | **Apache-2.0** | **3** |
-| Best per-param (NC) | jina-v5-text-nano | 0.212B | 0.157 GB Q4_K_M | 58.80 | 90.07 | 8K | CC-BY-NC-4.0 | 3 |
-| Smallest permissive competitive | EmbeddingGemma-300M | 0.308B | ~0.15 GB int4 | 55.69 | 87.55 | 2K | gemma | 3 |
-| Best whitelisted | bge-base-en-v1.5 | 0.109B | 0.21 GB | 54.75 | 77.69 | 512 | MIT | 1 |
-| Smallest whitelisted | all-MiniLM-L6-v2 | 0.023B | 0.09 GB | 42.92 | 69.25 | 256 | Apache-2.0 | 1 |
+| Tier | Model | Params | Size | Retrieval | Code | Classification | Context | Licence | Path | CPU @512 `[derived]` |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Best quality (no CPU budget) | Qwen3-8B | 7.57 B | ~16 GB fp16 | 69.44 | 80.69 | 90.43 | 32 K | Apache-2.0 | 4 | 8+ s |
+| **Best quality within budget** | **EmbeddingGemma-2 (text-270M)** | **0.270 B text** | 0.165 GB int4 | 68.46 *(self-rep.)* | 78.68 *(self-rep.)* | — | 8 K | **Apache-2.0** | 3 | **0.42–0.84 s** |
+| **Primary (verified)** | **embeddinggemma-300m** | 0.308 B | ~0.15 GB int4 | 55.69 | 68.76 | 87.55 | 2 K | gemma (gated) | 3 | **0.45–0.89 s** |
+| Quality fallback | Qwen3-0.6B | 0.596 B | 0.639 GB Q8_0 | **61.83** | **75.42** | 84.58 | 32 K | Apache-2.0 | 3 | 2.7–5.3 s |
+| Best per-param (NC) | jina-v5-text-nano | 0.212 B | 0.157 GB Q4_K_M | 58.80 | — | 90.07 | 8 K | CC-BY-NC-4.0 | 3 | 0.71–1.42 s |
+| Best whitelisted | bge-base-en-v1.5 | 0.109 B | 0.21 GB | 54.75 | — | 77.69 | 512 | MIT | 1 | 0.38–0.75 s |
+| Smallest whitelisted | all-MiniLM-L6-v2 | 0.023 B | 0.09 GB | 42.92 | — | 69.25 | 256 | Apache-2.0 | 1 | <0.1 s |
 
-Quality scales with size, but the marginal gain from 0.6B → 8B is 7.6 retrieval points for 13× the size. The CPU sweet spot is 0.2–0.6B.
+**The curve is not monotone in size once latency is the constraint.** Quality rises with size, but the 0.6 B models cross the 1 s line and the 0.27–0.31 B EmbeddingGemma family does not. Under a <1 s budget the efficient frontier is the EmbeddingGemma family plus (for short inputs) Qwen3-0.6B.
 
 ## Open questions
 
-1. **No published i5-1135G7 CPU benchmark exists for any embedding model** — all data is 16c desktop/server. The recommendation assumes Qwen3-0.6B at 0.64 GB Q8_0 is feasible on 15 GB RAM, derived from artifact size, not measured.
+1. **No published i5-1135G7 CPU benchmark exists for any embedding model** — all data is 16c desktop/server, a phone, or hardware-unstated. Every latency figure in this report is `[derived]` with a 2× band. **This is the single largest gap and the cheapest to close** (a 10-minute `llama-bench` run) [49].
 2. **No published benchmark covers agent-chat-log retrieval** — identifier-heavy evidence is proxied from code/entity retrieval.
 3. **EmbeddingGemma-2's scores are self-reported** — zero live-board rows; the 270M text export has never been benchmarked.
 4. **jina-v5-text-small's own live `meanTask` is null** (3 missing Classification cells); the omni-small proxy (71.78) is used. BEIR `meanTask` is null for all jina-v5 rows.
 5. **TEI support for jina-v5-text-small and stella is unverified** (arch inference only).
 6. **The live MTEB rank formula is undocumented** — reproduction as per-task average-rank is inference from data.
+7. **No harness-verified Code score** for EmbeddingGemma-2 or any jina-v5 model; the 78.68 is self-reported [51].
+8. **No published CPU number for any target model on a 4-core Intel laptop**, and no `llama-bench -embd 1` result for any `eurobert` model (jina-v5-nano) [49].
 
 ## Sources
 
@@ -343,3 +399,12 @@ Quality scales with size, but the marginal gain from 0.6B → 8B is 7.6 retrieva
 [9] granite-embedding-english-r2 card (primary; listed for the r2 context table). `https://huggingface.co/ibm-granite/granite-embedding-english-r2`.
 [33] jina-embeddings-v5 licence field (primary; superseded by [44]).
 [35] stella_en_1.5B_v5 card (primary). `https://huggingface.co/NovaSearch/stella_en_1.5B_v5`.
+
+### Primary — Round 3 additions
+
+[49] E6 findings (CPU latency): `docs/research/embeddings/findings/F14-cpu-latency.md` + `docs/research/embeddings/findings/E6-cpu-latency.md`. Published CPU numbers: `https://github.com/ikawrakow/ik_llama.cpp/discussions/898`, `https://github.com/ggml-org/llama.cpp/issues/19933`, `https://engineered.at/articles/text-embedding-inference-on-a-cheap-server`, `https://github.com/QuixiAI/embeddinggemma.c`, `https://huggingface.co/litert-community/embeddinggemma-2-text-270m-litert-lm`, `https://huggingface.co/blog/static-embeddings`, `https://treeru.com/en/blog/cpu-embedding-benchmark-tool`, `https://github.com/Oaklight/openvino-meteor-lake-ai-inference/blob/main/docs/BENCHMARK_RESULTS.md`, `https://github.com/huggingface/text-embeddings-inference/issues/31`, `https://github.com/ggml-org/llama.cpp/issues/21854`. Derived latency: per-token FLOPs from published architecture, calibrated 115–230 GFLOP/s. Fetched 2026-10-07.
+[50] llama.cpp `lm_head` in embedding mode. `https://github.com/ggml-org/llama.cpp/issues/24713` (closed unmerged); source read at master: `https://raw.githubusercontent.com/ggml-org/llama.cpp/master/src/models/qwen3.cpp`, `.../src/models/gemma-embedding.cpp`. Fetched 2026-10-07.
+[51] E7 findings (head-to-head) + F13 code benchmark: `docs/research/embeddings/findings/F13-code-benchmark.md`, `E7-headtohead.md`. MTEB(Code, v1) live board: `https://mteb-leaderboard-backend.hf.space/v1/benchmarks/MTEB%28Code%2C%20v1%29/scores` (12 tasks, all Retrieval, nDCG@10); CoIR: `.../CoIR/scores`. EmbeddingGemma-2 card: `https://huggingface.co/google/embeddinggemma-2/raw/main/README.md`. Qwen3 paper: `https://arxiv.org/abs/2506.05176` (Tables 3, 5). Fetched 2026-10-07.
+[52] F15 larger-models findings: `docs/research/embeddings/findings/F15-larger-models.md` (14 sources). Fetched 2026-10-07.
+[53] EmbeddingGemma-2 text-only artifacts: `https://huggingface.co/jayyun98/embeddinggemma-2-text-270m` (271,002,624 params, 542 MB bf16, verified tensor equality), `https://huggingface.co/litert-community/embeddinggemma-2-text-270m-litert-lm`, `https://huggingface.co/ggml-org/embeddinggemma-2-GGUF`, `https://huggingface.co/unsloth/embeddinggemma-2-GGUF`. Fetched 2026-10-07.
+[54] New code-specialised candidates: `codefuse-ai/F2LLM-v2-0.6B` (Apache-2.0, Code 77.41), `codefuse-ai/F2LLM-v2-1.7B` (Code 78.76), `perplexity-ai/pplx-embed-v1-0.6b` (MIT, Code 75.85). Live MTEB(Code, v1) + MTEB(eng, v2) boards; GGUF repos `mradermacher/F2LLM-v2-0.6B-GGUF`, `mradermacher/F2LLM-v2-1.7B-GGUF`. Fetched 2026-10-07.
