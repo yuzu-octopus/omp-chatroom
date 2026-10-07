@@ -329,29 +329,19 @@ test("config: defaults when absent, save/load round-trip, and resolveRoomId pers
   expect(resolveRoomId(root)).toBe("custom-room");
 });
 
-test("registerRoomFlags registers both flags and resolveRoomConfig lets flags override the file", () => {
-  const flags = new Map<string, { type: string; default?: boolean | string }>();
+test("Option A registers no runtime flags, and config comes from the file alone", () => {
+  // Option A ships no panel and no cold tree, so there is nothing to toggle. A flag that toggles
+  // nothing reads as a working switch and misleads the user; the config file is the only source.
+  const flags = new Map<string, unknown>();
   const pi = {
-    registerFlag: (name: string, options: { type: string; default?: boolean | string }) => {
-      flags.set(name, options);
-    },
-    getFlag: (name: string) => flags.get(name)?.default,
+    registerFlag: (name: string, options: unknown) => { flags.set(name, options); },
+    getFlag: () => undefined,
   } as unknown as ExtensionAPI;
 
   registerRoomFlags(pi);
-  expect([...flags.keys()]).toEqual(["room-panel-key", "room-cold-tree"]);
-  expect(flags.get("room-panel-key")).toMatchObject({ type: "string", default: "" });
-  expect(flags.get("room-cold-tree")).toMatchObject({ type: "boolean", default: true });
+  expect([...flags.keys()]).toEqual([]);
 
   const root = tempRoot();
-  saveRoomConfig(root, { ...DEFAULT_ROOM_CONFIG, panelKey: "from-file", coldTreeEnabled: false });
-  expect(resolveRoomConfig(pi, root).panelKey).toBe("from-file");
-  expect(resolveRoomConfig(pi, root).coldTreeEnabled).toBe(false);
-
-  const pi2 = {
-    registerFlag: () => {},
-    getFlag: (name: string) => (name === "room-panel-key" ? "from-flag" : true),
-  } as unknown as ExtensionAPI;
-  expect(resolveRoomConfig(pi2, root).panelKey).toBe("from-flag");
-  expect(resolveRoomConfig(pi2, root).coldTreeEnabled).toBe(false); // flag at default → file wins
+  saveRoomConfig(root, { ...DEFAULT_ROOM_CONFIG, claimTtlMs: 120_000 });
+  expect(resolveRoomConfig(pi, root).claimTtlMs).toBe(120_000);
 });

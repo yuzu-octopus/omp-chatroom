@@ -78,31 +78,17 @@ export function resolveRoomId(root: string): string {                           
   return roomId;
 }
 
-const PANEL_KEY_FLAG = "room-panel-key";
-const COLD_TREE_FLAG = "room-cold-tree";
-// A registered flag always returns its value (default or CLI), so `getFlag` cannot distinguish
-// "user passed the flag" from "unset". The file therefore wins for a flag left at its default, and
-// a flag only overrides the file when it carries a non-default value.
-const FLAG_DEFAULTS: Readonly<Record<string, boolean | string>> = {
-  [PANEL_KEY_FLAG]: "",
-  [COLD_TREE_FLAG]: true,
-};
-
-// K6 — the ONLY feature-toggle mechanism. Registers every flag once; nothing reads a manifest feature.
-export function registerRoomFlags(pi: ExtensionAPI): void {      // [invented name]
-  pi.registerFlag(PANEL_KEY_FLAG, { description: "KeyId for the /room shortcut; empty disables", type: "string", default: "" });
-  pi.registerFlag(COLD_TREE_FLAG, { description: "Enable the cold summary tree (Option B)", type: "boolean", default: true });
+// Option A ships no panel and no cold tree, so there is no runtime flag to register: a flag that
+// toggles nothing is worse than no flag, because it reads as a working switch. `registerRoomFlags`
+// is kept as the single registration site so a future Option B phase has one obvious place to add
+// them back.
+//
+// Configuration lives in `local://room/config.json` (see `loadRoomConfig`) and is editable via
+// `/room config`.
+export function registerRoomFlags(_pi: ExtensionAPI): void {
+  // No Option A runtime flags.
 }
 
-export function resolveRoomConfig(pi: ExtensionAPI, root: string): RoomConfig {   // flags > file > defaults
-  const config = loadRoomConfig(root);
-  const panelKey = pi.getFlag(PANEL_KEY_FLAG);
-  if (typeof panelKey === "string" && panelKey !== FLAG_DEFAULTS[PANEL_KEY_FLAG]) {
-    config.panelKey = panelKey;
-  }
-  const coldTree = pi.getFlag(COLD_TREE_FLAG);
-  if (typeof coldTree === "boolean" && coldTree !== FLAG_DEFAULTS[COLD_TREE_FLAG]) {
-    config.coldTreeEnabled = coldTree;
-  }
-  return config;
+export function resolveRoomConfig(_pi: ExtensionAPI, root: string): RoomConfig {
+  return loadRoomConfig(root);
 }

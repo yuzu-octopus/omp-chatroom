@@ -1,7 +1,6 @@
 import type { AgentToolResult, ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent";
-import { escapeHarnessTags } from "@oh-my-pi/pi-coding-agent/session/harness-tags";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { safeRoomText } from "../onboarding/escape";
 import { buildDigest } from "../onboarding/digest";
 import { grant, release, reclaimIfStale, contended } from "../store/claims";
 import { resolveRoomConfig } from "../store/config";
@@ -55,10 +54,8 @@ const CLAIM_TTL_MIN_MS = 1_000;            // §3.4 — TTL is mandatory; a zero
 const CLAIM_TTL_MAX_MS = 86_400_000;
 const READ_CURSOR_LAG_MAX = 1_000;
 
-/** K22/S1 — every room-authored string that reaches the model goes through this pair. */
-function safe(text: string): string {
-  return escapeHarnessTags(sanitizeText(text));
-}
+/** K22/S1 — every room-authored string that reaches the model goes through the shared escaper. */
+const safe = safeRoomText;
 
 function ok<T extends RoomToolDetails>(details: T, text: string): AgentToolResult<T> {
   return { content: [{ type: "text", text }], details };
@@ -180,11 +177,14 @@ export function registerRoomTool(pi: ExtensionAPI): void {     // §2.1.1
       switch (p.op) {
         case "join": {
           const viewer = viewerFor(store, agentId);
-          if (!store.cursors.has(agentId)) {
-            // §4.1 join idempotency — a second join is a no-op: no second member record.
+          // §4.1 join idempotency — a second join is a no-op: no second member record.
+          // Gate on MEMBERSHIP, not on the cursor: the onboarding hook pre-mints every agent's
+          // cursor at `before_agent_start`, so a cursor-existence test is always false here and no
+          // `member{join}` record would ever be appended (the roster would stay empty forever).
+          if (!store.members.has(agentId)) {
             store.append({ kind: "member", from: agentId, action: "join" });
-            initCursor(store, agentId);
           }
+          initCursor(store, agentId);
           const cursor = cursorFor(store, agentId);
           const digest = buildDigest(store, viewer, config.digestBudgetTokens);
           return ok(

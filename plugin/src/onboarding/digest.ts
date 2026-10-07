@@ -1,6 +1,5 @@
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent";
-import { escapeHarnessTags } from "@oh-my-pi/pi-coding-agent/session/harness-tags";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { safeRoomText } from "./escape";
 import type { MemberState } from "../store/room-store";
 import type { RoomStore } from "../store/room-store";
 import type { RoomRecord } from "../store/schema";
@@ -22,14 +21,10 @@ export function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }
 
-// K22/V1 — the single escaping boundary for the digest. It reaches the SYSTEM PROMPT, so every
-// room-authored string (bodies, resources, holders, agent ids) goes through here. `escapeHarnessTags`
-// covers the harness tags; the region marker is escaped too so room text can never close its own
-// `<room-authored>` block.
-const ROOM_MARKER_RE = /<(?=\/?room-authored)/gi;
-function room(text: string): string {
-  return escapeHarnessTags(sanitizeText(text)).replace(ROOM_MARKER_RE, "&lt;");
-}
+// K22/V1 — the digest reaches the SYSTEM PROMPT, so every room-authored string goes through the
+// shared escaper (`./escape`). It also covers the `<room-authored>` marker itself, so room text can
+// never close its own region.
+const room = safeRoomText;
 
 // K2 — the model-facing body of a record, derived per kind (not every kind carries `body`).
 function recordLine(record: RoomRecord): string {
@@ -57,8 +52,11 @@ export function buildDigest(store: RoomStore, viewer: MemberState, budgetTokens 
 
   const first = store.records[0];
   const uptimeSec = first === undefined ? 0 : Math.max(0, Math.round((now - first.ts) / 1000));
+  // `store.roomId` comes from `local://room/config.json` — a file any agent can write — so it is
+  // room-authored data and must be escaped like everything else. It previously reached the system
+  // prompt raw, outside the untrusted region.
   const header = [
-    `Room ${store.roomId} — ${store.members.size} member(s) · ${store.records.length} record(s) · uptime ${uptimeSec}s`,
+    `Room ${room(store.roomId)} — ${store.members.size} member(s) · ${store.records.length} record(s) · uptime ${uptimeSec}s`,
   ];
   // Never truncated (§5.4 U8): the viewer's cursor + lag, and the active caps.
   const footer = [

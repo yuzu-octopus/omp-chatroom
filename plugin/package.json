@@ -15,7 +15,7 @@
         "extensions": ["./src/index.ts"]
       },
       "wait-tools": {
-        "description": "Blocking wait tools",
+        "description": "Blocking wait tool (wait_for_claim)",
         "default": true,
         "extensions": ["./src/index.ts"]
       }
@@ -27,6 +27,7 @@
   "peerDependencies": {
     "@oh-my-pi/pi-coding-agent": "^18.7.0"
   },
+  "files": ["src", "skills", "README.md"],
   "devDependencies": {
     "@types/bun": "^1.4.2"
   }

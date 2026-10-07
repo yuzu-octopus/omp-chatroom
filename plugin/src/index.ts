@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import { registerRoomCommand } from "./commands/room-command";
 import { registerRoomTool } from "./tools/room";
 import { registerWaitForClaim } from "./tools/wait-for-claim";
 import { registerHooks } from "./onboarding/hook";
@@ -14,6 +15,7 @@ export default function roomExtension(pi: ExtensionAPI): void {
   registerRoomTool(pi);
   registerWaitForClaim(pi);
   registerHooks(pi);
+  registerRoomCommand(pi);
 }
 
 /** Test-only seam (§2.1.1 M-4). Clears the in-memory store between tests. */
