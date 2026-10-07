@@ -3,7 +3,7 @@ import type { RoomRecord } from "../store/schema";
 // K11 — Tier is declared ONCE, here; imported by delivery.ts, tools/room.ts, panel/chat-pane.ts.
 export type Tier = "T0" | "T1" | "T2";
 
-export const HELD_CLAIM_WINDOW_MS = 3_600_000;   // §5.1 1 h window [invented value]
+export const HELD_CLAIM_WINDOW_MS = 3_600_000; // §5.1 1 h window [invented value]
 
 /** `"<topic>/<key>"` → `"<topic>"` (resourceKey's inverse, §2.1.2). */
 function topicOf(resource: string): string {
@@ -21,26 +21,26 @@ function topicOf(resource: string): string {
 export function classify(record: RoomRecord, viewer: MemberState): Tier {
   switch (record.kind) {
     case "msg":
-      if (record.mention?.includes(viewer.agentId)) return "T0";                   // @mention → T0
+      if (record.mention?.includes(viewer.agentId)) return "T0"; // @mention → T0
       if (record.replyTo !== undefined && record.replyTo === viewer.lastMessageId) return "T0";
-      if (viewer.heldTopics.has(record.topic)) return "T1";                        // claim held on topic
-      if (viewer.topics.has(record.topic)) return "T1";                            // followed topic
+      if (viewer.heldTopics.has(record.topic)) return "T1"; // claim held on topic
+      if (viewer.topics.has(record.topic)) return "T1"; // followed topic
       if (record.threadRoot !== undefined && viewer.threadRoots.has(record.threadRoot)) return "T1";
       return "T2";
     case "claim":
-      if (record.resource === viewer.waitedResource) return "T1";                  // M-8 waiter
+      if (record.resource === viewer.waitedResource) return "T1"; // M-8 waiter
       if (viewer.topics.has(topicOf(record.resource))) return "T1";
       return "T2";
     case "release":
-      if (record.prevHolder === viewer.agentId) return "T0";                       // your lease was revoked/expired
-      if (record.resource === viewer.waitedResource) return "T1";                  // wait_for_claim waiter
+      if (record.prevHolder === viewer.agentId) return "T0"; // your lease was revoked/expired
+      if (record.resource === viewer.waitedResource) return "T1"; // wait_for_claim waiter
       if (record.reason === "released" && viewer.topics.has(topicOf(record.resource))) return "T1";
       return "T2";
-    case "note":                                                                   // system-generated only
+    case "note": // system-generated only
       return viewer.topics.has(record.topic) ? "T1" : "T2";
-    case "member":                                                                 // join/leave
+    case "member": // join/leave
       return "T2";
     case "gap":
-      return "T1";                                                                 // K12 — a promised notify
+      return "T1"; // K12 — a promised notify
   }
 }

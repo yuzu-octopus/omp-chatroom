@@ -3,18 +3,18 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent";
 import { escapeHarnessTags } from "@oh-my-pi/pi-coding-agent/session/harness-tags";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { resourceKey } from "../ids";
+import { openRoomPanel } from "../panel/panel";
 import { contended, grant, reclaimIfStale, release } from "../store/claims";
 import {
-  DEFAULT_ROOM_CONFIG,
   configPath,
+  DEFAULT_ROOM_CONFIG,
   loadRoomConfig,
+  type RoomConfig,
   resolveRoomConfig,
   saveRoomConfig,
-  type RoomConfig,
 } from "../store/config";
 import { cursorFor, initCursor, lagFor } from "../store/cursors";
-import { roomStoreFor, type RoomStore } from "../store/room-store";
-import { openRoomPanel } from "../panel/panel";
+import { type RoomStore, roomStoreFor } from "../store/room-store";
 
 export const ROOM_COMMAND_NAME = "room";
 
@@ -67,7 +67,12 @@ export function roomCompletions(prefix: string): RoomCompletion[] {
  * The command's only output channel. `notify` is a no-op without a UI, so a headless session
  * (print/RPC) still runs every op and still records its result in the host log (§6.8 R5).
  */
-function report(ctx: ExtensionCommandContext, pi: ExtensionAPI, message: string, type: "info" | "warning" | "error" = "info"): void {
+function report(
+  ctx: ExtensionCommandContext,
+  pi: ExtensionAPI,
+  message: string,
+  type: "info" | "warning" | "error" = "info",
+): void {
   if (ctx.hasUI) ctx.ui.notify(message, type);
   else pi.logger.info(`[room] ${message}`);
 }
@@ -152,7 +157,8 @@ function configLines(pi: ExtensionAPI, store: RoomStore): string[] {
   ];
 }
 
-export function registerRoomCommand(pi: ExtensionAPI): void {      // §6.1
+export function registerRoomCommand(pi: ExtensionAPI): void {
+  // §6.1
   pi.registerCommand(ROOM_COMMAND_NAME, {
     description: "Open the agent chatroom panel, or run a room subcommand",
     getArgumentCompletions: (prefix: string) => roomCompletions(prefix),
@@ -178,7 +184,12 @@ export function registerRoomCommand(pi: ExtensionAPI): void {      // §6.1
       try {
         store = roomStoreFor(ctx);
       } catch (error) {
-        report(ctx, pi, `room unavailable: ${error instanceof Error ? error.message : "corrupt log"}`, "error");
+        report(
+          ctx,
+          pi,
+          `room unavailable: ${error instanceof Error ? error.message : "corrupt log"}`,
+          "error",
+        );
         return;
       }
       const agentId = ctx.agent.id;
@@ -211,14 +222,27 @@ export function registerRoomCommand(pi: ExtensionAPI): void {      // §6.1
             return;
           }
           const resource = resourceKey(topic, key);
-          const requested = ttlArg === undefined ? resolveRoomConfig(pi, store.root).claimTtlMs : Number(ttlArg);
-          const ttlMs = Math.min(CLAIM_TTL_MAX_MS, Math.max(CLAIM_TTL_MIN_MS, Math.trunc(requested)));
+          const requested =
+            ttlArg === undefined ? resolveRoomConfig(pi, store.root).claimTtlMs : Number(ttlArg);
+          const ttlMs = Math.min(
+            CLAIM_TTL_MAX_MS,
+            Math.max(CLAIM_TTL_MIN_MS, Math.trunc(requested)),
+          );
           const result = grant(store, resource, agentId, ttlMs);
           if (!result.ok) {
-            report(ctx, pi, `room claim ${safe(resource)} → denied, held by ${safe(result.holder)}`, "warning");
+            report(
+              ctx,
+              pi,
+              `room claim ${safe(resource)} → denied, held by ${safe(result.holder)}`,
+              "warning",
+            );
             return;
           }
-          report(ctx, pi, `room claim ${safe(resource)} → granted, expires in ${Math.round(ttlMs / 1000)}s`);
+          report(
+            ctx,
+            pi,
+            `room claim ${safe(resource)} → granted, expires in ${Math.round(ttlMs / 1000)}s`,
+          );
           return;
         }
 
@@ -298,11 +322,14 @@ export function registerRoomCommand(pi: ExtensionAPI): void {      // §6.1
           const next: RoomConfig = { ...loadRoomConfig(store.root) };
           (next as unknown as Record<string, string | number | boolean>)[key] = coerced;
           saveRoomConfig(store.root, next);
-          report(ctx, pi, `room config → ${safe(key)}=${safe(String(coerced))} written to ${safe(configPath(store.root))}`);
+          report(
+            ctx,
+            pi,
+            `room config → ${safe(key)}=${safe(String(coerced))} written to ${safe(configPath(store.root))}`,
+          );
           return;
         }
       }
     },
   });
 }
-

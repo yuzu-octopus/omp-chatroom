@@ -1,26 +1,31 @@
-import { test, expect, afterAll } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { resolveLocalRoot } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
-import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { createAssistantMessageEventStream, registerCustomApi } from "@oh-my-pi/pi-ai";
 import type { Api, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
+import { createAssistantMessageEventStream, registerCustomApi } from "@oh-my-pi/pi-ai";
+import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { resolveLocalRoot } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
 import { logPathFor, roomIdFor } from "../src/ids";
-import { appendLine, closeRoomLog, roomLogFd } from "../src/store/log";
-import { disposeRoomSession, resetRoomStores, roomStoreFor, type RoomStore } from "../src/store/room-store";
-import type { RoomRecord } from "../src/store/schema";
-import { RAW_MAX, TREE_REC, openTreeStore, validateZoomRange, zoom } from "../src/store/tree-store";
 import {
+  __compactTest,
   COMPACT_MAX_CALLS_PER_DAY,
   COMPACT_MAX_RETRIES,
-  compactOnce,
   compactionSpendToday,
+  compactOnce,
   startCompactor,
   stopCompactor,
   withWriteMutex,
-  __compactTest,
 } from "../src/store/compactor";
+import { appendLine, closeRoomLog, roomLogFd } from "../src/store/log";
+import {
+  disposeRoomSession,
+  type RoomStore,
+  resetRoomStores,
+  roomStoreFor,
+} from "../src/store/room-store";
+import type { RoomRecord } from "../src/store/schema";
+import { openTreeStore, RAW_MAX, TREE_REC, validateZoomRange, zoom } from "../src/store/tree-store";
 
 // --- fixtures -------------------------------------------------------------
 
@@ -43,7 +48,16 @@ function tmpTreePath(): string {
 }
 
 function msg(i: number): RoomRecord {
-  return { v: 1, seq: i + 1, ts: 1000 + i, kind: "msg", id: `id-${i}`, from: "A", topic: "t", body: `b${i}` };
+  return {
+    v: 1,
+    seq: i + 1,
+    ts: 1000 + i,
+    kind: "msg",
+    id: `id-${i}`,
+    from: "A",
+    topic: "t",
+    body: `b${i}`,
+  };
 }
 
 afterAll(() => {
@@ -136,7 +150,9 @@ function fakeCtx(kind: "main" | "sub"): FakeCtx {
       intervals.push(cb);
       return {} as Timer;
     },
-    clearTimer: (handle: Timer) => { cleared.push(handle); },
+    clearTimer: (handle: Timer) => {
+      cleared.push(handle);
+    },
   };
   return { ctx: ctx as unknown as ExtensionContext, intervals, cleared };
 }
@@ -281,7 +297,11 @@ test("the write mutex serialises two concurrent compactions (no interleaved writ
   expect(order).toEqual(["A:check", "A:write", "B:check", "B:write"]);
 
   // The chain survives a rejected section: a later compaction must still run.
-  await expect(withWriteMutex(async () => { throw new Error("boom"); })).rejects.toThrow("boom");
+  await expect(
+    withWriteMutex(async () => {
+      throw new Error("boom");
+    }),
+  ).rejects.toThrow("boom");
   expect(await withWriteMutex(async () => "after")).toBe("after");
 });
 
@@ -350,7 +370,10 @@ test("a summarizer that fails every attempt skips the node without pausing the t
 test("the tree is rebuildable: forget + rebuild from the log produces the same tiling", async () => {
   const { treePath } = tmpRootTree();
   const N = 40;
-  const store = fakeStore(treePath, Array.from({ length: N }, (_, i) => msg(i)));
+  const store = fakeStore(
+    treePath,
+    Array.from({ length: N }, (_, i) => msg(i)),
+  );
   const { ctx } = fakeCtx("main");
 
   __compactTest.resetSpend();
@@ -476,7 +499,9 @@ function sessionCtx(artifactsDir: string, kind: "main" | "sub", id: string): Ses
       intervals.push(cb);
       return {} as Timer;
     },
-    clearTimer: (handle: Timer) => { cleared.push(handle); },
+    clearTimer: (handle: Timer) => {
+      cleared.push(handle);
+    },
   };
   return { ctx: ctx as unknown as ExtensionContext, intervals, cleared };
 }

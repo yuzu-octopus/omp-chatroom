@@ -1,21 +1,19 @@
-import { test, expect, afterAll } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { resolveLocalRoot } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { logPathFor, roomIdFor, resourceKey, newMessageId } from "../src/ids";
+import { resolveLocalRoot } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
+import { logPathFor, newMessageId, resourceKey, roomIdFor } from "../src/ids";
 import {
-  appendLine,
-  closeRoomLog,
-  openRoomLog,
-  readSince,
-  replay,
-  roomLogFd,
-  validateRecord,
-} from "../src/store/log";
-import type { RoomRecord } from "../src/store/schema";
-import type { RoomStore } from "../src/store/room-store";
+  configPath,
+  DEFAULT_ROOM_CONFIG,
+  loadRoomConfig,
+  registerRoomFlags,
+  resolveRoomConfig,
+  resolveRoomId,
+  saveRoomConfig,
+} from "../src/store/config";
 import {
   bumpCursor,
   cursorFor,
@@ -26,14 +24,16 @@ import {
   restoreOwnCursor,
 } from "../src/store/cursors";
 import {
-  configPath,
-  DEFAULT_ROOM_CONFIG,
-  loadRoomConfig,
-  registerRoomFlags,
-  resolveRoomConfig,
-  resolveRoomId,
-  saveRoomConfig,
-} from "../src/store/config";
+  appendLine,
+  closeRoomLog,
+  openRoomLog,
+  readSince,
+  replay,
+  roomLogFd,
+  validateRecord,
+} from "../src/store/log";
+import type { RoomStore } from "../src/store/room-store";
+import type { RoomRecord } from "../src/store/schema";
 
 // --- fixtures -------------------------------------------------------------
 
@@ -60,7 +60,10 @@ function cursorStore(seq: number): RoomStore {
 }
 
 function readLines(p: string): string[] {
-  return fs.readFileSync(p, "utf8").split("\n").filter((l) => l.length > 0);
+  return fs
+    .readFileSync(p, "utf8")
+    .split("\n")
+    .filter((l) => l.length > 0);
 }
 
 // --- 1. concurrent writers ------------------------------------------------
@@ -73,8 +76,8 @@ test("two writers on one fd produce N interleaved parseable lines, zero torn", (
 
   const N = 200;
   for (let i = 0; i < N; i++) {
-    appendLine(fd, JSON.stringify(msg(i * 2 + 1, "A")) + "\n");
-    appendLine(fd, JSON.stringify(msg(i * 2 + 2, "B")) + "\n");
+    appendLine(fd, `${JSON.stringify(msg(i * 2 + 1, "A"))}\n`);
+    appendLine(fd, `${JSON.stringify(msg(i * 2 + 2, "B"))}\n`);
   }
 
   const lines = readLines(p);
@@ -93,10 +96,10 @@ test("torn-line tolerance: 100 valid + 1 torn + 100 valid → all 200 valid reco
   const roomId = roomIdFor(root);
   const fd = roomLogFd(root, roomId);
 
-  for (let i = 1; i <= 100; i++) appendLine(fd, JSON.stringify(msg(i)) + "\n");
+  for (let i = 1; i <= 100; i++) appendLine(fd, `${JSON.stringify(msg(i))}\n`);
   // A torn line: partial JSON, newline-terminated. Must not drop anything after it.
   fs.writeSync(fd, '{"v":1,"seq":101,"kind":"ms\n');
-  for (let i = 101; i <= 200; i++) appendLine(fd, JSON.stringify(msg(i)) + "\n");
+  for (let i = 101; i <= 200; i++) appendLine(fd, `${JSON.stringify(msg(i))}\n`);
 
   const { records, skipped } = replay(fd);
   const msgs = records.filter((r) => r.kind === "msg");
@@ -118,14 +121,30 @@ test("replay rebuilds identical state from the log", () => {
   const written: RoomRecord[] = [
     msg(1, "A", "build"),
     msg(2, "B", "build"),
-    { v: 1, seq: 3, ts: 1003, kind: "claim", id: "c3", from: "A", resource: "build/api", ttlMs: 5000 },
     {
-      v: 1, seq: 4, ts: 1004, kind: "release", id: "r4", from: "A",
-      resource: "build/api", reason: "released", prevHolder: "A",
+      v: 1,
+      seq: 3,
+      ts: 1003,
+      kind: "claim",
+      id: "c3",
+      from: "A",
+      resource: "build/api",
+      ttlMs: 5000,
+    },
+    {
+      v: 1,
+      seq: 4,
+      ts: 1004,
+      kind: "release",
+      id: "r4",
+      from: "A",
+      resource: "build/api",
+      reason: "released",
+      prevHolder: "A",
     },
     { v: 1, seq: 5, ts: 1005, kind: "member", id: "m5", from: "C", action: "join" },
   ];
-  for (const r of written) appendLine(fd, JSON.stringify(r) + "\n");
+  for (const r of written) appendLine(fd, `${JSON.stringify(r)}\n`);
 
   const { records, skipped } = replay(fd);
   expect(skipped).toBe(0);
@@ -140,13 +159,13 @@ test("a malformed mid-file record is skipped and does not shift later seq values
   const roomId = roomIdFor(root);
   const fd = roomLogFd(root, roomId);
 
-  appendLine(fd, JSON.stringify(msg(1)) + "\n");
-  appendLine(fd, JSON.stringify(msg(2)) + "\n");
+  appendLine(fd, `${JSON.stringify(msg(1))}\n`);
+  appendLine(fd, `${JSON.stringify(msg(2))}\n`);
   fs.writeSync(fd, '{"v":1,"seq":3,"kind":"ms\n'); // corrupt (unparseable)
-  appendLine(fd, JSON.stringify(msg(4)) + "\n");
+  appendLine(fd, `${JSON.stringify(msg(4))}\n`);
   // parseable but shape-invalid (unknown kind) — quarantined as "invalid", not "corrupt".
-  appendLine(fd, JSON.stringify({ v: 1, seq: 5, ts: 1, kind: "bogus", id: "x", from: "A" }) + "\n");
-  appendLine(fd, JSON.stringify(msg(6)) + "\n");
+  appendLine(fd, `${JSON.stringify({ v: 1, seq: 5, ts: 1, kind: "bogus", id: "x", from: "A" })}\n`);
+  appendLine(fd, `${JSON.stringify(msg(6))}\n`);
 
   const { records, skipped } = replay(fd);
   expect(skipped).toBe(2);
@@ -186,7 +205,7 @@ test("logPathFor is stable and single-convention, and is the file the store writ
   expect(logPathFor(root, roomId)).toBe(path.join(root, "room", `${roomId}.jsonl`));
 
   const fd = roomLogFd(root, roomId);
-  appendLine(fd, JSON.stringify(msg(1)) + "\n");
+  appendLine(fd, `${JSON.stringify(msg(1))}\n`);
   expect(fs.existsSync(logPathFor(root, roomId))).toBe(true);
 
   const files = fs.readdirSync(path.join(root, "room")).filter((f) => f.endsWith(".jsonl"));
@@ -222,11 +241,25 @@ test("appendLine terminates the line with '\\n' and readSince returns exactly th
 
 test("validateRecord accepts every kind and rejects missing or wrong-typed fields", () => {
   expect(validateRecord(msg(1))).not.toBeNull();
-  expect(validateRecord({ v: 1, seq: 1, ts: 1, kind: "msg", id: "x", from: "A", topic: "t" })).toBeNull();
-  expect(validateRecord({ v: 1, seq: 1, ts: 1, kind: "bogus", id: "x", from: "A" })).toBeNull();
-  expect(validateRecord({ v: 2, seq: 1, ts: 1, kind: "msg", id: "x", from: "A", topic: "t", body: "b" })).toBeNull();
   expect(
-    validateRecord({ v: 1, seq: 1, ts: 1, kind: "release", id: "x", from: "A", resource: "t/k", reason: "nope", prevHolder: "A" }),
+    validateRecord({ v: 1, seq: 1, ts: 1, kind: "msg", id: "x", from: "A", topic: "t" }),
+  ).toBeNull();
+  expect(validateRecord({ v: 1, seq: 1, ts: 1, kind: "bogus", id: "x", from: "A" })).toBeNull();
+  expect(
+    validateRecord({ v: 2, seq: 1, ts: 1, kind: "msg", id: "x", from: "A", topic: "t", body: "b" }),
+  ).toBeNull();
+  expect(
+    validateRecord({
+      v: 1,
+      seq: 1,
+      ts: 1,
+      kind: "release",
+      id: "x",
+      from: "A",
+      resource: "t/k",
+      reason: "nope",
+      prevHolder: "A",
+    }),
   ).toBeNull();
   expect(validateRecord(null)).toBeNull();
   expect(validateRecord("nope")).toBeNull();
@@ -246,19 +279,22 @@ test("openRoomLog returns ok for a fresh root and maps a bad path without throwi
   fs.writeFileSync(path.join(badRoot, "room"), "not a dir");
   const bad = openRoomLog(badRoot, roomIdFor(badRoot));
   expect(bad.ok).toBe(false);
-  if (!bad.ok) expect(["room file not found", "room file unwritable", "room file corrupt"]).toContain(bad.error);
+  if (!bad.ok)
+    expect(["room file not found", "room file unwritable", "room file corrupt"]).toContain(
+      bad.error,
+    );
 });
 
 test("closeRoomLog drops the registry entry and a later roomLogFd reopens the same file", () => {
   const root = tempRoot();
   const roomId = roomIdFor(root);
   const fd1 = roomLogFd(root, roomId);
-  appendLine(fd1, JSON.stringify(msg(1)) + "\n");
+  appendLine(fd1, `${JSON.stringify(msg(1))}\n`);
   closeRoomLog(root, roomId);
   expect(() => fs.fstatSync(fd1)).toThrow();
 
   const fd2 = roomLogFd(root, roomId);
-  appendLine(fd2, JSON.stringify(msg(2)) + "\n");
+  appendLine(fd2, `${JSON.stringify(msg(2))}\n`);
   expect(replay(fd2).records.map((r) => r.seq)).toEqual([1, 2]);
   closeRoomLog(root, roomId);
 });
@@ -334,7 +370,9 @@ test("Option A registers no runtime flags, and config comes from the file alone"
   // nothing reads as a working switch and misleads the user; the config file is the only source.
   const flags = new Map<string, unknown>();
   const pi = {
-    registerFlag: (name: string, options: unknown) => { flags.set(name, options); },
+    registerFlag: (name: string, options: unknown) => {
+      flags.set(name, options);
+    },
     getFlag: () => undefined,
   } as unknown as ExtensionAPI;
 

@@ -1,14 +1,14 @@
 import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent";
-import { admitPost, isMuted, selectT1 } from "../attention/governor";
 import { deliver } from "../attention/delivery";
+import { admitPost, isMuted, selectT1 } from "../attention/governor";
 import { classify } from "../attention/tiers";
-import { safeRoomText } from "../onboarding/escape";
 import { buildDigest } from "../onboarding/digest";
-import { grant, release, reclaimIfStale, contended } from "../store/claims";
+import { safeRoomText } from "../onboarding/escape";
+import { contended, grant, reclaimIfStale, release } from "../store/claims";
 import { resolveRoomConfig } from "../store/config";
-import { cursorFor, bumpCursor, initCursor, lagFor } from "../store/cursors";
-import { roomStoreFor, type MemberState, type RoomStore } from "../store/room-store";
+import { bumpCursor, cursorFor, initCursor, lagFor } from "../store/cursors";
+import { type MemberState, type RoomStore, roomStoreFor } from "../store/room-store";
 import type { BoardResult, Performative, RoomRecord, TopicRow } from "../store/schema";
 export const ROOM_TOOL_NAME = "room";
 export const ROOM_DESCRIPTION: string = `Post to and read the shared room for this session tree: a
@@ -18,8 +18,8 @@ for one recipient; see the room-vs-direct routing rule in your prompt).
 Ops: join (first call; mints your cursor), read (records after your cursor), post (send to a topic),
 claim/release (exclusive ownership of "<topic>/<key>" with a mandatory TTL), board (claims + roster +
 per-agent lag).
-Before starting work another agent might also start, claim it. Read the board first.`;   // K16 — §4.0.1, trimmed to the Option A op set (§1.4)
-export const ROOM_LOAD_MODE = "essential";  // RISK R3
+Before starting work another agent might also start, claim it. Read the board first.`; // K16 — §4.0.1, trimmed to the Option A op set (§1.4)
+export const ROOM_LOAD_MODE = "essential"; // RISK R3
 
 // Option A (§1.4) ships six of the twelve §4.1 ops; the rest (topics/mute/unmute/tree/zoom/recall)
 // belong to dropped rows and are not advertised, not schematized and not dispatched.
@@ -29,10 +29,15 @@ export type RoomOp = "join" | "read" | "post" | "claim" | "release" | "board";
 // with a bare `ToolDefinition` (that erases TParams).
 export interface RoomParams {
   op: RoomOp;
-  topic?: string; body?: string; mention?: string[]; replyTo?: string;
+  topic?: string;
+  body?: string;
+  mention?: string[];
+  replyTo?: string;
   performative?: Performative;
-  key?: string; ttl?: number;
-  since?: number; limit?: number;
+  key?: string;
+  ttl?: number;
+  since?: number;
+  limit?: number;
 }
 
 // K1 — the `details` payload. `ok` is always present; `outcome` only on the wait tools.
@@ -43,19 +48,19 @@ export type RoomToolDetails =
   | { ok: true; op: "claim"; holder: string; expiresAt: number; deliveryError?: string }
   | { ok: true; op: "release"; deliveryError?: string }
   | { ok: true; op: "board"; board: BoardResult }
-  | { ok: false; error: string; holder?: string; expiresAt?: number };   // "not holder" carries the expiry
+  | { ok: false; error: string; holder?: string; expiresAt?: number }; // "not holder" carries the expiry
 
 // K1 — the uniform tool result. `content` is ALWAYS present (the host coerces a result without a
 // `content` array to `isError:true` + "Tool returned an invalid result: missing content array.").
 export type RoomToolResult = AgentToolResult<RoomToolDetails>;
 
-export const READ_LIMIT_DEFAULT = 50;      // K20 — was 100; routed through the T1 budget
-export const READ_LIMIT_MAX = 200;         // K20 — was 1 000 (~97k tokens)
-export const RECALL_LIMIT_MAX = 100;       // §4.1
+export const READ_LIMIT_DEFAULT = 50; // K20 — was 100; routed through the T1 budget
+export const READ_LIMIT_MAX = 200; // K20 — was 1 000 (~97k tokens)
+export const RECALL_LIMIT_MAX = 100; // §4.1
 
-const CLAIM_TTL_MIN_MS = 1_000;            // §3.4 — TTL is mandatory; a zero lease is not a lease
+const CLAIM_TTL_MIN_MS = 1_000; // §3.4 — TTL is mandatory; a zero lease is not a lease
 const CLAIM_TTL_MAX_MS = 86_400_000;
-const READ_CURSOR_LAG_MAX = 1_000;
+const _READ_CURSOR_LAG_MAX = 1_000;
 
 /** K22/S1 — every room-authored string that reaches the model goes through the shared escaper. */
 const safe = safeRoomText;
@@ -196,7 +201,8 @@ async function notifyRecipients(
   };
   try {
     // §5.2 — the producer's bucket, consumed once per appended post (claim/release are not posts).
-    const coalesced = records.some((r) => r.kind === "msg") && admitPost(store, actorId, Date.now()) === "red";
+    const coalesced =
+      records.some((r) => r.kind === "msg") && admitPost(store, actorId, Date.now()) === "red";
     for (const record of records) {
       for (const target of recipients(store, actorId)) {
         try {
@@ -204,7 +210,7 @@ async function notifyRecipients(
           const tier = classify(record, viewer);
           if (isMuted(store, viewer, record)) continue;
           if (tier === "T1" && (coalesced || !t1Admitted(store, viewer, record))) continue;
-          if (coalesced && tier === "T2") continue;       // leave it pending for the digest
+          if (coalesced && tier === "T2") continue; // leave it pending for the digest
           await deliver(pi, ctx, target, record, tier);
         } catch (error) {
           note(error);
@@ -223,11 +229,16 @@ function appendedSince(store: RoomStore, before: number): RoomRecord[] {
 }
 
 /** K1 — an ok result carrying the optional delivery-failure note. */
-function okWithDelivery<T extends RoomToolDetails>(details: T, text: string, failure?: string): AgentToolResult<T> {
+function okWithDelivery<T extends RoomToolDetails>(
+  details: T,
+  text: string,
+  failure?: string,
+): AgentToolResult<T> {
   return ok(failure === undefined ? details : { ...details, deliveryError: failure }, text);
 }
 
-export function registerRoomTool(pi: ExtensionAPI): void {     // §2.1.1
+export function registerRoomTool(pi: ExtensionAPI): void {
+  // §2.1.1
   const z = pi.zod;
   const params = z.object({
     op: z.enum(["join", "read", "post", "claim", "release", "board"]),
@@ -235,7 +246,9 @@ export function registerRoomTool(pi: ExtensionAPI): void {     // §2.1.1
     body: z.string().optional(),
     mention: z.array(z.string()).optional(),
     replyTo: z.string().optional(),
-    performative: z.enum(["inform", "request", "propose", "accept", "reject", "query", "failure"]).optional(),
+    performative: z
+      .enum(["inform", "request", "propose", "accept", "reject", "query", "failure"])
+      .optional(),
     key: z.string().optional(),
     ttl: z.number().optional(),
     since: z.number().optional(),
@@ -291,7 +304,8 @@ export function registerRoomTool(pi: ExtensionAPI): void {     // §2.1.1
           const body = records.map(recordLine).join("\n");
           return ok(
             { ok: true, op: "read", records, cursor: next, more: pending.length > records.length },
-            `room read → ${records.length} record(s) since seq ${since}` + (body ? `\n${body}` : ""),
+            `room read → ${records.length} record(s) since seq ${since}` +
+              (body ? `\n${body}` : ""),
           );
         }
 
@@ -308,7 +322,7 @@ export function registerRoomTool(pi: ExtensionAPI): void {     // §2.1.1
           const viewer = viewerFor(store, agentId);
           const record = store.append({
             kind: "msg",
-            from: agentId,               // S4 — `from` is always the authenticated caller id
+            from: agentId, // S4 — `from` is always the authenticated caller id
             topic,
             body,
             ...(p.mention ? { mention: p.mention } : {}),
@@ -335,11 +349,26 @@ export function registerRoomTool(pi: ExtensionAPI): void {     // §2.1.1
           const before = store.seq;
           const result = grant(store, resource, agentId, ttlMs);
           if (!result.ok) {
-            return fail(`claim ${resource} denied — held by ${result.holder}`, result.holder, result.expiresAt);
+            return fail(
+              `claim ${resource} denied — held by ${result.holder}`,
+              result.holder,
+              result.expiresAt,
+            );
           }
-          const failure = await notifyRecipients(pi, ctx, store, appendedSince(store, before), agentId);
+          const failure = await notifyRecipients(
+            pi,
+            ctx,
+            store,
+            appendedSince(store, before),
+            agentId,
+          );
           return okWithDelivery(
-            { ok: true, op: "claim", holder: result.claim.holder, expiresAt: result.claim.acquiredAt + result.claim.ttlMs },
+            {
+              ok: true,
+              op: "claim",
+              holder: result.claim.holder,
+              expiresAt: result.claim.acquiredAt + result.claim.ttlMs,
+            },
             `room claim ${safe(resource)} → granted, expires in ${Math.round(ttlMs / 1000)}s`,
             failure,
           );
@@ -357,14 +386,38 @@ export function registerRoomTool(pi: ExtensionAPI): void {     // §2.1.1
             // §4.1 — a reclaim against a stale claim is explicit and logged, never silent.
             const reclaimed = reclaimIfStale(store, resource, Date.now());
             if (reclaimed) {
-              const failure = await notifyRecipients(pi, ctx, store, appendedSince(store, before), agentId);
-              return okWithDelivery({ ok: true, op: "release" }, `room release ${safe(resource)} → reclaimed (was stale)`, failure);
+              const failure = await notifyRecipients(
+                pi,
+                ctx,
+                store,
+                appendedSince(store, before),
+                agentId,
+              );
+              return okWithDelivery(
+                { ok: true, op: "release" },
+                `room release ${safe(resource)} → reclaimed (was stale)`,
+                failure,
+              );
             }
-            return fail(`release ${resource} denied — not holder`, held.holder, held.acquiredAt + held.ttlMs);
+            return fail(
+              `release ${resource} denied — not holder`,
+              held.holder,
+              held.acquiredAt + held.ttlMs,
+            );
           }
           release(store, resource, agentId, "released");
-          const failure = await notifyRecipients(pi, ctx, store, appendedSince(store, before), agentId);
-          return okWithDelivery({ ok: true, op: "release" }, `room release ${safe(resource)} → released`, failure);
+          const failure = await notifyRecipients(
+            pi,
+            ctx,
+            store,
+            appendedSince(store, before),
+            agentId,
+          );
+          return okWithDelivery(
+            { ok: true, op: "release" },
+            `room release ${safe(resource)} → released`,
+            failure,
+          );
         }
 
         case "board": {

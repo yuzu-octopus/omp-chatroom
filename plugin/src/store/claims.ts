@@ -1,9 +1,13 @@
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent";
+import type { RoomStore } from "./room-store"; // type-only — breaks the runtime cycle
 import type { RoomRecord } from "./schema";
-import type { RoomStore } from "./room-store";   // type-only — breaks the runtime cycle
 // §3.4 — verbatim
 export interface ClaimState {
-  resource: string; holder: string; ttlMs: number; acquiredAt: number; seq: number;
+  resource: string;
+  holder: string;
+  ttlMs: number;
+  acquiredAt: number;
+  seq: number;
 }
 
 export type GrantResult =
@@ -26,7 +30,12 @@ function isStale(claim: ClaimState, now: number): boolean {
 // §3.4 — first-writer-wins. A loss appends NOTHING: it returns the current holder and expiry.
 // `append` projects the claim into `store.claims` (K15), so listeners woken during the append
 // already observe the grant.
-export function grant(store: RoomStore, resource: string, holder: string, ttlMs: number): GrantResult {
+export function grant(
+  store: RoomStore,
+  resource: string,
+  holder: string,
+  ttlMs: number,
+): GrantResult {
   const existing = store.claims.get(resource);
   if (existing !== undefined) {
     return { ok: false, holder: existing.holder, expiresAt: existing.acquiredAt + existing.ttlMs };
@@ -37,8 +46,13 @@ export function grant(store: RoomStore, resource: string, holder: string, ttlMs:
 
 // M11 — `prevHolder` is required on the record: for a reclaim it is the displaced holder; a plain
 // release by the holder defaults it to `holder`. The T0 eviction notice classifies on it (§16).
-export function release(store: RoomStore, resource: string, holder: string, reason: ReleaseReason,
-                        prevHolder: string = holder): boolean {
+export function release(
+  store: RoomStore,
+  resource: string,
+  holder: string,
+  reason: ReleaseReason,
+  prevHolder: string = holder,
+): boolean {
   const existing = store.claims.get(resource);
   if (existing === undefined || existing.holder !== holder) return false;
   store.append({ kind: "release", from: holder, resource, reason, prevHolder });
@@ -55,7 +69,13 @@ export function reclaimIfStale(store: RoomStore, resource: string, now: number):
   // `from` is the releaser; for a reclaim that is the new claimant (the oldest waiter), else the
   // arbiter itself — never the displaced holder (M11).
   const next = store.waiters.get(resource)?.[0] ?? "system";
-  store.append({ kind: "release", from: next, resource, reason: "reclaimed", prevHolder: existing.holder });
+  store.append({
+    kind: "release",
+    from: next,
+    resource,
+    reason: "reclaimed",
+    prevHolder: existing.holder,
+  });
   return resolveWaiters(store, resource, existing.ttlMs);
 }
 
@@ -65,7 +85,10 @@ export function contended(store: RoomStore, resource: string): string[] {
 
 // K3/K12 — the TIMER path (nobody waiting): drop the stale claim, no successor.
 // Distinct from reclaimIfStale, the CONTENDED path (replace + notify the previous holder).
-export function expireStale(store: RoomStore, now: number): Array<{ resource: string; prev: string; next?: string }> {
+export function expireStale(
+  store: RoomStore,
+  now: number,
+): Array<{ resource: string; prev: string; next?: string }> {
   const stale: ClaimState[] = [];
   for (const claim of store.claims.values()) {
     if (isStale(claim, now)) stale.push(claim);
@@ -73,14 +96,19 @@ export function expireStale(store: RoomStore, now: number): Array<{ resource: st
   const out: Array<{ resource: string; prev: string; next?: string }> = [];
   for (const claim of stale) {
     store.append({
-      kind: "release", from: "system", resource: claim.resource,
-      reason: "expired", prevHolder: claim.holder,
+      kind: "release",
+      from: "system",
+      resource: claim.resource,
+      reason: "expired",
+      prevHolder: claim.holder,
     });
     // §3.4 step 3 — if waiters exist, the oldest is promoted with the expired lease's ttl.
     const next = resolveWaiters(store, claim.resource, claim.ttlMs);
-    out.push(next === null
-      ? { resource: claim.resource, prev: claim.holder }
-      : { resource: claim.resource, prev: claim.holder, next: next.holder });
+    out.push(
+      next === null
+        ? { resource: claim.resource, prev: claim.holder }
+        : { resource: claim.resource, prev: claim.holder, next: next.holder },
+    );
   }
   return out;
 }
@@ -90,8 +118,11 @@ export function hydrateClaims(store: RoomStore, records: readonly RoomRecord[]):
   for (const record of records) {
     if (record.kind === "claim") {
       store.claims.set(record.resource, {
-        resource: record.resource, holder: record.from, ttlMs: record.ttlMs,
-        acquiredAt: record.ts, seq: record.seq,
+        resource: record.resource,
+        holder: record.from,
+        ttlMs: record.ttlMs,
+        acquiredAt: record.ts,
+        seq: record.seq,
       });
     } else if (record.kind === "release") {
       store.claims.delete(record.resource);
@@ -100,7 +131,8 @@ export function hydrateClaims(store: RoomStore, records: readonly RoomRecord[]):
 }
 
 // §4.4 — the in-store condition variable for wait_for_claim.
-export function enqueueWaiter(store: RoomStore, resource: string, agentId: string): void {   // [invented]
+export function enqueueWaiter(store: RoomStore, resource: string, agentId: string): void {
+  // [invented]
   const queue = store.waiters.get(resource);
   if (queue === undefined) {
     store.waiters.set(resource, [agentId]);
@@ -109,7 +141,8 @@ export function enqueueWaiter(store: RoomStore, resource: string, agentId: strin
   if (!queue.includes(agentId)) queue.push(agentId);
 }
 
-export function dequeueWaiter(store: RoomStore, resource: string, agentId: string): void {  // [invented]
+export function dequeueWaiter(store: RoomStore, resource: string, agentId: string): void {
+  // [invented]
   const queue = store.waiters.get(resource);
   if (queue === undefined) return;
   const at = queue.indexOf(agentId);
@@ -118,14 +151,20 @@ export function dequeueWaiter(store: RoomStore, resource: string, agentId: strin
 }
 
 // §4.4 — a waiter that lost the race is moved to the BACK of the queue; it never fails.
-export function requeueWaiter(store: RoomStore, resource: string, agentId: string): void {  // [invented]
+export function requeueWaiter(store: RoomStore, resource: string, agentId: string): void {
+  // [invented]
   dequeueWaiter(store, resource, agentId);
   enqueueWaiter(store, resource, agentId);
 }
 
 // §4.4 — grant the lease to the OLDEST queued waiter. Null when the queue is empty OR a claim is
 // currently held (idempotent: two callers racing on the same promotion cannot double-grant).
-export function resolveWaiters(store: RoomStore, resource: string, ttlMs: number): ClaimState | null { // [invented]
+export function resolveWaiters(
+  store: RoomStore,
+  resource: string,
+  ttlMs: number,
+): ClaimState | null {
+  // [invented]
   if (store.claims.has(resource)) return null;
   const queue = store.waiters.get(resource);
   if (queue === undefined || queue.length === 0) return null;

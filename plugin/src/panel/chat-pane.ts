@@ -1,17 +1,35 @@
+import {
+  type LayoutRenderer,
+  padding,
+  type Theme,
+  truncateToWidth,
+  visibleWidth,
+} from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
-import { padding, truncateToWidth, visibleWidth, type LayoutRenderer, type Theme } from "@oh-my-pi/pi-tui";
+import { classify, type Tier } from "../attention/tiers";
 import type { MemberState } from "../store/room-store";
 import type { RoomRecord } from "../store/schema";
-import { classify, type Tier } from "../attention/tiers";
 
-export interface ChatRow {                                 // [invented]
-  seq: number; ts: number; tier: Tier; author: string; topic: string;
-  body: string; mention: boolean; unread: boolean; threadDepth: number;
+export interface ChatRow {
+  // [invented]
+  seq: number;
+  ts: number;
+  tier: Tier;
+  author: string;
+  topic: string;
+  body: string;
+  mention: boolean;
+  unread: boolean;
+  threadDepth: number;
 }
 
 // §6.3 — the per-row tier badge: error T0, warning T1, muted T2. (`info` is a status GLYPH in the
 // theme, not a foreground colour; the plan's "info/muted T2" resolves to `muted`.)
-const TIER_TONE: Record<Tier, "error" | "warning" | "muted"> = { T0: "error", T1: "warning", T2: "muted" };
+const TIER_TONE: Record<Tier, "error" | "warning" | "muted"> = {
+  T0: "error",
+  T1: "warning",
+  T2: "muted",
+};
 
 type MsgRecord = Extract<RoomRecord, { kind: "msg" }>;
 
@@ -75,12 +93,15 @@ function padOrTrim(text: string, width: number): string {
  * the pane. Every line is exactly `width` cells (the caller has already sliced the window).
  */
 export function renderChatRows(rows: readonly ChatRow[], width: number, theme: Theme): string[] {
-  return rows.map(row => {
+  return rows.map((row) => {
     const unread = row.unread ? theme.fg("accent", theme.nav.cursor) : " ";
     const badge = theme.fg(TIER_TONE[row.tier], row.tier);
     const time = theme.fg("dim", new Date(row.ts).toISOString().slice(11, 19));
-    const author = row.mention ? theme.bold(theme.fg("accent", row.author)) : theme.bold(row.author);
-    const indent = row.threadDepth > 0 ? theme.tree.vertical.repeat(row.threadDepth) + theme.tree.branch : "";
+    const author = row.mention
+      ? theme.bold(theme.fg("accent", row.author))
+      : theme.bold(row.author);
+    const indent =
+      row.threadDepth > 0 ? theme.tree.vertical.repeat(row.threadDepth) + theme.tree.branch : "";
     const body = truncateToWidth(row.body.replace(/[\r\n]+/g, " "), Math.max(1, width - 32));
     const head =
       `${unread}${badge} ${time} ${indent}${author} ${theme.fg("dim", "›")} ` +
@@ -93,7 +114,11 @@ export function renderChatRows(rows: readonly ChatRow[], width: number, theme: T
  * §6.2/§6.3 — a WINDOWED chat renderer: it renders only the tail of the row list that fits the pane
  * (`followTail`), never one component per message (§6.2 perf rule).
  */
-export function createChatPane(getRows: () => readonly ChatRow[], height: number, theme: Theme): LayoutRenderer {
+export function createChatPane(
+  getRows: () => readonly ChatRow[],
+  height: number,
+  theme: Theme,
+): LayoutRenderer {
   return (width: number, paneHeight: number | undefined): readonly string[] => {
     const size = Math.max(0, paneHeight ?? height);
     const rows = getRows();

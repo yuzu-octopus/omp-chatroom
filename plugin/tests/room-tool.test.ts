@@ -1,15 +1,27 @@
-import { test, expect, afterEach } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AgentRegistry, type ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import {
-  storeFor, resetRoomStores, roomStoreFor, disposeRoomSession, type RoomStore,
-} from "../src/store/room-store";
-import {
-  grant, release, reclaimIfStale, expireStale, hydrateClaims, contended,
-  enqueueWaiter, dequeueWaiter, requeueWaiter, resolveWaiters,
+  contended,
+  dequeueWaiter,
+  enqueueWaiter,
+  expireStale,
+  grant,
+  hydrateClaims,
+  reclaimIfStale,
+  release,
+  requeueWaiter,
+  resolveWaiters,
 } from "../src/store/claims";
+import {
+  disposeRoomSession,
+  type RoomStore,
+  resetRoomStores,
+  roomStoreFor,
+  storeFor,
+} from "../src/store/room-store";
 
 // §3.1 — a real store over a real temp root; the real JSONL log is written (§3.3).
 const ROOM_ID = "rtool";
@@ -24,7 +36,9 @@ function registerAgent(id: string, status: "running" | "parked" | "aborted"): vo
   AgentRegistry.global().register({ id, displayName: id, kind: "sub", session: null, status });
 }
 
-afterEach(() => { resetRoomStores(); });
+afterEach(() => {
+  resetRoomStores();
+});
 
 // --- test 1 — first-writer-wins -------------------------------------------------
 
@@ -63,16 +77,16 @@ test("release promotes the oldest waiter AND grants it the lease", () => {
   expect(release(s, "build/step", "A", "released")).toBe(true);
 
   const held = s.claims.get("build/step");
-  expect(held?.holder).toBe("B");          // the OLDEST waiter, not C
-  expect(held?.ttlMs).toBe(45_000);        // granted with the dropped claim's ttl
-  expect(s.waiters.get("build/step")).toEqual(["C"]);   // B dequeued, C still waiting
+  expect(held?.holder).toBe("B"); // the OLDEST waiter, not C
+  expect(held?.ttlMs).toBe(45_000); // granted with the dropped claim's ttl
+  expect(s.waiters.get("build/step")).toEqual(["C"]); // B dequeued, C still waiting
 
   const last = s.records.at(-1)!;
   expect(last.kind).toBe("claim");
   if (last.kind === "claim") expect(last.from).toBe("B");
 
   // the release record itself carries prevHolder = the releaser (M11)
-  const rel = s.records.filter(r => r.kind === "release").at(-1)!;
+  const rel = s.records.filter((r) => r.kind === "release").at(-1)!;
   if (rel.kind === "release") {
     expect(rel.reason).toBe("released");
     expect(rel.prevHolder).toBe("A");
@@ -113,7 +127,7 @@ test("expireStale releases a TTL-expired claim and appends release{reason:'expir
   expect(dropped.length).toBe(1);
   expect(dropped[0].resource).toBe("build/step");
   expect(dropped[0].prev).toBe("A");
-  expect(dropped[0].next).toBeUndefined();      // timer path: no successor
+  expect(dropped[0].next).toBeUndefined(); // timer path: no successor
 
   expect(s.claims.has("build/step")).toBe(false);
 
@@ -141,19 +155,19 @@ test("expireStale is a no-op while the TTL is live", () => {
 
 test("a parked/aborted holder's claim is reclaimable", () => {
   const s = newStore();
-  grant(s, "build/step", "A", 3_600_000);         // long TTL — NOT expired
+  grant(s, "build/step", "A", 3_600_000); // long TTL — NOT expired
   registerAgent("A", "parked");
-  enqueueWaiter(s, "build/step", "B");            // the contender
+  enqueueWaiter(s, "build/step", "B"); // the contender
 
   const claimed = reclaimIfStale(s, "build/step", Date.now());
-  expect(claimed?.holder).toBe("B");              // the waiter got the lease
+  expect(claimed?.holder).toBe("B"); // the waiter got the lease
   expect(s.claims.get("build/step")?.holder).toBe("B");
 
-  const rel = s.records.filter(r => r.kind === "release").at(-1)!;
+  const rel = s.records.filter((r) => r.kind === "release").at(-1)!;
   expect(rel.kind).toBe("release");
   if (rel.kind === "release") {
     expect(rel.reason).toBe("reclaimed");
-    expect(rel.prevHolder).toBe("A");             // the DISPLACED holder, not the reclaimer
+    expect(rel.prevHolder).toBe("A"); // the DISPLACED holder, not the reclaimer
   }
 });
 
@@ -161,11 +175,11 @@ test("an aborted holder's claim is reclaimable and a fresh claim is not", () => 
   const s = newStore();
   grant(s, "build/step", "A", 3_600_000);
   registerAgent("A", "running");
-  expect(reclaimIfStale(s, "build/step", Date.now())).toBeNull();  // live + no waiter → untouched
+  expect(reclaimIfStale(s, "build/step", Date.now())).toBeNull(); // live + no waiter → untouched
   expect(s.claims.get("build/step")?.holder).toBe("A");
 
   registerAgent("A", "aborted");
-  expect(reclaimIfStale(s, "build/step", Date.now())).toBeNull();  // no waiter → dropped, no successor
+  expect(reclaimIfStale(s, "build/step", Date.now())).toBeNull(); // no waiter → dropped, no successor
   expect(s.claims.has("build/step")).toBe(false);
 });
 
@@ -181,7 +195,7 @@ test("append is the only writer and mints monotonically increasing seq", () => {
   expect(r1.id.length).toBeGreaterThan(0);
   expect(r2.seq).toBe(r1.seq + 1);
   expect(s.seq).toBe(r2.seq);
-  expect(s.records.map(r => r.seq)).toEqual([r1.seq, r2.seq]);
+  expect(s.records.map((r) => r.seq)).toEqual([r1.seq, r2.seq]);
   expect(s.byId.get(r2.id)).toBe(r2);
 
   // every claim mutation also goes through append (K15): one claim = one seq
@@ -200,7 +214,7 @@ test("append is the only writer and mints monotonically increasing seq", () => {
 test("addListener returns an unsubscribe that removes the listener", () => {
   const s = newStore();
   const seen: number[] = [];
-  const off = s.addListener(r => seen.push(r.seq));
+  const off = s.addListener((r) => seen.push(r.seq));
 
   s.append({ kind: "note", from: "A", topic: "t", body: "x" });
   off();
@@ -228,11 +242,11 @@ test("storeFor returns the same store per root and evicts on last dispose", () =
   expect(b).toBe(a);
 
   a.dispose();
-  const c = storeFor(root, ROOM_ID);              // b and c still hold live refs
+  const c = storeFor(root, ROOM_ID); // b and c still hold live refs
   expect(c).toBe(a);
   c.dispose();
-  b.dispose();                                    // last ref → evicted
-  expect(storeFor(root, ROOM_ID)).not.toBe(a);    // a fresh store is minted
+  b.dispose(); // last ref → evicted
+  expect(storeFor(root, ROOM_ID)).not.toBe(a); // a fresh store is minted
 });
 
 test("reset() clears state without evicting the registry entry", () => {
@@ -246,7 +260,7 @@ test("reset() clears state without evicting the registry entry", () => {
   expect(s.byId.size).toBe(0);
   expect(s.claims.size).toBe(0);
   expect(s.seq).toBe(0);
-  expect(storeFor(s.root, ROOM_ID)).toBe(s);      // still registered
+  expect(storeFor(s.root, ROOM_ID)).toBe(s); // still registered
 });
 
 // --- hydrateClaims: replay rebuilds claim state ---------------------------------
@@ -278,7 +292,7 @@ test("hydrateClaims applies a reclaim chain (claim → release → claim)", () =
   const s = newStore();
   grant(s, "build/step", "A", 60_000);
   enqueueWaiter(s, "build/step", "B");
-  release(s, "build/step", "A", "released");       // promotes B
+  release(s, "build/step", "A", "released"); // promotes B
   const snapshot = s.records.slice();
 
   s.claims.clear();
@@ -292,21 +306,28 @@ test("contended lists the waiters for a resource, oldest first", () => {
   const s = newStore();
   enqueueWaiter(s, "build/step", "B");
   enqueueWaiter(s, "build/step", "C");
-  enqueueWaiter(s, "build/step", "B");             // duplicate ignored
+  enqueueWaiter(s, "build/step", "B"); // duplicate ignored
   expect(contended(s, "build/step")).toEqual(["B", "C"]);
   expect(contended(s, "other/thing")).toEqual([]);
 });
 
 // --- session refcount + main-only timers (K9, R11/R28) --------------------------
 
-function fakeCtx(root: string, agentId: string, kind: "main" | "sub" = "main",
-                 onInterval?: () => void): ExtensionContext {
+function fakeCtx(
+  root: string,
+  agentId: string,
+  kind: "main" | "sub" = "main",
+  onInterval?: () => void,
+): ExtensionContext {
   const opts = { getArtifactsDir: () => root, getSessionId: () => agentId };
   return {
     agent: { kind, id: agentId, name: kind, depth: 0 },
     localProtocolOptions: opts,
     sessionManager: { ...opts, getEntries: () => [] },
-    setInterval: () => { onInterval?.(); return 0 as unknown as Timer; },
+    setInterval: () => {
+      onInterval?.();
+      return 0 as unknown as Timer;
+    },
     clearTimer: () => {},
   } as unknown as ExtensionContext;
 }
@@ -320,20 +341,28 @@ test("roomStoreFor refs once per session; disposeRoomSession evicts on the last"
   const b = roomStoreFor(fakeCtx(root, "AgentB"));
   expect(b).toBe(a);
 
-  disposeRoomSession(fakeCtx(root, "AgentA"));      // one session leaves; B still holds the root
+  disposeRoomSession(fakeCtx(root, "AgentA")); // one session leaves; B still holds the root
   expect(roomStoreFor(fakeCtx(root, "AgentB"))).toBe(a);
 
-  disposeRoomSession(fakeCtx(root, "AgentB"));      // last session → fd closed, root evicted
+  disposeRoomSession(fakeCtx(root, "AgentB")); // last session → fd closed, root evicted
   expect(roomStoreFor(fakeCtx(root, "AgentC"))).not.toBe(a);
 });
 
 test("background jobs start from the main session only (R11/R28)", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "room-tool-"));
   let intervals = 0;
-  roomStoreFor(fakeCtx(root, "Sub", "sub", () => { intervals++; }));
-  expect(intervals).toBe(0);                        // a subagent must not own the tick
-  roomStoreFor(fakeCtx(root, "Main", "main", () => { intervals++; }));
-  expect(intervals).toBe(3);                        // prune + claim sweep + compactor, from the main session
+  roomStoreFor(
+    fakeCtx(root, "Sub", "sub", () => {
+      intervals++;
+    }),
+  );
+  expect(intervals).toBe(0); // a subagent must not own the tick
+  roomStoreFor(
+    fakeCtx(root, "Main", "main", () => {
+      intervals++;
+    }),
+  );
+  expect(intervals).toBe(3); // prune + claim sweep + compactor, from the main session
 });
 
 // --- TDD: refcount leak fix (R10) --------------------------------------------

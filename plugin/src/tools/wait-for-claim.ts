@@ -8,14 +8,14 @@ import type {
 import { escapeHarnessTags } from "@oh-my-pi/pi-coding-agent/session/harness-tags";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import {
+  type ClaimState,
   dequeueWaiter,
   enqueueWaiter,
   requeueWaiter,
   resolveWaiters,
-  type ClaimState,
 } from "../store/claims";
 import { resolveRoomConfig } from "../store/config";
-import { roomStoreFor, type RoomStore } from "../store/room-store";
+import { type RoomStore, roomStoreFor } from "../store/room-store";
 import type { RoomRecord } from "../store/schema";
 
 export const WAIT_FOR_CLAIM_NAME = "wait_for_claim";
@@ -23,14 +23,15 @@ export const WAIT_FOR_CLAIM_DESCRIPTION: string = `Block until you acquire the C
 "<topic>/<key>", or time out. When the holder releases, is reclaimed, or its TTL expires, the oldest
 waiter is resolved AND granted the lease. Use this when a peer holds a resource you need. Timeout is
 a normal outcome (acquired:false), not an error. Optional maxWaitMs bounds the wait.`;
-export const CLAIM_WAIT_DEFAULT_TIMEOUT_MS = 20_000;   // §4.4 = SQS max long poll
+export const CLAIM_WAIT_DEFAULT_TIMEOUT_MS = 20_000; // §4.4 = SQS max long poll
 export const CLAIM_WAIT_MIN_MS = 1_000;
 export const CLAIM_WAIT_MAX_MS = 300_000;
 
 // K11 — WaitOutcome is declared ONCE, here; imported by schema (types), tiers, governor, delivery.
 export type WaitOutcome = "event" | "timeout" | "aborted";
 
-export interface WaitForClaimParams {            // SCAFFOLD-DEFINED (derived from §4.4; K13)
+export interface WaitForClaimParams {
+  // SCAFFOLD-DEFINED (derived from §4.4; K13)
   resource: string;
   timeout?: number;
   ttl?: number;
@@ -72,7 +73,12 @@ function eventResult(resource: string, claim: ClaimState): WaitForClaimResult {
 /** §4.5 — timeout/abort are NORMAL outcomes: `useless:true` so compaction may elide them. */
 function timeoutResult(resource: string, timeoutMs: number): WaitForClaimResult {
   return {
-    content: [{ type: "text", text: `wait_for_claim ${safe(resource)} → timeout after ${timeoutMs}ms (acquired:false)` }],
+    content: [
+      {
+        type: "text",
+        text: `wait_for_claim ${safe(resource)} → timeout after ${timeoutMs}ms (acquired:false)`,
+      },
+    ],
     details: { ok: true, outcome: "timeout", acquired: false },
     useless: true,
   };
@@ -110,11 +116,20 @@ async function waitForClaim(
   }
   const agentId = ctx.agent.id;
   const resource = params.resource;
-  const ttlMs = clamp(params.ttl ?? resolveRoomConfig(pi, store.root).claimTtlMs, CLAIM_WAIT_MIN_MS, 86_400_000);
-  const timeoutMs = clamp(params.timeout ?? CLAIM_WAIT_DEFAULT_TIMEOUT_MS, CLAIM_WAIT_MIN_MS, CLAIM_WAIT_MAX_MS);
-  const maxWaitMs = params.maxWaitMs === undefined
-    ? undefined
-    : clamp(params.maxWaitMs, CLAIM_WAIT_MIN_MS, CLAIM_WAIT_MAX_MS);
+  const ttlMs = clamp(
+    params.ttl ?? resolveRoomConfig(pi, store.root).claimTtlMs,
+    CLAIM_WAIT_MIN_MS,
+    86_400_000,
+  );
+  const timeoutMs = clamp(
+    params.timeout ?? CLAIM_WAIT_DEFAULT_TIMEOUT_MS,
+    CLAIM_WAIT_MIN_MS,
+    CLAIM_WAIT_MAX_MS,
+  );
+  const maxWaitMs =
+    params.maxWaitMs === undefined
+      ? undefined
+      : clamp(params.maxWaitMs, CLAIM_WAIT_MIN_MS, CLAIM_WAIT_MAX_MS);
   const startedAt = Date.now();
 
   if (signal?.aborted) return abortResult(resource);
@@ -154,7 +169,8 @@ async function waitForClaim(
       }
       // A foreign claim won the race: stay queued and keep waiting — never `acquired:false` (§4.4).
       requeueWaiter(store, resource, agentId);
-      if (maxWaitMs !== undefined && Date.now() - startedAt > maxWaitMs) finish(timeoutResult(resource, timeoutMs));
+      if (maxWaitMs !== undefined && Date.now() - startedAt > maxWaitMs)
+        finish(timeoutResult(resource, timeoutMs));
     }
   };
 
@@ -182,8 +198,14 @@ export function registerWaitForClaim(pi: ExtensionAPI): void {
   const params = z.object({
     resource: z.string().describe('the claim to acquire, as "<topic>/<key>"'),
     timeout: z.number().optional().describe("ms to wait; default 20000, min 1000, max 300000"),
-    ttl: z.number().optional().describe("lease ms granted if the claim is free; default from room config"),
-    maxWaitMs: z.number().optional().describe("livelock guard: bound the total wait even if requeued"),
+    ttl: z
+      .number()
+      .optional()
+      .describe("lease ms granted if the claim is free; default from room config"),
+    maxWaitMs: z
+      .number()
+      .optional()
+      .describe("livelock guard: bound the total wait even if requeued"),
   });
 
   const tool = {

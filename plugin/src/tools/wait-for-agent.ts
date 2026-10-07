@@ -9,8 +9,13 @@ import {
 import type { AgentStatus } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { escapeHarnessTags } from "@oh-my-pi/pi-coding-agent/session/harness-tags";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
-import { describeWaitCall, describeWaitResult, renderWaitCall, renderWaitResult } from "../cards/tool-cards";
-import type { WaitOutcome } from "./wait-for-claim";   // K11 — declared once, there
+import {
+  describeWaitCall,
+  describeWaitResult,
+  renderWaitCall,
+  renderWaitResult,
+} from "../cards/tool-cards";
+import type { WaitOutcome } from "./wait-for-claim"; // K11 — declared once, there
 
 export const WAIT_FOR_AGENT_NAME = "wait_for_agent";
 export const WAIT_FOR_AGENT_DESCRIPTION: string = `Block until another AGENT changes status or
@@ -19,13 +24,14 @@ traffic (use wait_for_message) and NOT for a resource (use wait_for_claim). Boun
 (default 30 s, max 30 min); returns outcome "event" | "timeout" | "aborted". Enumerate the agents you
 are waiting on explicitly. The native wait tool's "NEVER wait on other agents" guidance applies to
 that tool's own async jobs — this tool is the supported way to block on a peer, and it does not
-poll.`;   // K16 — §4.0.1 verbatim
-export const WAIT_DEFAULT_TIMEOUT_MS = 30_000;   // §4.2
-export const WAIT_MAX_MS = 1_800_000;            // §4.2 = omp WAIT_MAX_MS
+poll.`; // K16 — §4.0.1 verbatim
+export const WAIT_DEFAULT_TIMEOUT_MS = 30_000; // §4.2
+export const WAIT_MAX_MS = 1_800_000; // §4.2 = omp WAIT_MAX_MS
 export const WAIT_MIN_MS = 1_000;
-export const WAIT_HEARTBEAT_MS = 500;            // §4.2 [invented]
+export const WAIT_HEARTBEAT_MS = 500; // §4.2 [invented]
 
-export interface WaitForAgentParams {            // SCAFFOLD-DEFINED (derived from §4.2; K13)
+export interface WaitForAgentParams {
+  // SCAFFOLD-DEFINED (derived from §4.2; K13)
   agents: string[];
   timeout?: number;
   require?: "any" | "all";
@@ -44,7 +50,8 @@ export type WaitForAgentResult = AgentToolResult<WaitForAgentDetails>;
 const safe = (text: string): string => escapeHarnessTags(sanitizeText(text));
 
 /** The schema's documented bounds are the contract; this is the one place they are applied. */
-const clamp = (value: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, Math.trunc(value)));
+const clamp = (value: number, lo: number, hi: number): number =>
+  Math.min(hi, Math.max(lo, Math.trunc(value)));
 
 /** A snapshot row per named agent; an unregistered id reports `parked` (it is gone, not running). */
 function snapshot(registry: AgentRegistry, ids: readonly string[]): WaitForAgentDetails["agents"] {
@@ -52,16 +59,28 @@ function snapshot(registry: AgentRegistry, ids: readonly string[]): WaitForAgent
     const ref = registry.get(id);
     return ref === undefined
       ? { id, status: "parked" as AgentStatus }
-      : { id, status: ref.status, ...(ref.activity === undefined ? {} : { activity: ref.activity }) };
+      : {
+          id,
+          status: ref.status,
+          ...(ref.activity === undefined ? {} : { activity: ref.activity }),
+        };
   });
 }
 
-function timeoutResult(agents: WaitForAgentDetails["agents"], timeoutMs: number): WaitForAgentResult {
+function timeoutResult(
+  agents: WaitForAgentDetails["agents"],
+  timeoutMs: number,
+): WaitForAgentResult {
   const names = agents.map((agent) => safe(agent.id)).join(", ");
   return {
-    content: [{ type: "text", text: `wait_for_agent [${names}] → timeout after ${timeoutMs}ms (no status change)` }],
+    content: [
+      {
+        type: "text",
+        text: `wait_for_agent [${names}] → timeout after ${timeoutMs}ms (no status change)`,
+      },
+    ],
     details: { ok: true, outcome: "timeout", agents },
-    useless: true,                                     // §4.5 — compaction may elide a non-event
+    useless: true, // §4.5 — compaction may elide a non-event
   };
 }
 
@@ -88,10 +107,17 @@ async function waitForAgent(
   signal: AbortSignal | undefined,
   onUpdate: AgentToolUpdateCallback<WaitForAgentDetails> | undefined,
 ): Promise<WaitForAgentResult> {
-  const ids = Array.isArray(params.agents) ? params.agents.filter((id) => typeof id === "string" && id.length > 0) : [];
+  const ids = Array.isArray(params.agents)
+    ? params.agents.filter((id) => typeof id === "string" && id.length > 0)
+    : [];
   if (ids.length === 0) {
     return {
-      content: [{ type: "text", text: "wait_for_agent → `agents` is required: name the peer agents to wait on" }],
+      content: [
+        {
+          type: "text",
+          text: "wait_for_agent → `agents` is required: name the peer agents to wait on",
+        },
+      ],
       details: { ok: false, outcome: "aborted", agents: [], error: "agents is required" },
     };
   }
@@ -104,7 +130,9 @@ async function waitForAgent(
   if (signal?.aborted) return abortResult(snapshot(registry, ids));
 
   let settle!: (result: WaitForAgentResult) => void;
-  const done = new Promise<WaitForAgentResult>((resolve) => { settle = resolve; });
+  const done = new Promise<WaitForAgentResult>((resolve) => {
+    settle = resolve;
+  });
   let finished = false;
   const finish = (result: WaitForAgentResult): void => {
     if (finished) return;
@@ -118,15 +146,17 @@ async function waitForAgent(
   // that disappears), `"all"` when every named agent has.
   const baseline = new Map(ids.map((id) => [id, registry.get(id)?.status]));
   const changed = (id: string): boolean => registry.get(id)?.status !== baseline.get(id);
-  const satisfied = (): boolean =>
-    require === "all" ? ids.every(changed) : ids.some(changed);
+  const satisfied = (): boolean => (require === "all" ? ids.every(changed) : ids.some(changed));
 
   const unsubscribe = registry.onChange((event) => {
     if (event.type !== "status_changed" && event.type !== "removed") return;
     if (!ids.includes(event.ref.id)) return;
     if (satisfied()) finish(eventResult(registry, ids, startedAt));
   });
-  const timer = ctx.setTimeout(() => finish(timeoutResult(snapshot(registry, ids), timeoutMs)), timeoutMs);
+  const timer = ctx.setTimeout(
+    () => finish(timeoutResult(snapshot(registry, ids), timeoutMs)),
+    timeoutMs,
+  );
   const onAbort = (): void => finish(abortResult(snapshot(registry, ids)));
   signal?.addEventListener("abort", onAbort, { once: true });
 
@@ -134,7 +164,12 @@ async function waitForAgent(
   const heartbeat = onUpdate
     ? ctx.setInterval(() => {
         onUpdate({
-          content: [{ type: "text", text: `wait_for_agent → waiting ${Math.round((Date.now() - startedAt) / 1000)}s` }],
+          content: [
+            {
+              type: "text",
+              text: `wait_for_agent → waiting ${Math.round((Date.now() - startedAt) / 1000)}s`,
+            },
+          ],
           details: { ok: true, outcome: "timeout", agents: snapshot(registry, ids) },
         });
       }, WAIT_HEARTBEAT_MS)
@@ -153,11 +188,20 @@ async function waitForAgent(
   }
 }
 
-function eventResult(registry: AgentRegistry, ids: readonly string[], startedAt: number): WaitForAgentResult {
+function eventResult(
+  registry: AgentRegistry,
+  ids: readonly string[],
+  startedAt: number,
+): WaitForAgentResult {
   const agents = snapshot(registry, ids);
   const summary = agents.map((agent) => `${safe(agent.id)}:${agent.status}`).join(", ");
   return {
-    content: [{ type: "text", text: `wait_for_agent [${summary}] → event after ${Date.now() - startedAt}ms` }],
+    content: [
+      {
+        type: "text",
+        text: `wait_for_agent [${summary}] → event after ${Date.now() - startedAt}ms`,
+      },
+    ],
     details: { ok: true, outcome: "event", agents },
   };
 }
@@ -165,9 +209,14 @@ function eventResult(registry: AgentRegistry, ids: readonly string[], startedAt:
 export function registerWaitForAgent(pi: ExtensionAPI): void {
   const z = pi.zod;
   const params = z.object({
-    agents: z.array(z.string()).describe("REQUIRED — the peer agent ids to wait on, enumerated explicitly"),
+    agents: z
+      .array(z.string())
+      .describe("REQUIRED — the peer agent ids to wait on, enumerated explicitly"),
     timeout: z.number().optional().describe("ms to wait; default 30000, min 1000, max 1800000"),
-    require: z.enum(["any", "all"]).optional().describe('wait for the first named agent to leave "running", or all of them'),
+    require: z
+      .enum(["any", "all"])
+      .optional()
+      .describe('wait for the first named agent to leave "running", or all of them'),
   });
 
   const tool = {

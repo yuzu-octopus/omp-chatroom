@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import { globalMap } from "../globals";
 import { logPathFor, newMessageId } from "../ids";
 import type { RecordKind, RoomRecord } from "./schema";
 
@@ -7,10 +8,10 @@ import type { RecordKind, RoomRecord } from "./schema";
 // the atomic append the plan relies on. Bun's `fs.constants` omits O_CLOEXEC and does not set it
 // by default, so the raw Linux value is supplied explicitly (the only supported platform).
 const O_CLOEXEC = process.platform === "linux" ? 0o2000000 : 0;
-const FDS: Map<string, number> = ((globalThis as unknown as { __roomLogFds?: Map<string, number> })
-  .__roomLogFds ??= new Map<string, number>());
+const FDS = globalMap<string, number>("__roomLogFds");
 
-export function roomLogFd(root: string, roomId: string): number {   // mkdirSync + O_APPEND|O_CLOEXEC
+export function roomLogFd(root: string, roomId: string): number {
+  // mkdirSync + O_APPEND|O_CLOEXEC
   const path = logPathFor(root, roomId);
   const existing = FDS.get(path);
   if (existing !== undefined) return existing;
@@ -23,7 +24,8 @@ export function roomLogFd(root: string, roomId: string): number {   // mkdirSync
   return fd;
 }
 
-export function appendLine(fd: number, line: string): void {        // line MUST end "\n"
+export function appendLine(fd: number, line: string): void {
+  // line MUST end "\n"
   const buf = Buffer.from(line.endsWith("\n") ? line : `${line}\n`, "utf-8");
   let off = 0;
   while (off < buf.length) {
@@ -96,7 +98,8 @@ export function replay(fd: number): { records: RoomRecord[]; skipped: number } {
   return { records, skipped };
 }
 
-export function closeRoomLog(root: string, roomId: string): void {  // K8 — last live session only
+export function closeRoomLog(root: string, roomId: string): void {
+  // K8 — last live session only
   const path = logPathFor(root, roomId);
   const fd = FDS.get(path);
   if (fd === undefined) return;
@@ -109,12 +112,12 @@ export function closeRoomLog(root: string, roomId: string): void {  // K8 — la
 
 // [invented] — §3.3's per-kind required-field table, as data (the validator's single source).
 export const LOG_VALIDATION_FIELDS: Readonly<Record<RecordKind, readonly string[]>> = {
-  msg:     ["v", "seq", "ts", "kind", "id", "from", "topic", "body"],
-  claim:   ["v", "seq", "ts", "kind", "id", "from", "resource", "ttlMs"],
+  msg: ["v", "seq", "ts", "kind", "id", "from", "topic", "body"],
+  claim: ["v", "seq", "ts", "kind", "id", "from", "resource", "ttlMs"],
   release: ["v", "seq", "ts", "kind", "id", "from", "resource", "reason", "prevHolder"],
-  note:    ["v", "seq", "ts", "kind", "id", "from", "topic", "body"],
-  member:  ["v", "seq", "ts", "kind", "id", "from", "action"],
-  gap:     ["v", "seq", "ts", "kind", "id", "from", "skipped", "reason"],
+  note: ["v", "seq", "ts", "kind", "id", "from", "topic", "body"],
+  member: ["v", "seq", "ts", "kind", "id", "from", "action"],
+  gap: ["v", "seq", "ts", "kind", "id", "from", "skipped", "reason"],
 };
 
 // §3.3 S3 — per-kind field validation on replay. A record that parses but does not match the
@@ -124,11 +127,26 @@ const RELEASE_REASONS = new Set<string>(["released", "expired", "reclaimed", "ab
 const GAP_REASONS = new Set<string>(["retention", "invalid", "corrupt"]);
 const MEMBER_ACTIONS = new Set<string>(["join", "leave"]);
 const PERFORMATIVES = new Set<string>([
-  "inform", "request", "propose", "accept", "reject", "query", "failure",
+  "inform",
+  "request",
+  "propose",
+  "accept",
+  "reject",
+  "query",
+  "failure",
 ]);
 const STRING_FIELDS = [
-  "id", "from", "topic", "body", "to", "replyTo", "threadRoot",
-  "resource", "prevHolder", "replyWith", "replyBy",
+  "id",
+  "from",
+  "topic",
+  "body",
+  "to",
+  "replyTo",
+  "threadRoot",
+  "resource",
+  "prevHolder",
+  "replyWith",
+  "replyBy",
 ] as const;
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -144,7 +162,8 @@ function inSet(value: unknown, set: ReadonlySet<string>): boolean {
   return typeof value === "string" && set.has(value);
 }
 
-export function validateRecord(value: unknown): RoomRecord | null {       // [invented placement]
+export function validateRecord(value: unknown): RoomRecord | null {
+  // [invented placement]
   if (!isPlainObject(value)) return null;
   if (value.v !== 1) return null;
   if (!isRecordKind(value.kind)) return null;
@@ -159,7 +178,11 @@ export function validateRecord(value: unknown): RoomRecord | null {       // [in
     if (value[field] !== undefined && typeof value[field] !== "string") return null;
   }
   if (value.mention !== undefined && !isStringArray(value.mention)) return null;
-  if (kind === "msg" && value.performative !== undefined && !inSet(value.performative, PERFORMATIVES)) {
+  if (
+    kind === "msg" &&
+    value.performative !== undefined &&
+    !inSet(value.performative, PERFORMATIVES)
+  ) {
     return null;
   }
   if (kind === "claim" && !Number.isFinite(value.ttlMs)) return null;
@@ -175,19 +198,34 @@ export function validateRecord(value: unknown): RoomRecord | null {       // [in
 
 // Synthetic notice for a line replay could not use; never a real actor.
 function gapRecord(seq: number, reason: "corrupt" | "invalid"): RoomRecord {
-  return { v: 1, seq, ts: Date.now(), kind: "gap", id: newMessageId(), from: "system", skipped: 1, reason };
+  return {
+    v: 1,
+    seq,
+    ts: Date.now(),
+    kind: "gap",
+    id: newMessageId(),
+    from: "system",
+    skipped: 1,
+    reason,
+  };
 }
 
 // F8 — [invented] the U6 mapping: errno → the detail string. Never throws.
 export type LogOpenResult =
   | { ok: true; fd: number }
   | { ok: false; error: "room file not found" | "room file unwritable" | "room file corrupt" };
-export function openRoomLog(root: string, roomId: string): LogOpenResult {   // [invented] F8 wrapper
+export function openRoomLog(root: string, roomId: string): LogOpenResult {
+  // [invented] F8 wrapper
   try {
     return { ok: true, fd: roomLogFd(root, roomId) };
   } catch (error) {
     let code: string | undefined;
-    if (typeof error === "object" && error !== null && "code" in error && typeof error.code === "string") {
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      typeof error.code === "string"
+    ) {
       code = error.code;
     }
     if (code === "ENOENT" || code === "ENOTDIR") return { ok: false, error: "room file not found" };

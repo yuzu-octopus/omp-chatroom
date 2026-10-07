@@ -7,20 +7,31 @@ import type {
 } from "@oh-my-pi/pi-coding-agent";
 import { escapeHarnessTags } from "@oh-my-pi/pi-coding-agent/session/harness-tags";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
-import { describeWaitCall, describeWaitResult, renderWaitCall, renderWaitResult } from "../cards/tool-cards";
-import { roomStoreFor, type RoomStore } from "../store/room-store";
+import {
+  describeWaitCall,
+  describeWaitResult,
+  renderWaitCall,
+  renderWaitResult,
+} from "../cards/tool-cards";
+import { type RoomStore, roomStoreFor } from "../store/room-store";
 import type { RoomRecord } from "../store/schema";
-import { WAIT_DEFAULT_TIMEOUT_MS, WAIT_HEARTBEAT_MS, WAIT_MAX_MS, WAIT_MIN_MS } from "./wait-for-agent";
-import type { WaitOutcome } from "./wait-for-claim";   // K11 — declared once, there
+import {
+  WAIT_DEFAULT_TIMEOUT_MS,
+  WAIT_HEARTBEAT_MS,
+  WAIT_MAX_MS,
+  WAIT_MIN_MS,
+} from "./wait-for-agent";
+import type { WaitOutcome } from "./wait-for-claim"; // K11 — declared once, there
 
 export const WAIT_FOR_MESSAGE_NAME = "wait_for_message";
 export const WAIT_FOR_MESSAGE_DESCRIPTION: string = `Block until a new ROOM MESSAGE arrives that
 matches your filter (from a given agent, or any message that mentions you). Use this when you are
 waiting on room traffic; use wait_for_agent for a peer's status change and wait_for_claim for a
 resource lease. Bounded by timeout (default 30 s, max 30 min); returns outcome "event" | "timeout" |
-"aborted" plus the matched record. Prefer this over repeatedly calling room{op:"read"}.`;   // K16 — §4.0.1 verbatim
+"aborted" plus the matched record. Prefer this over repeatedly calling room{op:"read"}.`; // K16 — §4.0.1 verbatim
 
-export interface WaitForMessageParams {          // SCAFFOLD-DEFINED (derived from §4.3; K13)
+export interface WaitForMessageParams {
+  // SCAFFOLD-DEFINED (derived from §4.3; K13)
   from?: string;
   mention?: boolean;
   source?: "room";
@@ -40,25 +51,36 @@ export type WaitForMessageResult = AgentToolResult<WaitForMessageDetails>;
 const safe = (text: string): string => escapeHarnessTags(sanitizeText(text));
 
 /** The schema's documented bounds are the contract; this is the one place they are applied. */
-const clamp = (value: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, Math.trunc(value)));
+const clamp = (value: number, lo: number, hi: number): number =>
+  Math.min(hi, Math.max(lo, Math.trunc(value)));
 
 /** A one-line model-facing rendering of the matched record (kind-first; only msg/note carry `body`). */
 function describeMatch(record: RoomRecord): string {
   switch (record.kind) {
     case "msg":
-    case "note":    return `${safe(record.from)} · topic:${safe(record.topic)} · "${safe(record.body)}"`;
-    case "claim":   return `${safe(record.from)} claimed ${safe(record.resource)}`;
-    case "release": return `${safe(record.from)} released ${safe(record.resource)} (${record.reason})`;
-    case "member":  return `${safe(record.from)} ${record.action === "join" ? "joined" : "left"} the room`;
-    case "gap":     return `${record.skipped} record(s) skipped (${record.reason})`;
+    case "note":
+      return `${safe(record.from)} · topic:${safe(record.topic)} · "${safe(record.body)}"`;
+    case "claim":
+      return `${safe(record.from)} claimed ${safe(record.resource)}`;
+    case "release":
+      return `${safe(record.from)} released ${safe(record.resource)} (${record.reason})`;
+    case "member":
+      return `${safe(record.from)} ${record.action === "join" ? "joined" : "left"} the room`;
+    case "gap":
+      return `${record.skipped} record(s) skipped (${record.reason})`;
   }
 }
 
 function timeoutResult(timeoutMs: number): WaitForMessageResult {
   return {
-    content: [{ type: "text", text: `wait_for_message → timeout after ${timeoutMs}ms (no matching room message)` }],
+    content: [
+      {
+        type: "text",
+        text: `wait_for_message → timeout after ${timeoutMs}ms (no matching room message)`,
+      },
+    ],
     details: { ok: true, outcome: "timeout" },
-    useless: true,                                     // §4.5 — compaction may elide a non-event
+    useless: true, // §4.5 — compaction may elide a non-event
   };
 }
 
@@ -85,8 +107,17 @@ async function waitForMessage(
 ): Promise<WaitForMessageResult> {
   if (params.source !== undefined && params.source !== "room") {
     return {
-      content: [{ type: "text", text: `wait_for_message → unsupported source "${safe(String(params.source))}" (v1 ships "room" only)` }],
-      details: { ok: false, outcome: "aborted", error: `unsupported source: ${String(params.source)}` },
+      content: [
+        {
+          type: "text",
+          text: `wait_for_message → unsupported source "${safe(String(params.source))}" (v1 ships "room" only)`,
+        },
+      ],
+      details: {
+        ok: false,
+        outcome: "aborted",
+        error: `unsupported source: ${String(params.source)}`,
+      },
     };
   }
 
@@ -111,7 +142,9 @@ async function waitForMessage(
   if (signal?.aborted) return abortResult();
 
   let settle!: (result: WaitForMessageResult) => void;
-  const done = new Promise<WaitForMessageResult>((resolve) => { settle = resolve; });
+  const done = new Promise<WaitForMessageResult>((resolve) => {
+    settle = resolve;
+  });
   let finished = false;
   const finish = (result: WaitForMessageResult): void => {
     if (finished) return;
@@ -145,7 +178,12 @@ async function waitForMessage(
   const heartbeat = onUpdate
     ? ctx.setInterval(() => {
         onUpdate({
-          content: [{ type: "text", text: `wait_for_message → waiting ${Math.round((Date.now() - startedAt) / 1000)}s` }],
+          content: [
+            {
+              type: "text",
+              text: `wait_for_message → waiting ${Math.round((Date.now() - startedAt) / 1000)}s`,
+            },
+          ],
           details: { ok: true, outcome: "timeout" },
         });
       }, WAIT_HEARTBEAT_MS)
@@ -165,7 +203,10 @@ export function registerWaitForMessage(pi: ExtensionAPI): void {
   const z = pi.zod;
   const params = z.object({
     from: z.string().optional().describe("only resolve on a message from this agent id"),
-    mention: z.boolean().optional().describe("only resolve on a message that mentions you (default false)"),
+    mention: z
+      .boolean()
+      .optional()
+      .describe("only resolve on a message that mentions you (default false)"),
     source: z.enum(["room"]).optional().describe('v1 ships only "room" — the room store listener'),
     timeout: z.number().optional().describe("ms to wait; default 30000, min 1000, max 1800000"),
   });

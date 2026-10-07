@@ -13,10 +13,10 @@ export interface TreeStore {
   logLength: number;
 }
 
-export const TREE_REC = 288;        // §5.2
-export const RAW_MAX = 16;          // §3.6 merge shape
-export const COVER_BUDGET_LINES = 96;   // §5.2 (OptMem WAKE_LINES)
-export const RAW_TAIL_R = 50;           // §5.2 (matches §3.5 join cursor)
+export const TREE_REC = 288; // §5.2
+export const RAW_MAX = 16; // §3.6 merge shape
+export const COVER_BUDGET_LINES = 96; // §5.2 (OptMem WAKE_LINES)
+export const RAW_TAIL_R = 50; // §5.2 (matches §3.5 join cursor)
 
 /** Bytes of summary text a record can hold (OptMem reserves the last byte for the newline). */
 const SUMMARY_BYTES = TREE_REC - 1;
@@ -31,7 +31,9 @@ function isPowerOfTwo(n: number): boolean {
 /** A block is an aligned power-of-two range — the only shape the offset math is valid for. */
 function isBlock(lo: number, hi: number): boolean {
   const size = hi - lo;
-  return Number.isInteger(lo) && lo >= 0 && isPowerOfTwo(size) && size >= MIN_LEVEL && lo % size === 0;
+  return (
+    Number.isInteger(lo) && lo >= 0 && isPowerOfTwo(size) && size >= MIN_LEVEL && lo % size === 0
+  );
 }
 
 /** Whole records in a fixed-width file; a missing file is an empty level, not an error. */
@@ -189,7 +191,7 @@ export function openTreeStore(treePath: string, logLength = 0): TreeStore {
         const have = count(levelPath(size));
         for (let k = have; k < Math.floor(T / size); k++) {
           todo.push([k * size, (k + 1) * size]);
-          if (limit && todo.length >= limit) return todo;   // OptMem: a limit of 0 means none
+          if (limit && todo.length >= limit) return todo; // OptMem: a limit of 0 means none
         }
       }
       return todo;
@@ -253,7 +255,11 @@ function coverAt(T: number, alpha: number): Array<[number, number]> {
  * §4.1 `zoom` validation: `hi - lo` a power of two, `lo` aligned, `0 <= lo < hi <= n`. A singleton
  * has no children, so it is not a valid zoom target either.
  */
-export function validateZoomRange(lo: number, hi: number, n: number): { ok: true } | { ok: false; error: string } {
+export function validateZoomRange(
+  lo: number,
+  hi: number,
+  n: number,
+): { ok: true } | { ok: false; error: string } {
   const invalid = { ok: false, error: "invalid zoom range" } as const;
   if (!Number.isInteger(lo) || !Number.isInteger(hi)) return invalid;
   if (!(lo >= 0 && lo < hi && hi <= n)) return invalid;
@@ -275,7 +281,10 @@ export function zoom(
   rawAt?: (seq: number) => string,
 ): Array<{ lo: number; hi: number; size: number; raw: boolean; text: string }> {
   const mid = (lo + hi) / 2;
-  return [[lo, mid], [mid, hi]].map(([a, b]) => {
+  return [
+    [lo, mid],
+    [mid, hi],
+  ].map(([a, b]) => {
     const size = b - a;
     return size === 1
       ? { lo: a, hi: b, size, raw: true, text: rawAt?.(a) ?? "" }

@@ -1,9 +1,18 @@
-import type { BeforeAgentStartEvent, BeforeAgentStartEventResult, ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import rule from "./routing-rule.md" with { type: "text" };
-import { buildDigest } from "./digest";
-import { disposeRoomSession, roomStoreFor, type MemberState, type RoomStore } from "../store/room-store";
+import type {
+  BeforeAgentStartEvent,
+  BeforeAgentStartEventResult,
+  ExtensionAPI,
+} from "@oh-my-pi/pi-coding-agent";
 import { cursorFor, initCursor, persistOwnCursor } from "../store/cursors";
-export const HOOK_CURSOR_ENTRY_TYPE = "chatroom:cursor";    // §3.5
+import {
+  disposeRoomSession,
+  type MemberState,
+  type RoomStore,
+  roomStoreFor,
+} from "../store/room-store";
+import { buildDigest } from "./digest";
+import rule from "./routing-rule.md" with { type: "text" };
+export const HOOK_CURSOR_ENTRY_TYPE = "chatroom:cursor"; // §3.5
 
 // The block is appended to the system prompt every turn, so a prior injection is detected by the
 // routing rule's heading — a stable string owned by this file, never by room content.
@@ -15,7 +24,8 @@ export function buildPromptBlock(digest: string): string {
   return `${digest}\n\n${rule}`;
 }
 
-export function registerHooks(pi: ExtensionAPI): void {      // §2.1.1
+export function registerHooks(pi: ExtensionAPI): void {
+  // §2.1.1
   pi.on("before_agent_start", (event: BeforeAgentStartEvent, ctx): BeforeAgentStartEventResult => {
     const store: RoomStore = roomStoreFor(ctx);
     const agentId = ctx.agent.id;
@@ -32,7 +42,7 @@ export function registerHooks(pi: ExtensionAPI): void {      // §2.1.1
 
     // Idempotent per agent: a prior injection is REPLACED, never appended twice.
     const systemPrompt = event.systemPrompt.slice();
-    const injected = systemPrompt.findIndex(part => part.includes(RULE_HEADING));
+    const injected = systemPrompt.findIndex((part) => part.includes(RULE_HEADING));
     if (injected >= 0) systemPrompt[injected] = block;
     else systemPrompt.push(block);
 

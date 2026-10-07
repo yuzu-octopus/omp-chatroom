@@ -3,7 +3,7 @@ import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { roomIdFor } from "../ids";
 // SCAFFOLD-DEFINED — mirrors the manifest settings, which are unreachable at runtime (R6).
 export interface RoomConfig {
-  roomId: string;                 // "" = mint from the root (roomIdFor(root)); non-empty = explicit override
+  roomId: string; // "" = mint from the root (roomIdFor(root)); non-empty = explicit override
   maxT1PerTurn: number;
   maxT1Tokens: number;
   coalesceCount: number;
@@ -11,26 +11,39 @@ export interface RoomConfig {
   postsPerWindow: number;
   burstPosts: number;
   claimTtlMs: number;
-  claimSweepMs: number;           // K3
-  maxBodyBytes: number;           // K19
+  claimSweepMs: number; // K3
+  maxBodyBytes: number; // K19
   logMaxRecords: number;
   logMaxAgeMs: number;
-  compactionCallsPerDay: number;  // K4 — a RATE, not a total
-  digestBudgetTokens: number;     // K5 — digest only; the routing rule is excluded
+  compactionCallsPerDay: number; // K4 — a RATE, not a total
+  digestBudgetTokens: number; // K5 — digest only; the routing rule is excluded
   panelKey: string;
-  coldTreeEnabled: boolean;       // K6 — the runtime toggle (flag), not a manifest feature
+  coldTreeEnabled: boolean; // K6 — the runtime toggle (flag), not a manifest feature
 }
 
 // Values are the §5.2 caps verbatim (10 / 2048 / 20 / 5 min / 1 per 2 s / 10 / 300 s / 5 s /
 // 8192 / 5000 / 7 d / 20000 / 3800); `roomId: ""` means "mint from the root".
 export const DEFAULT_ROOM_CONFIG: RoomConfig = {
-  roomId: "", maxT1PerTurn: 10, maxT1Tokens: 2048, coalesceCount: 20, coalesceMs: 300_000,
-  postsPerWindow: 1, burstPosts: 10, claimTtlMs: 300_000, claimSweepMs: 5_000,
-  maxBodyBytes: 8192, logMaxRecords: 5_000, logMaxAgeMs: 604_800_000,
-  compactionCallsPerDay: 20_000, digestBudgetTokens: 3_800, panelKey: "", coldTreeEnabled: true,
+  roomId: "",
+  maxT1PerTurn: 10,
+  maxT1Tokens: 2048,
+  coalesceCount: 20,
+  coalesceMs: 300_000,
+  postsPerWindow: 1,
+  burstPosts: 10,
+  claimTtlMs: 300_000,
+  claimSweepMs: 5_000,
+  maxBodyBytes: 8192,
+  logMaxRecords: 5_000,
+  logMaxAgeMs: 604_800_000,
+  compactionCallsPerDay: 20_000,
+  digestBudgetTokens: 3_800,
+  panelKey: "",
+  coldTreeEnabled: true,
 };
 
-export function configPath(root: string): string {               // <root>/room/config.json
+export function configPath(root: string): string {
+  // <root>/room/config.json
   return `${root}/room/config.json`;
 }
 
@@ -59,22 +72,23 @@ export function loadRoomConfig(root: string): RoomConfig {
   try {
     return coerceConfig(JSON.parse(fs.readFileSync(configPath(root), "utf-8")));
   } catch {
-    return { ...DEFAULT_ROOM_CONFIG };   // absent or unreadable → defaults
+    return { ...DEFAULT_ROOM_CONFIG }; // absent or unreadable → defaults
   }
 }
 
 export function saveRoomConfig(root: string, config: RoomConfig): void {
   const path = configPath(root);
   fs.mkdirSync(path.slice(0, path.lastIndexOf("/")), { recursive: true });
-  fs.writeFileSync(path, JSON.stringify(config, null, 2) + "\n", "utf-8");
+  fs.writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`, "utf-8");
 }
 
 // X1 — the ONE room-id resolver: config override > roomIdFor(root). Root-stable, never a session id.
-export function resolveRoomId(root: string): string {                            // [invented]
+export function resolveRoomId(root: string): string {
+  // [invented]
   const config = loadRoomConfig(root);
   if (config.roomId !== "") return config.roomId;
   const roomId = roomIdFor(root);
-  saveRoomConfig(root, { ...config, roomId });   // persist once; every later session reads it back
+  saveRoomConfig(root, { ...config, roomId }); // persist once; every later session reads it back
   return roomId;
 }
 

@@ -1,9 +1,16 @@
 import type { AgentToolResult, ToolRenderResultOptions } from "@oh-my-pi/pi-coding-agent";
-import { Ellipsis, truncateToWidth, type Component, type Theme } from "@oh-my-pi/pi-tui";
-import { compact, span, text } from "@oh-my-pi/pi-tui";   // TSP builders (native/describe)
-import type { NativeToolView } from "@oh-my-pi/pi-tui/tools/renderer";
-import { renderStatusLine } from "@oh-my-pi/pi-tui/render/status-line";
+import {
+  type Component,
+  compact,
+  Ellipsis,
+  span,
+  type Theme,
+  text,
+  truncateToWidth,
+} from "@oh-my-pi/pi-tui"; // TSP builders (native/describe)
 import { createCachedComponent } from "@oh-my-pi/pi-tui/render/render-utils";
+import { renderStatusLine } from "@oh-my-pi/pi-tui/render/status-line";
+import type { NativeToolView } from "@oh-my-pi/pi-tui/tools/renderer";
 import type { RoomParams, RoomToolDetails } from "../tools/room";
 import type { WaitForAgentDetails } from "../tools/wait-for-agent";
 import type { WaitForClaimDetails } from "../tools/wait-for-claim";
@@ -22,38 +29,61 @@ const GLYPH = { room: "▦", wait: "◷" } as const;
 
 /** One-line, ANSI-free summary of the arguments — shared by both backends. */
 function roomCallSummary(args: RoomParams): string {
-  const target = args.op === "claim" || args.op === "release"
-    ? [args.topic, args.key].filter(Boolean).join("/")
-    : args.topic;
+  const target =
+    args.op === "claim" || args.op === "release"
+      ? [args.topic, args.key].filter(Boolean).join("/")
+      : args.topic;
   return [args.op, target, args.limit !== undefined ? `limit ${args.limit}` : undefined]
     .filter((part): part is string => !!part)
     .join(" ");
 }
 
 function waitCallSummary(args: Record<string, unknown>): string {
-  const timeout = typeof args["timeout"] === "number" ? `timeout ${Math.round(args["timeout"] / 1000)}s` : undefined;
-  if (Array.isArray(args["agents"])) return [`wait_for_agent`, (args["agents"] as string[]).join(", "), timeout].filter((p): p is string => !!p).join(" ");
-  if (typeof args["resource"] === "string") return [`wait_for_claim`, args["resource"], timeout].filter((p): p is string => !!p).join(" ");
-  const filter = [typeof args["from"] === "string" ? `from ${args["from"]}` : undefined, args["mention"] ? "mention" : undefined]
+  const timeout =
+    typeof args.timeout === "number" ? `timeout ${Math.round(args.timeout / 1000)}s` : undefined;
+  if (Array.isArray(args.agents))
+    return [`wait_for_agent`, (args.agents as string[]).join(", "), timeout]
+      .filter((p): p is string => !!p)
+      .join(" ");
+  if (typeof args.resource === "string")
+    return [`wait_for_claim`, args.resource, timeout].filter((p): p is string => !!p).join(" ");
+  const filter = [
+    typeof args.from === "string" ? `from ${args.from}` : undefined,
+    args.mention ? "mention" : undefined,
+  ]
     .filter((p): p is string => !!p)
     .join(" ");
   return [`wait_for_message`, filter, timeout].filter((p): p is string => !!p).join(" ");
 }
 
 /** One-line result summary, derived from `details` (never from the rendered `content` text). */
-function roomResultSummary(result: AgentToolResult<RoomToolDetails>): { meta: string[]; error?: string } {
+function roomResultSummary(result: AgentToolResult<RoomToolDetails>): {
+  meta: string[];
+  error?: string;
+} {
   const details = result.details;
-  if (!details || !details.ok) {
+  if (!details?.ok) {
     const error = details && "error" in details ? details.error : "failed";
     return { meta: [], error: typeof error === "string" ? error : "failed" };
   }
   switch (details.op) {
-    case "join":    return { meta: ["joined", `${details.cursor} cursor`] };
-    case "read":    return { meta: [`${details.records.length} record(s)`, details.more ? "more" : "caught up"] };
-    case "post":    return { meta: ["posted", `seq ${details.seq}`] };
-    case "claim":   return { meta: ["granted", details.holder] };
-    case "release": return { meta: ["released"] };
-    case "board":   return { meta: [`${details.board.claims.length} claim(s)`, `${details.board.roster.length} member(s)`] };
+    case "join":
+      return { meta: ["joined", `${details.cursor} cursor`] };
+    case "read":
+      return { meta: [`${details.records.length} record(s)`, details.more ? "more" : "caught up"] };
+    case "post":
+      return { meta: ["posted", `seq ${details.seq}`] };
+    case "claim":
+      return { meta: ["granted", details.holder] };
+    case "release":
+      return { meta: ["released"] };
+    case "board":
+      return {
+        meta: [
+          `${details.board.claims.length} claim(s)`,
+          `${details.board.roster.length} member(s)`,
+        ],
+      };
   }
 }
 
@@ -64,12 +94,18 @@ function waitResultSummary(details: WaitDetails | undefined): { meta: string[]; 
   // a future variant widens the union.
   switch (details.outcome) {
     case "event":
-      if ("acquired" in details) return { meta: [details.acquired ? `acquired ${details.claim?.resource ?? ""}`.trim() : "event"] };
+      if ("acquired" in details)
+        return {
+          meta: [details.acquired ? `acquired ${details.claim?.resource ?? ""}`.trim() : "event"],
+        };
       if ("message" in details && details.message) return { meta: ["message"] };
       return { meta: ["event"] };
-    case "timeout": return { meta: ["timeout"] };
-    case "aborted": return { meta: ["aborted"] };
-    default:        return { meta: [] };
+    case "timeout":
+      return { meta: ["timeout"] };
+    case "aborted":
+      return { meta: ["aborted"] };
+    default:
+      return { meta: [] };
   }
 }
 
@@ -81,9 +117,16 @@ function card(lines: readonly string[]): Component {
   );
 }
 
-export function renderRoomCall(args: RoomParams, _options: ToolRenderResultOptions, theme: Theme): Component {
+export function renderRoomCall(
+  args: RoomParams,
+  _options: ToolRenderResultOptions,
+  theme: Theme,
+): Component {
   return card([
-    renderStatusLine({ iconOverride: GLYPH.room, title: "Room", description: roomCallSummary(args) }, theme),
+    renderStatusLine(
+      { iconOverride: GLYPH.room, title: "Room", description: roomCallSummary(args) },
+      theme,
+    ),
   ]);
 }
 
@@ -107,7 +150,10 @@ export function renderRoomResult(
   return card([head, ...body]);
 }
 
-export function describeRoomCall(args: RoomParams, _options: ToolRenderResultOptions): NativeToolView | undefined {
+export function describeRoomCall(
+  args: RoomParams,
+  _options: ToolRenderResultOptions,
+): NativeToolView | undefined {
   return {
     tool: { title: "Room", target: roomCallSummary(args), targetKind: "command" },
     head: toolHeadSpans("Room", roomCallSummary(args)),
@@ -129,11 +175,18 @@ export function describeRoomResult(
 
 // The three wait tools share one card pair; names are scaffold-invented.
 // K13 — typed, not `unknown`: the union of the three `details` payloads.
-export type WaitDetails = WaitForAgentDetails | WaitForMessageDetails | WaitForClaimDetails;   // [invented]
+export type WaitDetails = WaitForAgentDetails | WaitForMessageDetails | WaitForClaimDetails; // [invented]
 
-export function renderWaitCall(args: Record<string, unknown>, _options: ToolRenderResultOptions, theme: Theme): Component {
+export function renderWaitCall(
+  args: Record<string, unknown>,
+  _options: ToolRenderResultOptions,
+  theme: Theme,
+): Component {
   return card([
-    renderStatusLine({ iconOverride: GLYPH.wait, title: "Wait", description: waitCallSummary(args) }, theme),
+    renderStatusLine(
+      { iconOverride: GLYPH.wait, title: "Wait", description: waitCallSummary(args) },
+      theme,
+    ),
   ]);
 }
 
@@ -157,7 +210,10 @@ export function renderWaitResult(
   return card([head, ...body]);
 }
 
-export function describeWaitCall(args: Record<string, unknown>, _options: ToolRenderResultOptions): NativeToolView | undefined {
+export function describeWaitCall(
+  args: Record<string, unknown>,
+  _options: ToolRenderResultOptions,
+): NativeToolView | undefined {
   return { head: toolHeadSpans("Wait", waitCallSummary(args)) };
 }
 
@@ -178,7 +234,8 @@ export function describeWaitResult(
 function toolHeadSpans(title: string, ...details: readonly (string | undefined)[]) {
   return compact([
     span(title, "toolTitle strong"),
-    ...details.filter((detail): detail is string => !!detail).map((detail) => span(` ${detail}`, "muted")),
+    ...details
+      .filter((detail): detail is string => !!detail)
+      .map((detail) => span(` ${detail}`, "muted")),
   ]);
 }
-

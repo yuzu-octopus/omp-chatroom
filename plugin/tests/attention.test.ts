@@ -1,34 +1,39 @@
-import { test, expect, afterEach } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
   AgentRegistry,
-  zod,
   type ExtensionAPI,
   type ExtensionContext,
+  zod,
 } from "@oh-my-pi/pi-coding-agent";
 import { resolveLocalRoot } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
-import type { RoomRecord } from "../src/store/schema";
-import { resetRoomStores, roomStoreFor, type MemberState, type RoomStore } from "../src/store/room-store";
-import { classify, HELD_CLAIM_WINDOW_MS, type Tier } from "../src/attention/tiers";
+import { deliver, escapeForDelivery, renderLine, roomBodyOf } from "../src/attention/delivery";
 import {
-  DEFAULT_CAPS,
-  T0_COALESCE_CEILING,
   admitPost,
   coalescePending,
+  DEFAULT_CAPS,
   isMuted,
   muteRoom,
   muteTopic,
   noteGap,
   selectT0,
   selectT1,
+  T0_COALESCE_CEILING,
   truncateOversized,
   unreadCounts,
 } from "../src/attention/governor";
-import { deliver, escapeForDelivery, renderLine, roomBodyOf } from "../src/attention/delivery";
-import { registerRoomTool, type RoomToolResult } from "../src/tools/room";
+import { classify, HELD_CLAIM_WINDOW_MS, type Tier } from "../src/attention/tiers";
 import { enqueueWaiter } from "../src/store/claims";
+import {
+  type MemberState,
+  type RoomStore,
+  resetRoomStores,
+  roomStoreFor,
+} from "../src/store/room-store";
+import type { RoomRecord } from "../src/store/schema";
+import { type RoomToolResult, registerRoomTool } from "../src/tools/room";
 
 // --- fixtures -------------------------------------------------------------
 
@@ -71,23 +76,66 @@ const base = { v: 1 as const, ts: 1_000 };
 function msg(seq: number, over: Partial<Extract<RoomRecord, { kind: "msg" }>> = {}): RoomRecord {
   return { ...base, seq, id: `m${seq}`, kind: "msg", from: "B", topic: "t", body: "hi", ...over };
 }
-function claim(seq: number, over: Partial<Extract<RoomRecord, { kind: "claim" }>> = {}): RoomRecord {
-  return { ...base, seq, id: `c${seq}`, kind: "claim", from: "B", resource: "build/step", ttlMs: 5_000, ...over };
-}
-function release(seq: number, over: Partial<Extract<RoomRecord, { kind: "release" }>> = {}): RoomRecord {
+function claim(
+  seq: number,
+  over: Partial<Extract<RoomRecord, { kind: "claim" }>> = {},
+): RoomRecord {
   return {
-    ...base, seq, id: `r${seq}`, kind: "release", from: "B",
-    resource: "build/step", reason: "released", prevHolder: "B", ...over,
+    ...base,
+    seq,
+    id: `c${seq}`,
+    kind: "claim",
+    from: "B",
+    resource: "build/step",
+    ttlMs: 5_000,
+    ...over,
+  };
+}
+function release(
+  seq: number,
+  over: Partial<Extract<RoomRecord, { kind: "release" }>> = {},
+): RoomRecord {
+  return {
+    ...base,
+    seq,
+    id: `r${seq}`,
+    kind: "release",
+    from: "B",
+    resource: "build/step",
+    reason: "released",
+    prevHolder: "B",
+    ...over,
   };
 }
 function note(seq: number, over: Partial<Extract<RoomRecord, { kind: "note" }>> = {}): RoomRecord {
-  return { ...base, seq, id: `n${seq}`, kind: "note", from: "system", topic: "t", body: "note", ...over };
+  return {
+    ...base,
+    seq,
+    id: `n${seq}`,
+    kind: "note",
+    from: "system",
+    topic: "t",
+    body: "note",
+    ...over,
+  };
 }
-function member(seq: number, over: Partial<Extract<RoomRecord, { kind: "member" }>> = {}): RoomRecord {
+function member(
+  seq: number,
+  over: Partial<Extract<RoomRecord, { kind: "member" }>> = {},
+): RoomRecord {
   return { ...base, seq, id: `p${seq}`, kind: "member", from: "B", action: "join", ...over };
 }
 function gap(seq: number, over: Partial<Extract<RoomRecord, { kind: "gap" }>> = {}): RoomRecord {
-  return { ...base, seq, id: `g${seq}`, kind: "gap", from: "system", skipped: 3, reason: "retention", ...over };
+  return {
+    ...base,
+    seq,
+    id: `g${seq}`,
+    kind: "gap",
+    from: "system",
+    skipped: 3,
+    reason: "retention",
+    ...over,
+  };
 }
 
 // --- 1. the tier table across all 6 kinds + the §5.1 ambiguous cases ------
@@ -96,36 +144,84 @@ test("classify(): all six kinds and the §5.1 trigger table", () => {
   const cases: Array<{ name: string; record: RoomRecord; viewer: MemberState; tier: Tier }> = [
     // msg — T0 triggers
     { name: "msg mention → T0", record: msg(1, { mention: ["A"] }), viewer: viewer(), tier: "T0" },
-    { name: "msg replyTo my last message → T0", record: msg(2, { replyTo: "mine" }),
-      viewer: viewer({ lastMessageId: "mine" }), tier: "T0" },
-    { name: "msg replyTo someone else → not T0", record: msg(3, { replyTo: "other" }),
-      viewer: viewer({ lastMessageId: "mine" }), tier: "T2" },
+    {
+      name: "msg replyTo my last message → T0",
+      record: msg(2, { replyTo: "mine" }),
+      viewer: viewer({ lastMessageId: "mine" }),
+      tier: "T0",
+    },
+    {
+      name: "msg replyTo someone else → not T0",
+      record: msg(3, { replyTo: "other" }),
+      viewer: viewer({ lastMessageId: "mine" }),
+      tier: "T2",
+    },
     // msg — T1 triggers
-    { name: "msg on a held topic → T1", record: msg(4, { topic: "build" }),
-      viewer: viewer({ heldTopics: new Set(["build"]) }), tier: "T1" },
-    { name: "msg on a followed topic → T1", record: msg(5, { topic: "build" }),
-      viewer: viewer({ topics: new Set(["build"]) }), tier: "T1" },
-    { name: "msg in a thread I posted in → T1", record: msg(6, { threadRoot: "root-1" }),
-      viewer: viewer({ threadRoots: new Set(["root-1"]) }), tier: "T1" },
+    {
+      name: "msg on a held topic → T1",
+      record: msg(4, { topic: "build" }),
+      viewer: viewer({ heldTopics: new Set(["build"]) }),
+      tier: "T1",
+    },
+    {
+      name: "msg on a followed topic → T1",
+      record: msg(5, { topic: "build" }),
+      viewer: viewer({ topics: new Set(["build"]) }),
+      tier: "T1",
+    },
+    {
+      name: "msg in a thread I posted in → T1",
+      record: msg(6, { threadRoot: "root-1" }),
+      viewer: viewer({ threadRoots: new Set(["root-1"]) }),
+      tier: "T1",
+    },
     { name: "msg with no membership signal → T2", record: msg(7), viewer: viewer(), tier: "T2" },
     // claim
-    { name: "claim I am waiting on → T1", record: claim(8),
-      viewer: viewer({ waitedResource: "build/step" }), tier: "T1" },
-    { name: "claim on a followed topic → T1", record: claim(9),
-      viewer: viewer({ topics: new Set(["build"]) }), tier: "T1" },
+    {
+      name: "claim I am waiting on → T1",
+      record: claim(8),
+      viewer: viewer({ waitedResource: "build/step" }),
+      tier: "T1",
+    },
+    {
+      name: "claim on a followed topic → T1",
+      record: claim(9),
+      viewer: viewer({ topics: new Set(["build"]) }),
+      tier: "T1",
+    },
     { name: "claim, no signal → T2", record: claim(10), viewer: viewer(), tier: "T2" },
     // release
-    { name: "release where I am prevHolder → T0", record: release(11, { prevHolder: "A" }),
-      viewer: viewer(), tier: "T0" },
-    { name: "release I am waiting on → T1", record: release(12, { prevHolder: "Z" }),
-      viewer: viewer({ waitedResource: "build/step" }), tier: "T1" },
-    { name: "plain release on a followed topic → T1",
+    {
+      name: "release where I am prevHolder → T0",
+      record: release(11, { prevHolder: "A" }),
+      viewer: viewer(),
+      tier: "T0",
+    },
+    {
+      name: "release I am waiting on → T1",
+      record: release(12, { prevHolder: "Z" }),
+      viewer: viewer({ waitedResource: "build/step" }),
+      tier: "T1",
+    },
+    {
+      name: "plain release on a followed topic → T1",
       record: release(13, { prevHolder: "Z", reason: "released" }),
-      viewer: viewer({ topics: new Set(["build"]) }), tier: "T1" },
-    { name: "release, no signal → T2", record: release(14, { prevHolder: "Z" }), viewer: viewer(), tier: "T2" },
+      viewer: viewer({ topics: new Set(["build"]) }),
+      tier: "T1",
+    },
+    {
+      name: "release, no signal → T2",
+      record: release(14, { prevHolder: "Z" }),
+      viewer: viewer(),
+      tier: "T2",
+    },
     // note
-    { name: "note on a followed topic → T1", record: note(15, { topic: "build" }),
-      viewer: viewer({ topics: new Set(["build"]) }), tier: "T1" },
+    {
+      name: "note on a followed topic → T1",
+      record: note(15, { topic: "build" }),
+      viewer: viewer({ topics: new Set(["build"]) }),
+      tier: "T1",
+    },
     { name: "note, no signal → T2", record: note(16), viewer: viewer(), tier: "T2" },
     // member — always T2
     { name: "member join → T2", record: member(17), viewer: viewer(), tier: "T2" },
@@ -139,7 +235,9 @@ test("classify(): all six kinds and the §5.1 trigger table", () => {
 
 test("classify(): the four ambiguous §5.1 rows", () => {
   // Reply-to-reply in a thread you did not start → T1 (you posted in that thread).
-  expect(classify(msg(1, { threadRoot: "root-9" }), viewer({ threadRoots: new Set(["root-9"]) }))).toBe("T1");
+  expect(
+    classify(msg(1, { threadRoot: "root-9" }), viewer({ threadRoots: new Set(["root-9"]) })),
+  ).toBe("T1");
   // Topic you follow, no claim, no post → T1.
   expect(classify(msg(2, { topic: "build" }), viewer({ topics: new Set(["build"]) }))).toBe("T1");
   // Topic you do not follow, no claim, no post → T2.
@@ -147,13 +245,21 @@ test("classify(): the four ambiguous §5.1 rows", () => {
   // Claim expired > 1 h ago (the window has already pruned `heldTopics`), topic not followed → T2.
   expect(classify(msg(4, { topic: "build" }), viewer({ heldTopics: new Set() }))).toBe("T2");
   // Waiting on a resource you do not hold → T1.
-  expect(classify(release(5, { prevHolder: "Z" }), viewer({ waitedResource: "build/step" }))).toBe("T1");
+  expect(classify(release(5, { prevHolder: "Z" }), viewer({ waitedResource: "build/step" }))).toBe(
+    "T1",
+  );
 });
 
 test("classify(): total over every kind × viewer (exactly one tier, never a throw)", () => {
   const kinds: RoomRecord[] = [
-    msg(1), msg(1, { mention: ["A"] }), claim(2), release(3), release(3, { prevHolder: "A" }),
-    note(4), member(5), gap(6),
+    msg(1),
+    msg(1, { mention: ["A"] }),
+    claim(2),
+    release(3),
+    release(3, { prevHolder: "A" }),
+    note(4),
+    member(5),
+    gap(6),
   ];
   const viewers: MemberState[] = [
     viewer(),
@@ -167,7 +273,7 @@ test("classify(): total over every kind × viewer (exactly one tier, never a thr
   for (const record of kinds) {
     for (const v of viewers) {
       const tiers = [classify(record, v)].filter((t) => t === "T0" || t === "T1" || t === "T2");
-      expect(tiers.length).toBe(1);           // one tier, never zero and never two
+      expect(tiers.length).toBe(1); // one tier, never zero and never two
     }
   }
 });
@@ -205,7 +311,7 @@ test("injection cap: 11 T1 records inject 10 + one summary line", () => {
   const { injected, summaryLine } = selectT1(store, v, pending);
   expect(injected.length).toBe(DEFAULT_CAPS.maxT1PerTurn); // K = 10
   expect(summaryLine).not.toBeNull();
-  expect(summaryLine!).toContain("+1");                    // exactly one left over
+  expect(summaryLine!).toContain("+1"); // exactly one left over
   expect(summaryLine!).toContain('room{op:"read"');
 });
 
@@ -227,13 +333,15 @@ test("injection cap: the token budget binds independently of K", () => {
 // --- 4. T2 coalescing -----------------------------------------------------
 
 test("T2 coalescing: 20 pending T2 records produce exactly one digest line", () => {
-  const records = Array.from({ length: 20 }, (_, i) => msg(i + 1, { topic: "chat", from: `X${i}` }));
+  const records = Array.from({ length: 20 }, (_, i) =>
+    msg(i + 1, { topic: "chat", from: `X${i}` }),
+  );
   const store = miniStore(records, { A: 0 });
   const v = viewer(); // follows nothing → every msg is T2
 
   const line = coalescePending(store, v, 10_000); // no lag needed: N = 20 fires first
   expect(line).not.toBeNull();
-  expect(line!.includes("\n")).toBe(false);        // ONE line
+  expect(line!.includes("\n")).toBe(false); // ONE line
   expect(line!).toContain("20");
   expect(line!).toContain('room{op:"read"');
 });
@@ -252,8 +360,8 @@ test("token bucket: green → yellow → red in order at CIR=1/2s, CBS=10", () =
   const verdicts = Array.from({ length: 21 }, () => admitPost(store, "A", now));
 
   expect(verdicts.slice(0, 10)).toEqual(Array(10).fill("green")); // committed bucket (CBS = 10)
-  expect(verdicts[10]).toBe("yellow");                            // first burst (excess bucket)
-  expect(verdicts[20]).toBe("red");                               // burst exhausted → coalesce
+  expect(verdicts[10]).toBe("yellow"); // first burst (excess bucket)
+  expect(verdicts[20]).toBe("red"); // burst exhausted → coalesce
 
   // CIR refill: 2 s later the committed bucket has exactly one token again.
   expect(admitPost(store, "A", now + 2_000)).toBe("green");
@@ -267,12 +375,14 @@ test("token bucket: green → yellow → red in order at CIR=1/2s, CBS=10", () =
 test("T0 is never dropped under its ceiling — it coalesces into one digest", () => {
   const few = Array.from({ length: 10 }, (_, i) => msg(i + 1, { mention: ["A"] }));
   const under = selectT0(few);
-  expect(under.injected.length).toBe(10);       // under the ceiling: every interrupt injected
+  expect(under.injected.length).toBe(10); // under the ceiling: every interrupt injected
   expect(under.summaryLine).toBeNull();
 
-  const many = Array.from({ length: T0_COALESCE_CEILING * 2 }, (_, i) => msg(i + 1, { mention: ["A"] }));
+  const many = Array.from({ length: T0_COALESCE_CEILING * 2 }, (_, i) =>
+    msg(i + 1, { mention: ["A"] }),
+  );
   const over = selectT0(many);
-  expect(over.summaryLine).not.toBeNull();      // past the ceiling: ONE digest interrupt
+  expect(over.summaryLine).not.toBeNull(); // past the ceiling: ONE digest interrupt
   expect(over.summaryLine!).toContain(String(many.length)); // the count proves nothing was dropped
   expect(over.injected.length + many.length).toBeGreaterThan(0);
 });
@@ -302,7 +412,11 @@ test("deliver dispatches on kind and never reads .body on a kind that lacks it",
   }
 
   // The model-facing line carries the tier badge, the actor and the topic/resource (K17).
-  const line = renderLine(release(8, { from: "B", prevHolder: "A" }), escapeForDelivery(roomBodyOf(release(8))), "T0");
+  const line = renderLine(
+    release(8, { from: "B", prevHolder: "A" }),
+    escapeForDelivery(roomBodyOf(release(8))),
+    "T0",
+  );
   expect(line).toContain("[T0]");
   expect(line).toContain("B");
   expect(line).toContain("build/step");
@@ -325,7 +439,10 @@ function fakePi(): { pi: ExtensionAPI; sends: Send[] } {
   const sends: Send[] = [];
   const pi = {
     sendMessage(payload: unknown, options?: unknown): void {
-      sends.push({ payload: payload as Record<string, unknown>, options: options as Record<string, unknown> });
+      sends.push({
+        payload: payload as Record<string, unknown>,
+        options: options as Record<string, unknown>,
+      });
     },
   } as unknown as ExtensionAPI;
   return { pi, sends };
@@ -341,12 +458,19 @@ function fakeCtx(root: string, id: string): ExtensionContext {
 function registerSession(id: string, calls: Send[]): void {
   const session = {
     async sendCustomMessage(payload: unknown, options?: unknown): Promise<boolean> {
-      calls.push({ payload: payload as Record<string, unknown>, options: options as Record<string, unknown> });
+      calls.push({
+        payload: payload as Record<string, unknown>,
+        options: options as Record<string, unknown>,
+      });
       return true;
     },
   };
   AgentRegistry.global().register({
-    id, displayName: id, kind: "sub", status: "running", session: session as never,
+    id,
+    displayName: id,
+    kind: "sub",
+    status: "running",
+    session: session as never,
   });
 }
 
@@ -355,12 +479,18 @@ test("deliver: a parked target's delivery is skipped, not thrown", async () => {
   const { pi, sends } = fakePi();
   const ctx = fakeCtx(root, "Sender");
   const parked = `attn-parked-${Date.now()}`;
-  AgentRegistry.global().register({ id: parked, displayName: parked, kind: "sub", status: "parked", session: null });
+  AgentRegistry.global().register({
+    id: parked,
+    displayName: parked,
+    kind: "sub",
+    status: "parked",
+    session: null,
+  });
 
   const record = msg(1, { from: "Other", topic: "build" });
   await expect(deliver(pi, ctx, parked, record, "T1")).resolves.toBeUndefined();
-  expect(sends.length).toBe(0);                                        // nothing sent to the caller
-  expect(roomStoreFor(ctx).cursors.get(parked)).toBeUndefined();       // and the cursor did not advance
+  expect(sends.length).toBe(0); // nothing sent to the caller
+  expect(roomStoreFor(ctx).cursors.get(parked)).toBeUndefined(); // and the cursor did not advance
 });
 
 test("deliver: T0 steers, T1 is an aside, T2 only bumps the cursor", async () => {
@@ -409,7 +539,7 @@ test("a muted topic produces zero unread; a mention still promotes through the m
   const records = [
     msg(1, { topic: "chat", from: "B" }),
     msg(2, { topic: "build", from: "B" }),
-    msg(3, { topic: "chat", from: "B", mention: ["A"] }),   // an explicit mention is never muted
+    msg(3, { topic: "chat", from: "B", mention: ["A"] }), // an explicit mention is never muted
   ];
   const store = miniStore(records, { A: 0 });
   const v = viewer();
@@ -423,7 +553,7 @@ test("a muted topic produces zero unread; a mention still promotes through the m
   expect(isMuted(store, live, msg(5, { topic: "chat", mention: ["A"] }))).toBe(false);
 
   const c = unreadCounts(store, live);
-  expect(c.get("chat")).toBe(1);      // only the mention survives the mute
+  expect(c.get("chat")).toBe(1); // only the mention survives the mute
   expect(c.get("build")).toBe(1);
   expect(counts.get("build")).toBe(1);
 
@@ -441,14 +571,14 @@ test("a forced retention pass appends one gap record and notifies affected agent
   const gap = noteGap(store, 42, "retention");
   if (gap.kind !== "gap") throw new Error("noteGap must return a gap record");
   expect(gap.skipped).toBe(42);
-  expect(store.records.filter(r => r.kind === "gap").length).toBe(1);
+  expect(store.records.filter((r) => r.kind === "gap").length).toBe(1);
   expect(store.records.at(-1)!.id).toBe(gap.id);
   // `gap` is a promised notify → T1 for every viewer (K12).
   expect(classify(gap, viewer())).toBe("T1");
 });
 
 test("a single message over B=2048 tokens is truncated to head + read handle", () => {
-  const body = "y".repeat(20_000);                       // ~5000 tokens
+  const body = "y".repeat(20_000); // ~5000 tokens
   const { head, handle } = truncateOversized(body, DEFAULT_CAPS.maxT1Tokens);
   expect(head.length).toBeLessThan(body.length);
   expect(head.endsWith("…")).toBe(true);
@@ -475,7 +605,10 @@ function roomHarness(root: string, caller: string): RoomHarness {
   const pi = {
     zod,
     sendMessage(payload: unknown, options?: unknown): void {
-      sends.push({ payload: payload as Record<string, unknown>, options: options as Record<string, unknown> });
+      sends.push({
+        payload: payload as Record<string, unknown>,
+        options: options as Record<string, unknown>,
+      });
     },
     registerTool(t: unknown): void {
       tool = t as typeof tool;
@@ -495,7 +628,10 @@ function roomHarness(root: string, caller: string): RoomHarness {
 /** A live sibling whose delivery transport rejects — the failure the pass must survive. */
 function registerFailingSession(id: string): void {
   AgentRegistry.global().register({
-    id, displayName: id, kind: "sub", status: "running",
+    id,
+    displayName: id,
+    kind: "sub",
+    status: "running",
     session: {
       async sendCustomMessage(): Promise<boolean> {
         throw new Error("transport down");
@@ -526,7 +662,7 @@ test("an unaddressed post to a followed topic delivers as an aside (T1)", async 
   registerSession(b, bCalls);
   const h = roomHarness(root, "A");
   h.store.append({ kind: "member", from: b, action: "join" });
-  h.store.members.get(b)!.topics.add("build");       // B follows the topic
+  h.store.members.get(b)!.topics.add("build"); // B follows the topic
 
   const res = await h.execute({ op: "post", topic: "build", body: "status" });
   expect(res.details?.ok).toBe(true);
@@ -545,7 +681,7 @@ test("an unaddressed post to an unfollowed topic delivers nothing (T2 — cursor
   expect(res.details).toMatchObject({ ok: true, op: "post" });
   const seq = res.details?.ok === true && res.details.op === "post" ? res.details.seq : undefined;
   expect(bCalls.length).toBe(0);
-  expect(h.store.cursors.get(b)).toBe(seq);   // the cursor advanced instead
+  expect(h.store.cursors.get(b)).toBe(seq); // the cursor advanced instead
 });
 
 test("a release whose prevHolder is B notifies B as T0 (M11)", async () => {

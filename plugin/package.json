@@ -3,6 +3,12 @@
   "version": "0.1.0",
   "description": "In-process multi-agent chatroom: claim board, bounded chat, blocking waits",
   "type": "module",
+  "scripts": {
+    "test": "bun test tests/",
+    "typecheck": "bunx --bun tsc --noEmit -p tsconfig.json",
+    "lint": "bunx --bun @biomejs/biome check src tests",
+    "lint:fix": "bunx --bun @biomejs/biome check src tests --write"
+  },
   "omp": {
     "name": "Agent Chatroom",
     "version": "0.1.0",

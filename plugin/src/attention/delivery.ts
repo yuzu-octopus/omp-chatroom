@@ -21,14 +21,18 @@ export async function deliver(
   // `prevHolder === from === the releaser`, so `classify` returns T0 for it; an own `msg` on a
   // followed topic would otherwise echo back as T1. Actor kinds only: `note`/`gap` are
   // system-generated and their `from` is not an actor. Delivery-layer suppression only.
-  const actorKind = record.kind === "msg" || record.kind === "claim"
-    || record.kind === "release" || record.kind === "member";
+  const actorKind =
+    record.kind === "msg" ||
+    record.kind === "claim" ||
+    record.kind === "release" ||
+    record.kind === "member";
   if (actorKind && record.from === target) {
     bumpCursor(store, target, record.seq);
     return;
   }
 
-  if (tier === "T2") {                                   // pull-only: cursor only, never injected
+  if (tier === "T2") {
+    // pull-only: cursor only, never injected
     bumpCursor(store, target, record.seq);
     return;
   }
@@ -37,15 +41,20 @@ export async function deliver(
   // skip must not depend on work (cardTypeFor/escaping) that a parked target cannot use.
   const ref = target === ctx.agent.id ? null : AgentRegistry.global().get(target);
   if (target !== ctx.agent.id && !ref?.session) {
-    return;                                              // parked/aborted → skip, do not throw
+    return; // parked/aborted → skip, do not throw
   }
 
   // K2 — dispatch on record.kind FIRST and derive the body per kind. `record.body` exists only on
   // `msg`/`note`; reading it before the dispatch is a runtime TypeError on exactly the T0 events
   // ("your claim was revoked"). Only the RESULTING string is escaped.
   const safeBody = escapeForDelivery(roomBodyOf(record));
-  const line = renderLine(record, safeBody, tier);       // K17 — from · topic · tier badge
-  const payload = { customType: cardTypeFor(record), content: line, display: true, details: record };
+  const line = renderLine(record, safeBody, tier); // K17 — from · topic · tier badge
+  const payload = {
+    customType: cardTypeFor(record),
+    content: line,
+    display: true,
+    details: record,
+  };
   const options = { deliverAs: tier === "T0" ? ("steer" as const) : ("aside" as const) };
 
   if (target === ctx.agent.id) {
@@ -60,7 +69,7 @@ export function roomBodyOf(record: RoomRecord): string {
   switch (record.kind) {
     case "msg":
     case "note":
-      return record.body;                                // the only kinds with `body`
+      return record.body; // the only kinds with `body`
     case "claim":
       return `${record.from} claimed ${record.resource} (ttl ${Math.round(record.ttlMs / 1000)}s)`;
     case "release":
@@ -74,10 +83,14 @@ export function roomBodyOf(record: RoomRecord): string {
 
 // K17 — the model-facing line: tier badge · from · topic|resource · escaped body.
 export function renderLine(record: RoomRecord, safeBody: string, tier: Tier): string {
-  const where = record.kind === "claim" || record.kind === "release" ? `resource:${record.resource}`
-    : record.kind === "member" ? "presence"
-    : record.kind === "gap" ? "retention"
-    : `topic:${record.topic}`;                           // msg | note
+  const where =
+    record.kind === "claim" || record.kind === "release"
+      ? `resource:${record.resource}`
+      : record.kind === "member"
+        ? "presence"
+        : record.kind === "gap"
+          ? "retention"
+          : `topic:${record.topic}`; // msg | note
   return `[${tier}] room ⟵ ${record.from} · ${where} · ${safeBody}`;
 }
 

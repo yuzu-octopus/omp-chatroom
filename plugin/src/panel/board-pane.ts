@@ -1,9 +1,14 @@
-import { renderTableRow, type LayoutRenderer, type TableColumn, type TableCell, type Theme }
-  from "@oh-my-pi/pi-tui";
+import {
+  type LayoutRenderer,
+  renderTableRow,
+  type TableCell,
+  type TableColumn,
+  type Theme,
+} from "@oh-my-pi/pi-tui";
 import type { ClaimRow } from "../store/schema";
 import { fitWidth } from "./chrome";
 
-export type BoardRow = ClaimRow & { state: "held" | "expired" | "released" };   // [invented] — §6.4 dimming
+export type BoardRow = ClaimRow & { state: "held" | "expired" | "released" }; // [invented] — §6.4 dimming
 
 /**
  * §6.4 — `resource · holder · TTL · state`. The holder column shrinks before the resource column
@@ -25,14 +30,17 @@ const STATE_TONE: Record<BoardRow["state"], "success" | "warning" | "muted"> = {
   released: "muted",
 };
 
-function ttlCell(row: BoardRow, now: number): { text: string; tone: "muted" | "warning" | "error" } {
+function ttlCell(
+  row: BoardRow,
+  now: number,
+): { text: string; tone: "muted" | "warning" | "error" } {
   if (row.state !== "held") return { text: "—", tone: "muted" };
   const leftMs = row.expiresAt - now;
   if (leftMs <= 0) return { text: "expired", tone: "error" };
   const remaining = leftMs / Math.max(1, row.ttlMs);
   return {
     text: `${Math.max(1, Math.round(leftMs / 1000))}s`,
-    tone: remaining < 0.25 ? "warning" : "muted",   // §6.4 — escalate under 25% remaining
+    tone: remaining < 0.25 ? "warning" : "muted", // §6.4 — escalate under 25% remaining
   };
 }
 
@@ -44,7 +52,12 @@ function holderText(row: BoardRow): string {
  * §6.4 — the pure projection: claim rows → exactly `width`-cell strings, one per row, `held` first
  * and finished rows last. No TUI required.
  */
-export function projectClaims(rows: readonly BoardRow[], width: number, theme: Theme, now = Date.now()): string[] {
+export function projectClaims(
+  rows: readonly BoardRow[],
+  width: number,
+  theme: Theme,
+  now = Date.now(),
+): string[] {
   if (rows.length === 0) return [fitWidth(theme.fg("dim", "no claims"), width)];
   const ordered = [...rows].sort((a, b) => STATE_RANK[a.state] - STATE_RANK[b.state]);
   const out: string[] = [];
@@ -52,13 +65,13 @@ export function projectClaims(rows: readonly BoardRow[], width: number, theme: T
     const dim = row.state !== "held";
     const ttl = ttlCell(row, now);
     const cells: TableCell[] = [
-      { text: row.resource, style: dim ? text => theme.fg("muted", text) : undefined },
+      { text: row.resource, style: dim ? (text) => theme.fg("muted", text) : undefined },
       {
         text: holderText(row),
-        style: text => theme.fg(row.contended > 0 ? "warning" : dim ? "muted" : "text", text),
+        style: (text) => theme.fg(row.contended > 0 ? "warning" : dim ? "muted" : "text", text),
       },
-      { text: ttl.text, style: text => theme.fg(ttl.tone, text) },
-      { text: row.state, style: text => theme.fg(STATE_TONE[row.state], text) },
+      { text: ttl.text, style: (text) => theme.fg(ttl.tone, text) },
+      { text: row.state, style: (text) => theme.fg(STATE_TONE[row.state], text) },
     ];
     out.push(fitWidth(renderTableRow(cells, BOARD_COLUMNS, width), width));
   }
@@ -66,7 +79,11 @@ export function projectClaims(rows: readonly BoardRow[], width: number, theme: T
 }
 
 /** §6.4 — a windowed layout renderer: only the visible slice is rendered, never all rows. */
-export function createBoardPane(getRows: () => readonly BoardRow[], width: number, theme: Theme): LayoutRenderer {
+export function createBoardPane(
+  getRows: () => readonly BoardRow[],
+  width: number,
+  theme: Theme,
+): LayoutRenderer {
   return (paneWidth: number, height: number | undefined): readonly string[] => {
     const rows = projectClaims(getRows(), paneWidth > 0 ? paneWidth : width, theme);
     return rows.slice(0, height ?? rows.length);

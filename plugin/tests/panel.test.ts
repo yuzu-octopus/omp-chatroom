@@ -3,22 +3,28 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentRef, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { ensureThemeSync, theme, visibleWidth, type TUI } from "@oh-my-pi/pi-tui";
 import { resolveLocalRoot } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
-import { roomIdFor } from "../src/ids";
-import { storeFor, type MemberState, type RoomStore } from "../src/store/room-store";
-import type { RoomRecord } from "../src/store/schema";
-import { PANEL_SPLIT_AT, RoomPanel, openRoomPanel, type RoomPanelOptions } from "../src/panel/panel";
-import { createChatPane, projectChatRows } from "../src/panel/chat-pane";
-import { projectClaims, type BoardRow } from "../src/panel/board-pane";
-import { renderRosterStrip, statusCounts } from "../src/panel/roster-strip";
-import { actionFor, PANEL_KEY_MAP, type PanelAction } from "../src/panel/keys";
-import { frameBottomRow, frameDividerRow, frameHintRow, frameTopRow } from "../src/panel/chrome";
+import { ensureThemeSync, type TUI, theme, visibleWidth } from "@oh-my-pi/pi-tui";
 import { registerRoomCommand } from "../src/commands/room-command";
+import { roomIdFor } from "../src/ids";
+import { type BoardRow, projectClaims } from "../src/panel/board-pane";
+import { createChatPane, projectChatRows } from "../src/panel/chat-pane";
+import { frameBottomRow, frameDividerRow, frameHintRow, frameTopRow } from "../src/panel/chrome";
+import { actionFor, PANEL_KEY_MAP, type PanelAction } from "../src/panel/keys";
+import {
+  openRoomPanel,
+  PANEL_SPLIT_AT,
+  RoomPanel,
+  type RoomPanelOptions,
+} from "../src/panel/panel";
+import { renderRosterStrip, statusCounts } from "../src/panel/roster-strip";
+import { type MemberState, type RoomStore, storeFor } from "../src/store/room-store";
+import type { RoomRecord } from "../src/store/schema";
 
 // --- fixtures -------------------------------------------------------------
 
 const TMP: string[] = [];
+// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI needs ESC
 const ANSI = /\x1b\[[0-9;]*m/g;
 
 beforeAll(() => {
@@ -65,11 +71,17 @@ function tuiStub(rows: number): TUI {
 }
 
 /** Structural registry: process-global in production, injected here for determinism. */
-function registryStub(onChange: () => () => void = () => () => {}): NonNullable<RoomPanelOptions["registry"]> {
+function registryStub(
+  onChange: () => () => void = () => () => {},
+): NonNullable<RoomPanelOptions["registry"]> {
   return { list: () => [], onChange };
 }
 
-function makePanel(store: RoomStore, rows = 30, overrides: Partial<RoomPanelOptions> = {}): RoomPanel {
+function makePanel(
+  store: RoomStore,
+  rows = 30,
+  overrides: Partial<RoomPanelOptions> = {},
+): RoomPanel {
   return new RoomPanel({
     roomId: store.roomId,
     store,
@@ -263,7 +275,9 @@ test("chrome rows are exactly `width` cells, including degenerate widths", () =>
     expect(visibleWidth(frameTopRow(width, "Room #r1", Math.floor(width * 0.62)))).toBe(width);
     expect(visibleWidth(frameDividerRow(width, Math.floor(width * 0.62)))).toBe(width);
     expect(visibleWidth(frameBottomRow(width))).toBe(width);
-    expect(visibleWidth(frameHintRow(width, ["esc close", "tab narrow", "j/k move"], theme))).toBe(width);
+    expect(visibleWidth(frameHintRow(width, ["esc close", "tab narrow", "j/k move"], theme))).toBe(
+      width,
+    );
   }
   expect(frameTopRow(80, "Room #r1", 49).replace(ANSI, "")).toContain("Room #r1");
 });

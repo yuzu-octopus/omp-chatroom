@@ -1,11 +1,14 @@
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { resolveLocalRoot, type LocalProtocolOptions }
-  from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
+import {
+  type LocalProtocolOptions,
+  resolveLocalRoot,
+} from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
+import { globalMap } from "../globals";
 import { logPathFor, newMessageId } from "../ids";
-import { appendLine, openRoomLog, replay, closeRoomLog } from "./log";
-import { expireStale, hydrateClaims, type ClaimState } from "./claims";
-import { resolveRoomId } from "./config";
+import { type ClaimState, expireStale, hydrateClaims } from "./claims";
 import { startCompactor, stopCompactor } from "./compactor";
+import { resolveRoomId } from "./config";
+import { appendLine, closeRoomLog, openRoomLog, replay } from "./log";
 import type { RoomRecord, RoomRecordDraft } from "./schema";
 
 // K11 — MemberState is declared ONCE, here (the store owns it); imported by tiers, governor,
@@ -13,20 +16,20 @@ import type { RoomRecord, RoomRecordDraft } from "./schema";
 export interface MemberState {
   agentId: string;
   joinedAtSeq: number;
-  topics: Set<string>;          // followed topics
-  muted: Set<string>;           // muted topics; the sentinel "" means whole-room mute (§5.2)
-  threadRoots: Set<string>;     // thread roots this agent posted in (§5.1 N1)
-  heldTopics: Set<string>;      // topics with a claim held within 1 h (§5.1 N1)
-  lastMessageId?: string;       // the agent's most recent msg id (replyTo → T0)
-  waitedResource?: string;      // active wait_for_claim resource (§5.1 M-8 → T1)
+  topics: Set<string>; // followed topics
+  muted: Set<string>; // muted topics; the sentinel "" means whole-room mute (§5.2)
+  threadRoots: Set<string>; // thread roots this agent posted in (§5.1 N1)
+  heldTopics: Set<string>; // topics with a claim held within 1 h (§5.1 N1)
+  lastMessageId?: string; // the agent's most recent msg id (replyTo → T0)
+  waitedResource?: string; // active wait_for_claim resource (§5.1 M-8 → T1)
 }
 
 // §3.1 — verbatim fields, plus the K8/K9/K10/K15 members.
 export interface RoomStore {
-  root: string;                 // absolute local:// root (§3.3)
-  roomId: string;               // K7/X1 — from resolveRoomId(root) (§14); root-stable, never a session id
-  logPath: string;              // logPathFor(root, roomId) — §2.1.2 (K14)
-  treePath: string;             // <root>/room/tree/ (§3.6)
+  root: string; // absolute local:// root (§3.3)
+  roomId: string; // K7/X1 — from resolveRoomId(root) (§14); root-stable, never a session id
+  logPath: string; // logPathFor(root, roomId) — §2.1.2 (K14)
+  treePath: string; // <root>/room/tree/ (§3.6)
   records: RoomRecord[];
   byId: Map<string, RoomRecord>;
   claims: Map<string, ClaimState>;
@@ -48,31 +51,32 @@ export interface RoomStore {
   // K9 — refcount--. When the root's count reaches zero this closes the fd (K8) and evicts the root.
   dispose(): void;
 
-  reset(): void;                // test seam (§2.1.1) — never evicts the registry entry
+  reset(): void; // test seam (§2.1.1) — never evicts the registry entry
 }
 
-export interface RoomStoreOptions { root: string; roomId: string }   // [invented]
+export interface RoomStoreOptions {
+  root: string;
+  roomId: string;
+} // [invented]
 
 // K9 — the globalThis-anchored registries, keyed by the absolute root; create-on-first-use. [invented]
-const STORES: Map<string, RoomStore> = ((globalThis as unknown as {
-  __roomStores?: Map<string, RoomStore>;
-}).__roomStores ??= new Map<string, RoomStore>());
+const STORES = globalMap<string, RoomStore>("__roomStores");
 
 // One ref per live session, not per call: `storeFor` bumps the root's refcount, `dispose()` drops
 // it. `roomStoreFor` is called per operation, so it dedupes on the agent id (one ref per agent) and
 // `disposeRoomSession(ctx)` — the session_shutdown hook — drops exactly that ref. The last ref
 // closes the fd and evicts the root (K9).
-const REFS: Map<string, number> = ((globalThis as unknown as {
-  __roomStoreRefs?: Map<string, number>;
-}).__roomStoreRefs ??= new Map<string, number>());
-const SESSIONS: Map<string, Set<string>> = ((globalThis as unknown as {
-  __roomSessions?: Map<string, Set<string>>;
-}).__roomSessions ??= new Map<string, Set<string>>());
+const REFS = globalMap<string, number>("__roomStoreRefs");
+const SESSIONS = globalMap<string, Set<string>>("__roomSessions");
 
 function newMember(agentId: string, joinedAtSeq: number): MemberState {
   return {
-    agentId, joinedAtSeq,
-    topics: new Set(), muted: new Set(), threadRoots: new Set(), heldTopics: new Set(),
+    agentId,
+    joinedAtSeq,
+    topics: new Set(),
+    muted: new Set(),
+    threadRoots: new Set(),
+    heldTopics: new Set(),
   };
 }
 
@@ -83,7 +87,8 @@ function newMember(agentId: string, joinedAtSeq: number): MemberState {
 function project(store: RoomStore, record: RoomRecord): void {
   if (record.kind === "member") {
     if (record.action === "join") {
-      if (!store.members.has(record.from)) store.members.set(record.from, newMember(record.from, record.seq));
+      if (!store.members.has(record.from))
+        store.members.set(record.from, newMember(record.from, record.seq));
     } else {
       store.members.delete(record.from);
     }
@@ -91,8 +96,11 @@ function project(store: RoomStore, record: RoomRecord): void {
   }
   if (record.kind === "claim") {
     store.claims.set(record.resource, {
-      resource: record.resource, holder: record.from, ttlMs: record.ttlMs,
-      acquiredAt: record.ts, seq: record.seq,
+      resource: record.resource,
+      holder: record.from,
+      ttlMs: record.ttlMs,
+      acquiredAt: record.ts,
+      seq: record.seq,
     });
   } else if (record.kind === "release") {
     store.claims.delete(record.resource);
@@ -186,7 +194,8 @@ function createStore(root: string, roomId: string): RoomStore {
   return store;
 }
 
-export function storeFor(root: string, roomId: string): RoomStore {              // [invented]
+export function storeFor(root: string, roomId: string): RoomStore {
+  // [invented]
   const existing = STORES.get(root);
   if (existing !== undefined) {
     REFS.set(root, (REFS.get(root) ?? 0) + 1);
@@ -206,14 +215,17 @@ function rootOf(ctx: ExtensionContext): string {
   return resolveLocalRoot(opts);
 }
 
-export function roomStoreFor(ctx: ExtensionContext): RoomStore {                 // [invented] R10
+export function roomStoreFor(ctx: ExtensionContext): RoomStore {
+  // [invented] R10
   const root = rootOf(ctx);
   const agentId = ctx.agent.id;
   const live = SESSIONS.get(root);
   // One ref per session: a repeat call from the same agent must not bump the refcount again.
   if (live?.has(agentId) && STORES.has(root)) return STORES.get(root)!;
   const store = storeFor(root, resolveRoomId(root));
-  (live ?? (SESSIONS.set(root, new Set()), SESSIONS.get(root)!)).add(agentId);
+  const members = live ?? new Set<string>();
+  if (live === undefined) SESSIONS.set(root, members);
+  members.add(agentId);
   // R11/R28 — the background jobs (claim sweep, pruning, compactor) MUST run from the main
   // session only: a tick scheduled on a subagent dies when that subagent's session_shutdown clears
   // its timers. Both registries are idempotent per root.
@@ -233,7 +245,8 @@ export function disposeRoomSession(ctx: ExtensionContext): void {
   STORES.get(root)?.dispose();
 }
 
-export function resetRoomStores(): void {                                        // [invented] __roomTest
+export function resetRoomStores(): void {
+  // [invented] __roomTest
   for (const [root, store] of STORES) {
     roomTimers.stop(root);
     claimSweeper.stop(root);
@@ -248,7 +261,7 @@ export function resetRoomStores(): void {                                       
 // §3.6 S5 pruning job — in-memory records array ONLY; the JSONL file is never truncated (K19).
 export const LOG_MAX_RECORDS = 5_000;
 export const LOG_MAX_AGE_MS = 604_800_000;
-export const PRUNE_INTERVAL_MS = 60_000;       // [invented]
+export const PRUNE_INTERVAL_MS = 60_000; // [invented]
 export function enforceRetention(store: RoomStore, now: number): RoomRecord | null {
   const cutoff = now - LOG_MAX_AGE_MS;
   let dropped = 0;
@@ -264,15 +277,21 @@ export function enforceRetention(store: RoomStore, now: number): RoomRecord | nu
   // The drop is itself a record — the file is never truncated, only the projection (K19).
   return store.append({ kind: "gap", from: "system", skipped: dropped, reason: "retention" });
 }
-export function startPruneJob(store: RoomStore, ctx: ExtensionContext): void {   // [invented placement]
-  ctx.setInterval(() => { enforceRetention(store, Date.now()); }, PRUNE_INTERVAL_MS);
+export function startPruneJob(store: RoomStore, ctx: ExtensionContext): void {
+  // [invented placement]
+  ctx.setInterval(() => {
+    enforceRetention(store, Date.now());
+  }, PRUNE_INTERVAL_MS);
 }
 
 // K3 — the third refcounted ctx.setInterval job: expireStale → release{reason:"expired"} →
 // promote the oldest waiter → T0 notice. The ONLY producer of release{reason:"expired"}.
-export const CLAIM_SWEEP_INTERVAL_MS = 5_000;  // [invented] [calibrate]
-export function startClaimSweep(store: RoomStore, ctx: ExtensionContext): void {  // [invented]
-  ctx.setInterval(() => { expireStale(store, Date.now()); }, CLAIM_SWEEP_INTERVAL_MS);
+export const CLAIM_SWEEP_INTERVAL_MS = 5_000; // [invented] [calibrate]
+export function startClaimSweep(store: RoomStore, ctx: ExtensionContext): void {
+  // [invented]
+  ctx.setInterval(() => {
+    expireStale(store, Date.now());
+  }, CLAIM_SWEEP_INTERVAL_MS);
 }
 
 // [invented] — the refcounted timer registry (I4/R11/R28). One entry per root; the tick runs in the
@@ -281,9 +300,7 @@ export interface RoomTimerRegistry {
   start(root: string, ctx: ExtensionContext): void;
   stop(root: string): void;
 }
-const TIMERS: Map<string, Timer[]> = ((globalThis as unknown as {
-  __roomTimers?: Map<string, Timer[]>;
-}).__roomTimers ??= new Map<string, Timer[]>());
+const TIMERS = globalMap<string, Timer[]>("__roomTimers");
 
 export const roomTimers: RoomTimerRegistry = {
   start(root: string, ctx: ExtensionContext): void {
@@ -291,8 +308,12 @@ export const roomTimers: RoomTimerRegistry = {
     const store = STORES.get(root);
     if (store === undefined) return;
     TIMERS.set(root, [
-      ctx.setInterval(() => { enforceRetention(store, Date.now()); }, PRUNE_INTERVAL_MS),
-      ctx.setInterval(() => { expireStale(store, Date.now()); }, CLAIM_SWEEP_INTERVAL_MS),
+      ctx.setInterval(() => {
+        enforceRetention(store, Date.now());
+      }, PRUNE_INTERVAL_MS),
+      ctx.setInterval(() => {
+        expireStale(store, Date.now());
+      }, CLAIM_SWEEP_INTERVAL_MS),
     ]);
   },
   stop(root: string): void {
@@ -305,18 +326,23 @@ export const roomTimers: RoomTimerRegistry = {
 
 // K3 — the claim-expiry sweep as a named lifecycle object, so the three jobs (sweep, prune,
 // compactor) are symmetric and the timer registry can drive them from one place.
-export interface ClaimSweeper {                                          // [invented]
+export interface ClaimSweeper {
+  // [invented]
   start(store: RoomStore, ctx: ExtensionContext): void;
   stop(root: string): void;
 }
-const SWEEPERS: Map<string, Timer> = ((globalThis as unknown as {
-  __roomSweepers?: Map<string, Timer>;
-}).__roomSweepers ??= new Map<string, Timer>());
+const SWEEPERS = globalMap<string, Timer>("__roomSweepers");
 
-export const claimSweeper: ClaimSweeper = {                              // [invented]
+export const claimSweeper: ClaimSweeper = {
+  // [invented]
   start(store: RoomStore, ctx: ExtensionContext): void {
     if (SWEEPERS.has(store.root)) return;
-    SWEEPERS.set(store.root, ctx.setInterval(() => { expireStale(store, Date.now()); }, CLAIM_SWEEP_INTERVAL_MS));
+    SWEEPERS.set(
+      store.root,
+      ctx.setInterval(() => {
+        expireStale(store, Date.now());
+      }, CLAIM_SWEEP_INTERVAL_MS),
+    );
   },
   stop(root: string): void {
     const handle = SWEEPERS.get(root);

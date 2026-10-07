@@ -1,8 +1,13 @@
 import type { AgentRef } from "@oh-my-pi/pi-coding-agent";
-import { statusDot, statusGlyph, statusText } from "@oh-my-pi/pi-tui/overlays/agent-hub-renderer";
 import type { Theme } from "@oh-my-pi/pi-tui";
+import { statusDot, statusGlyph, statusText } from "@oh-my-pi/pi-tui/overlays/agent-hub-renderer";
 
-export interface StatusCounts { running: number; idle: number; parked: number; aborted: number }
+export interface StatusCounts {
+  running: number;
+  idle: number;
+  parked: number;
+  aborted: number;
+}
 
 /** §6.5 — presence counts over the live registry (the same shape agent-hub keeps internally). */
 export function statusCounts(refs: readonly AgentRef[]): StatusCounts {

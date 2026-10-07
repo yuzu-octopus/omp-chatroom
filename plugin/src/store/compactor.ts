@@ -1,15 +1,16 @@
-import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { streamSimple } from "@oh-my-pi/pi-ai";       // root export, NOT a deep import (K21/F3)
 import type { Context } from "@oh-my-pi/pi-ai";
+import { streamSimple } from "@oh-my-pi/pi-ai"; // root export, NOT a deep import (K21/F3)
+import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { globalMap } from "../globals";
 import type { RoomStore } from "./room-store";
 import type { RoomRecord } from "./schema";
-import { RAW_MAX, TREE_REC, openTreeStore } from "./tree-store";
+import { openTreeStore, RAW_MAX, TREE_REC } from "./tree-store";
 
-export const COMPACT_JOBS = 8;                    // §5.2 [invented]
-export const COMPACT_MAX_CALLS_PER_DAY = 20_000;  // K4 — a RATE cap [calibrate]
-export const SUMMARY_MAX_BYTES = 288;             // = TREE_REC
-export const COMPACT_INTERVAL_MS = 5_000;         // [invented]
-export const COMPACT_MAX_RETRIES = 3;             // §3.6 [invented]
+export const COMPACT_JOBS = 8; // §5.2 [invented]
+export const COMPACT_MAX_CALLS_PER_DAY = 20_000; // K4 — a RATE cap [calibrate]
+export const SUMMARY_MAX_BYTES = 288; // = TREE_REC
+export const COMPACT_INTERVAL_MS = 5_000; // [invented]
+export const COMPACT_MAX_RETRIES = 3; // §3.6 [invented]
 
 /**
  * M9 — the untrusted-input framing, verbatim and load-bearing. The compactor is an actor: it reads
@@ -69,7 +70,10 @@ let queue: Promise<void> = Promise.resolve();
 
 export function withWriteMutex<T>(criticalSection: () => Promise<T>): Promise<T> {
   const result = queue.then(criticalSection);
-  queue = result.then(() => undefined, () => undefined);   // keep the chain alive on error
+  queue = result.then(
+    () => undefined,
+    () => undefined,
+  ); // keep the chain alive on error
   return result;
 }
 
@@ -78,12 +82,18 @@ export function withWriteMutex<T>(criticalSection: () => Promise<T>): Promise<T>
 /** The model-facing line for one record (kind-first, so no arm reads a field its kind lacks). */
 function recordLine(record: RoomRecord): string {
   switch (record.kind) {
-    case "msg":     return `[${record.seq}] msg ${record.from} #${record.topic}: ${record.body}`;
-    case "note":    return `[${record.seq}] note ${record.from} #${record.topic}: ${record.body}`;
-    case "claim":   return `[${record.seq}] claim ${record.from} ${record.resource} (ttl ${record.ttlMs}ms)`;
-    case "release": return `[${record.seq}] release ${record.from} ${record.resource} (${record.reason})`;
-    case "member":  return `[${record.seq}] ${record.from} ${record.action}`;
-    case "gap":     return `[${record.seq}] gap ${record.skipped} skipped (${record.reason})`;
+    case "msg":
+      return `[${record.seq}] msg ${record.from} #${record.topic}: ${record.body}`;
+    case "note":
+      return `[${record.seq}] note ${record.from} #${record.topic}: ${record.body}`;
+    case "claim":
+      return `[${record.seq}] claim ${record.from} ${record.resource} (ttl ${record.ttlMs}ms)`;
+    case "release":
+      return `[${record.seq}] release ${record.from} ${record.resource} (${record.reason})`;
+    case "member":
+      return `[${record.seq}] ${record.from} ${record.action}`;
+    case "gap":
+      return `[${record.seq}] gap ${record.skipped} skipped (${record.reason})`;
   }
 }
 
@@ -125,7 +135,7 @@ export async function summarizeBlock(
     const tree = openTreeStore(store.treePath, store.records.length);
     const left = tree.getNode(lo, mid);
     const right = tree.getNode(mid, hi);
-    if (left === null || right === null) return "";   // a half is unbuilt — not a failure, just early
+    if (left === null || right === null) return ""; // a half is unbuilt — not a failure, just early
     body = `  [${lo},${mid}) ${left}\n  [${mid},${hi}) ${right}`;
   }
   const prompt = `${UNTRUSTED_PROMPT_PREFIX}\n\nBlock [${lo},${hi}).\n${body}\n`;
@@ -153,14 +163,14 @@ export async function compactOnce(
 ): Promise<boolean> {
   const [lo, hi] = block;
   const tree = openTreeStore(store.treePath, store.records.length);
-  if (tree.getNode(lo, hi) !== null) return false;   // T4 — one node per range
-  if (atCap()) return false;                         // T5 — the rate cap, checked before spending
+  if (tree.getNode(lo, hi) !== null) return false; // T4 — one node per range
+  if (atCap()) return false; // T5 — the rate cap, checked before spending
   return withWriteMutex(async () => {
     if (tree.getNode(lo, hi) !== null) return false; // re-check inside the critical section
     if (atCap()) return false;
-    spendToday++;                                    // one logical compaction = one call
+    spendToday++; // one logical compaction = one call
     const summary = await summarizeBlock(ctx, store, lo, hi);
-    if (summary === "") return false;                // skipped; the raw log is the fallback (T2/T3)
+    if (summary === "") return false; // skipped; the raw log is the fallback (T2/T3)
     return tree.putNode(lo, hi, summary);
   });
 }
@@ -181,9 +191,7 @@ interface CompactorEntry {
   handle: Timer;
 }
 
-// globalThis-anchored (the K9 store-registry precedent) so sibling sessions share one tick per root.
-const GLOBAL = globalThis as unknown as { __roomCompactors?: Map<string, CompactorEntry> };
-const COMPACTORS: Map<string, CompactorEntry> = (GLOBAL.__roomCompactors ??= new Map());
+const COMPACTORS = globalMap<string, CompactorEntry>("__roomCompactors");
 
 /**
  * §3.6 — the background compaction job. R11/R28: the tick runs in the MAIN session only (a tick
@@ -200,7 +208,8 @@ export function startCompactor(store: RoomStore, ctx: ExtensionContext): void {
   COMPACTORS.set(store.root, { ctx, handle });
 }
 
-export function stopCompactor(root: string): void {                        // [invented]
+export function stopCompactor(root: string): void {
+  // [invented]
   const entry = COMPACTORS.get(root);
   if (entry === undefined) return;
   entry.ctx.clearTimer(entry.handle);

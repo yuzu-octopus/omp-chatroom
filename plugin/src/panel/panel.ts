@@ -1,23 +1,24 @@
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent";
-import { SplitPane, Stack, theme, type Component, type TUI } from "@oh-my-pi/pi-tui";
+import { type Component, SplitPane, Stack, type TUI, theme } from "@oh-my-pi/pi-tui";
 import { contended } from "../store/claims";
 import { cursorFor } from "../store/cursors";
-import { roomStoreFor, type MemberState, type RoomStore } from "../store/room-store";
+import { type MemberState, type RoomStore, roomStoreFor } from "../store/room-store";
 import type { ClaimRow } from "../store/schema";
-import { createChatPane, projectChatRows, type ChatRow } from "./chat-pane";
-import { createBoardPane, type BoardRow } from "./board-pane";
-import { renderRosterStrip } from "./roster-strip";
+import { type BoardRow, createBoardPane } from "./board-pane";
+import { type ChatRow, createChatPane, projectChatRows } from "./chat-pane";
 import { fitBlock, frameRows } from "./chrome";
 import { actionFor } from "./keys";
+import { renderRosterStrip } from "./roster-strip";
 
-export interface RoomPanelOptions {                       // [invented]
+export interface RoomPanelOptions {
+  // [invented]
   roomId: string;
   store: RoomStore;
   tui: TUI;
   done: () => void;
-  onReleaseClaim: (resource: string) => void;             // §6.6 `r`
-  onFocusAgent: (agentId: string) => void;                // §6.6 `o`
+  onReleaseClaim: (resource: string) => void; // §6.6 `r`
+  onFocusAgent: (agentId: string) => void; // §6.6 `o`
   /** The session that owns the panel; its cursor drives unread marks (I3). */
   selfId: string;
   /** Injected in tests; production reads `AgentRegistry.global()` (assumption 9). */
@@ -27,15 +28,23 @@ export interface RoomPanelOptions {                       // [invented]
   clearTimer?: (timer: unknown) => void;
 }
 
-export const PANEL_SPLIT_AT = 88;                         // §6.2
-export const PANEL_LEFT_RATIO = 0.62;                     // §6.2
-export const PANEL_RIGHT_MIN_WIDTH = 30;                  // §6.2
+export const PANEL_SPLIT_AT = 88; // §6.2
+export const PANEL_LEFT_RATIO = 0.62; // §6.2
+export const PANEL_RIGHT_MIN_WIDTH = 30; // §6.2
 /** §6.8 — the slow relative-age repaint cadence. */
 export const PANEL_AGE_INTERVAL_MS = 5_000;
 
 // §6.6 — only the keys the panel actually acts on; the full key map is in `keys.ts` (`p`/`/`/Enter`
 // are mapped but the composer/filter are not built yet, so they are not advertised here).
-const HINTS = ["esc close", "tab narrow", "j/k move", "g/G ends", "o jump", "r release", "1/2 pane"];
+const HINTS = [
+  "esc close",
+  "tab narrow",
+  "j/k move",
+  "g/G ends",
+  "o jump",
+  "r release",
+  "1/2 pane",
+];
 
 const BORDER = "│";
 
@@ -107,7 +116,11 @@ export class RoomPanel implements Component {
   refresh(): void {
     if (this.#disposed) return;
     const store = this.#options.store;
-    this.#rows = projectChatRows(store.records, this.#viewer(store), cursorFor(store, this.#options.selfId));
+    this.#rows = projectChatRows(
+      store.records,
+      this.#viewer(store),
+      cursorFor(store, this.#options.selfId),
+    );
     this.#board = this.#projectBoard(store);
     this.#roster = renderRosterStrip(this.#registry.list(), theme);
     this.#clampSelection();
@@ -123,7 +136,7 @@ export class RoomPanel implements Component {
     const geometry = this.#split.measure(width);
     const narrow = geometry.mode !== "split";
     this.#split.setNarrowPane(this.#narrowOpen && narrow ? "right" : "left");
-    const chatWidth = narrow ? 0 : geometry.left?.width ?? 0;
+    const chatWidth = narrow ? 0 : (geometry.left?.width ?? 0);
     this.#frame = frameRows(width, this.#titleFor(narrow), chatWidth, HINTS, theme);
     const height = Math.max(4, this.#options.tui?.terminal?.rows || 30);
     this.#stack.setHeight(height);
@@ -233,7 +246,6 @@ export class RoomPanel implements Component {
     return rows;
   }
 
-
   #clampSelection(): void {
     const count = this.#focus === "chat" ? this.#rows.length : this.#board.length;
     const last = Math.max(0, count - 1);
@@ -270,7 +282,10 @@ export async function openRoomPanel(pi: ExtensionAPI, ctx: ExtensionContext): Pr
   try {
     store = roomStoreFor(ctx);
   } catch (error) {
-    ctx.ui.notify(`room unavailable: ${error instanceof Error ? error.message : "corrupt log"}`, "error");
+    ctx.ui.notify(
+      `room unavailable: ${error instanceof Error ? error.message : "corrupt log"}`,
+      "error",
+    );
     return;
   }
 
@@ -287,7 +302,13 @@ export async function openRoomPanel(pi: ExtensionAPI, ctx: ExtensionContext): Pr
           onReleaseClaim: (resource: string) => {
             const held = store.claims.get(resource);
             if (held !== undefined) {
-              store.append({ kind: "release", from: ctx.agent.id, resource, reason: "reclaimed", prevHolder: held.holder });
+              store.append({
+                kind: "release",
+                from: ctx.agent.id,
+                resource,
+                reason: "reclaimed",
+                prevHolder: held.holder,
+              });
             }
             panel.refresh();
           },
@@ -297,7 +318,8 @@ export async function openRoomPanel(pi: ExtensionAPI, ctx: ExtensionContext): Pr
             ctx.ui.notify(`agent ${agentId} — use the agent hub to focus its session`, "info");
           },
           setInterval: (callback: () => void, ms: number) => ctx.setInterval(callback, ms),
-          clearTimer: (timer: unknown) => ctx.clearTimer(timer as Parameters<typeof ctx.clearTimer>[0]),
+          clearTimer: (timer: unknown) =>
+            ctx.clearTimer(timer as Parameters<typeof ctx.clearTimer>[0]),
         });
         return panel;
       },
@@ -313,7 +335,10 @@ export async function openRoomPanel(pi: ExtensionAPI, ctx: ExtensionContext): Pr
       },
     );
   } catch (error) {
-    ctx.ui.notify(`Room panel unavailable: ${error instanceof Error ? error.message : "unknown"}`, "warning");
+    ctx.ui.notify(
+      `Room panel unavailable: ${error instanceof Error ? error.message : "unknown"}`,
+      "warning",
+    );
   } finally {
     ACTIVE_PANEL.delete(pi);
   }
@@ -338,5 +363,3 @@ export function registerPanel(pi: ExtensionAPI): void {
     },
   });
 }
-
-

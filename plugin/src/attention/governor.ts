@@ -1,24 +1,40 @@
-import type { MemberState, RoomStore } from "../store/room-store";   // MemberState is owned here (K11)
-import type { RoomRecord } from "../store/schema";
 import { estimateTokens } from "../onboarding/digest";
-import { classify } from "./tiers";
+import type { MemberState, RoomStore } from "../store/room-store"; // MemberState is owned here (K11)
+import type { RoomRecord } from "../store/schema";
 import { roomBodyOf } from "./delivery";
+import { classify } from "./tiers";
 
 // SCAFFOLD-DEFINED — §5.2 lists the knobs as a table, never as a type.
 export interface Caps {
-  maxT1PerTurn: number; maxT1Tokens: number; coalesceCount: number; coalesceMs: number;
-  postsPerWindow: number; burstPosts: number; claimTtlMs: number; claimSweepMs: number;   // K3
-  logMaxRecords: number; logMaxAgeMs: number; maxBodyBytes: number;                       // K19
-  compactionCallsPerDay: number;                                                          // K4 — a rate
+  maxT1PerTurn: number;
+  maxT1Tokens: number;
+  coalesceCount: number;
+  coalesceMs: number;
+  postsPerWindow: number;
+  burstPosts: number;
+  claimTtlMs: number;
+  claimSweepMs: number; // K3
+  logMaxRecords: number;
+  logMaxAgeMs: number;
+  maxBodyBytes: number; // K19
+  compactionCallsPerDay: number; // K4 — a rate
 }
 export const DEFAULT_CAPS: Caps = {
-  maxT1PerTurn: 10, maxT1Tokens: 2048, coalesceCount: 20, coalesceMs: 300_000,
-  postsPerWindow: 1, burstPosts: 10, claimTtlMs: 300_000, claimSweepMs: 5_000,
-  logMaxRecords: 5_000, logMaxAgeMs: 604_800_000, maxBodyBytes: 8192,
+  maxT1PerTurn: 10,
+  maxT1Tokens: 2048,
+  coalesceCount: 20,
+  coalesceMs: 300_000,
+  postsPerWindow: 1,
+  burstPosts: 10,
+  claimTtlMs: 300_000,
+  claimSweepMs: 5_000,
+  logMaxRecords: 5_000,
+  logMaxAgeMs: 604_800_000,
+  maxBodyBytes: 8192,
   compactionCallsPerDay: 20_000,
-};   // the §5.2 caps verbatim
+}; // the §5.2 caps verbatim
 
-export type PostVerdict = "green" | "yellow" | "red";     // §5.2
+export type PostVerdict = "green" | "yellow" | "red"; // §5.2
 
 // §5.2 N5 [invented] — T0 is exempt from K/B but carries its own coalescing ceiling: past it the
 // pending interrupts are batched into ONE digest interrupt rather than dropped.
@@ -28,8 +44,10 @@ export const T0_COALESCE_CEILING = 50;
 // tokens per this window. EBS defaults to CBS (RFC 2697's own default), so the burst is 2×CBS.
 const POST_WINDOW_MS = 2_000;
 
-export function selectT0(pending: readonly RoomRecord[], ceiling: number = T0_COALESCE_CEILING):
-  { injected: RoomRecord[]; summaryLine: string | null } {
+export function selectT0(
+  pending: readonly RoomRecord[],
+  ceiling: number = T0_COALESCE_CEILING,
+): { injected: RoomRecord[]; summaryLine: string | null } {
   // Never dropped: under the ceiling every interrupt is injected; past it they are batched into a
   // single digest interrupt that carries the count.
   if (pending.length <= ceiling) return { injected: [...pending], summaryLine: null };
@@ -42,7 +60,11 @@ export function selectT0(pending: readonly RoomRecord[], ceiling: number = T0_CO
 // --- srTCM (RFC 2697) -----------------------------------------------------
 // Per (room, agent) state: two token buckets, both starting FULL and both refilled at CIR.
 // Green = the committed bucket (CBS); yellow = the excess bucket (EBS, the burst); red = neither.
-interface Buckets { committed: number; excess: number; updatedAt: number }
+interface Buckets {
+  committed: number;
+  excess: number;
+  updatedAt: number;
+}
 const BUCKETS: WeakMap<RoomStore, Map<string, Buckets>> = new WeakMap();
 
 function bucketsFor(store: RoomStore, agentId: string, now: number): Buckets {
@@ -53,7 +75,11 @@ function bucketsFor(store: RoomStore, agentId: string, now: number): Buckets {
   }
   let bucket = perStore.get(agentId);
   if (bucket === undefined) {
-    bucket = { committed: DEFAULT_CAPS.burstPosts, excess: DEFAULT_CAPS.burstPosts, updatedAt: now };
+    bucket = {
+      committed: DEFAULT_CAPS.burstPosts,
+      excess: DEFAULT_CAPS.burstPosts,
+      updatedAt: now,
+    };
     perStore.set(agentId, bucket);
     return bucket;
   }
@@ -83,8 +109,11 @@ export function admitPost(store: RoomStore, agentId: string, now: number): PostV
 // --- T1 injection cap (K messages / B tokens per turn) --------------------
 
 /** §5.2 — oldest-first up to K records AND B tokens, then one summary line for the remainder. */
-export function selectT1(store: RoomStore, viewer: MemberState, pending: readonly RoomRecord[]):
-  { injected: RoomRecord[]; summaryLine: string | null } {
+export function selectT1(
+  store: RoomStore,
+  viewer: MemberState,
+  pending: readonly RoomRecord[],
+): { injected: RoomRecord[]; summaryLine: string | null } {
   const injected: RoomRecord[] = [];
   let tokens = 0;
   for (const record of pending) {
@@ -98,7 +127,9 @@ export function selectT1(store: RoomStore, viewer: MemberState, pending: readonl
   const dropped = pending.length - injected.length;
   if (dropped <= 0) return { injected, summaryLine: null };
   const cursor = store.cursors.get(viewer.agentId) ?? 0;
-  const mentions = pending.filter(r => r.kind === "msg" && r.mention?.includes(viewer.agentId)).length;
+  const mentions = pending.filter(
+    (r) => r.kind === "msg" && r.mention?.includes(viewer.agentId),
+  ).length;
   const mentionNote = mentions > 0 ? ` (${mentions} mention you)` : "";
   return {
     injected,
@@ -112,7 +143,7 @@ export function selectT1(store: RoomStore, viewer: MemberState, pending: readonl
 export function coalescePending(store: RoomStore, viewer: MemberState, now: number): string | null {
   const cursor = store.cursors.get(viewer.agentId) ?? 0;
   const t2 = store.records.filter(
-    r => r.seq > cursor && classify(r, viewer) === "T2" && !isMuted(store, viewer, r),
+    (r) => r.seq > cursor && classify(r, viewer) === "T2" && !isMuted(store, viewer, r),
   );
   if (t2.length === 0) return null;
   const lagMs = now - t2[0]!.ts;
@@ -127,7 +158,7 @@ export function coalescePending(store: RoomStore, viewer: MemberState, now: numb
 
 // §5.2 — a muted topic never wakes, never injects and never counts as unread, EXCEPT an explicit
 // mention, which promotes to T0 and is therefore never muted. The sentinel "" mutes the whole room.
-export function isMuted(store: RoomStore, viewer: MemberState, record: RoomRecord): boolean {
+export function isMuted(_store: RoomStore, viewer: MemberState, record: RoomRecord): boolean {
   if (record.kind === "msg" && record.mention?.includes(viewer.agentId)) return false;
   if (viewer.muted.has("")) return true;
   const topic = record.kind === "msg" || record.kind === "note" ? record.topic : undefined;
@@ -154,8 +185,12 @@ function memberFor(store: RoomStore, agentId: string): MemberState {
   const existing = store.members.get(agentId);
   if (existing !== undefined) return existing;
   const fresh: MemberState = {
-    agentId, joinedAtSeq: store.seq,
-    topics: new Set(), muted: new Set(), threadRoots: new Set(), heldTopics: new Set(),
+    agentId,
+    joinedAtSeq: store.seq,
+    topics: new Set(),
+    muted: new Set(),
+    threadRoots: new Set(),
+    heldTopics: new Set(),
   };
   store.members.set(agentId, fresh);
   return fresh;
@@ -178,16 +213,23 @@ export function unreadCounts(store: RoomStore, viewer: MemberState): Map<string,
 
 // --- retention gap notice -------------------------------------------------
 
-export function noteGap(store: RoomStore, skipped: number, reason: "retention" | "invalid" | "corrupt"): RoomRecord {
+export function noteGap(
+  store: RoomStore,
+  skipped: number,
+  reason: "retention" | "invalid" | "corrupt",
+): RoomRecord {
   return store.append({ kind: "gap", from: "system", skipped, reason });
 }
 
 // --- oversized message (N7) -----------------------------------------------
 
 /** §5.2 N7 — a message over B tokens is truncated to a head + a read handle; never lost from the log. */
-export function truncateOversized(body: string, tokenBudget: number): { head: string; handle: string } {
+export function truncateOversized(
+  body: string,
+  tokenBudget: number,
+): { head: string; handle: string } {
   if (estimateTokens(body) <= tokenBudget) return { head: body, handle: "" };
   const headChars = Math.max(0, tokenBudget * 4);
   const head = `${body.slice(0, headChars)}…`;
-  return { head, handle: "… truncated — read the full record with room{op:\"read\"}" };
+  return { head, handle: '… truncated — read the full record with room{op:"read"}' };
 }

@@ -1,6 +1,4 @@
-import { test, expect } from "bun:test";
-import { HOST_VERSION_PIN, assertHostVersion, DEEP_SPECIFIERS } from "../src/version";
-
+import { expect, test } from "bun:test";
 // Static ESM imports. The host's deep subpaths declare ONLY an `import` condition in their exports
 // map (no `require`), so `createRequire(...).resolve()` cannot see them — a `require`-based drift
 // check would report a false failure. ESM import is the mechanism the plugin actually uses.
@@ -8,7 +6,7 @@ import * as localProtocol from "@oh-my-pi/pi-coding-agent/internal-urls/local-pr
 import * as agentRegistry from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import * as harnessTags from "@oh-my-pi/pi-coding-agent/session/harness-tags";
 import * as eventBus from "@oh-my-pi/pi-coding-agent/utils/event-bus";
-
+import { assertHostVersion, DEEP_SPECIFIERS, HOST_VERSION_PIN } from "../src/version";
 
 test("the installed host version equals HOST_VERSION_PIN (X6/R34)", async () => {
   // Read the manifest as text + JSON.parse rather than `require`: the package has no `require`

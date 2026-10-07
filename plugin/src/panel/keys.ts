@@ -1,15 +1,38 @@
 import { parseKey } from "@oh-my-pi/pi-tui";
 
-export type PanelAction =                                  // §6.6 — verbatim key list
-  | "close" | "toggle-narrow" | "up" | "down" | "top" | "bottom"
-  | "detail" | "focus-agent" | "release-claim" | "compose" | "filter"
-  | "focus-chat" | "focus-board";
+export type PanelAction =
+  // §6.6 — verbatim key list
+  | "close"
+  | "toggle-narrow"
+  | "up"
+  | "down"
+  | "top"
+  | "bottom"
+  | "detail"
+  | "focus-agent"
+  | "release-claim"
+  | "compose"
+  | "filter"
+  | "focus-chat"
+  | "focus-board";
 
 /** §6.6 key table as data, keyed by the canonical key name `parseKey` returns. */
 export const PANEL_KEY_MAP: Readonly<Record<string, PanelAction>> = {
-  "escape": "close", "tab": "toggle-narrow", "j": "down", "down": "down", "k": "up", "up": "up",
-  "g": "top", "G": "bottom", "enter": "detail", "o": "focus-agent", "r": "release-claim",
-  "p": "compose", "/": "filter", "1": "focus-chat", "2": "focus-board",
+  escape: "close",
+  tab: "toggle-narrow",
+  j: "down",
+  down: "down",
+  k: "up",
+  up: "up",
+  g: "top",
+  G: "bottom",
+  enter: "detail",
+  o: "focus-agent",
+  r: "release-claim",
+  p: "compose",
+  "/": "filter",
+  "1": "focus-chat",
+  "2": "focus-board",
 };
 
 /** What the panel must know before a key can be mapped (§6.6 + §6.7). */
