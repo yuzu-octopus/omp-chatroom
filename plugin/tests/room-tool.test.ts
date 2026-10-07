@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { AgentRegistry, type ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { DEFAULT_CAPS, resetTurnBudget } from "../src/attention/governor";
 import {
   contended,
   dequeueWaiter,
@@ -698,4 +699,51 @@ test("post: tier is T1 for a followed topic", async () => {
   // Second post on same topic should be T1 (followed)
   const result = await invokeRoom(ctx, { op: "post", topic: "build", body: "second" });
   expect(result.details).toMatchObject({ ok: true, op: "post", tier: "T1" });
+});
+
+// --- K20 — `read` is routed through the injection budget (the pull path) ---
+
+test("read: the per-turn budget caps the records, more:true, and the summary names the remainder", async () => {
+  const { store, ctx } = newTestStore();
+  for (let i = 0; i < 200; i++) {
+    store.append({ kind: "msg", from: "AgentB", topic: "bulk", body: `m${i} ${"x".repeat(48)}` });
+  }
+
+  const result = await invokeRoom(ctx, { op: "read", limit: 200 });
+  const records = (result.details?.records ?? []) as Array<{ seq: number }>;
+  expect(records.length).toBeGreaterThan(0);
+  expect(records.length).toBeLessThan(200);
+  expect(result.details?.more).toBe(true);
+
+  const text = result.content.map((c) => c.text ?? "").join("\n");
+  expect(text).toContain(`+${200 - records.length} more room messages`);
+  expect(text).toContain('room{op:"read"');
+
+  // The cursor advances only over the records actually returned — the rest stay readable.
+  const last = records[records.length - 1]!.seq;
+  expect(result.details?.cursor).toBe(last);
+  expect(store.cursors.get("AgentA")).toBe(last);
+  expect(store.records.filter((r) => r.seq > last).length).toBe(200 - records.length);
+});
+
+test("read: the budget is per turn — a repeat read is throttled and the turn boundary refills it", async () => {
+  const { store, ctx } = newTestStore();
+  for (let i = 0; i < 40; i++) {
+    store.append({ kind: "msg", from: "AgentB", topic: "bulk", body: "y".repeat(240) });
+  }
+
+  const first = await invokeRoom(ctx, { op: "read", limit: 200 });
+  const firstRecords = (first.details?.records ?? []) as unknown[];
+  expect(firstRecords.length).toBe(DEFAULT_CAPS.maxT1PerTurn); // K binds before the 40 records
+  expect(first.details?.more).toBe(true);
+
+  // Same turn: the budget is spent, so nothing more is admitted and nothing is skipped.
+  const second = await invokeRoom(ctx, { op: "read", limit: 200 });
+  expect(((second.details?.records ?? []) as unknown[]).length).toBe(0);
+  expect(second.details?.cursor).toBe(first.details?.cursor);
+  expect(second.details?.more).toBe(true);
+
+  resetTurnBudget(store, "AgentA"); // the turn_start hook
+  const third = await invokeRoom(ctx, { op: "read", limit: 200 });
+  expect(((third.details?.records ?? []) as unknown[]).length).toBeGreaterThan(0);
 });

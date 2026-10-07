@@ -3,9 +3,12 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent";
 import { deliver } from "../attention/delivery";
 import {
   admitPost,
+  coalescePending,
   isMuted,
+  moreLine,
   muteRoom,
   muteTopic,
+  selectT0,
   selectT1,
   unmuteRoom,
   unmuteTopic,
@@ -223,14 +226,34 @@ function t1Admitted(store: RoomStore, viewer: MemberState, record: RoomRecord): 
   return selectT1(store, viewer, pending).injected.some((r) => r.seq === record.seq);
 }
 
+/** A board-delta card, the same shell `deliver` uses, for the T0 batch and the T2 digest. */
+function notice(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  target: string,
+  content: string,
+  deliverAs: "steer" | "aside",
+): void {
+  // K22/S1 — the digest line carries room-authored topic names; escape before it reaches the model.
+  const payload = { customType: "room:board-delta", content: safe(content), display: true };
+  const session = AgentRegistry.global().get(target)?.session;
+  if (session) {
+    void session.sendCustomMessage(payload, { deliverAs });
+    return;
+  }
+  if (target === ctx.agent.id) pi.sendMessage(payload, { deliverAs });
+}
+
 /**
  * §5.3 — deliver each just-appended record to every relevant recipient. Runs AFTER the synchronous
  * append (I1/I5): the log is already durable, so a delivery failure can only be reported, never
  * corrupt the record or throw out of `execute`. Returns the first failure message, if any.
  *
- * T0 is never dropped (its ceiling batches in the pull path, not here); T2 is cursor-only. A post
- * past the producer's srTCM burst is coalesced for the digest — the record is already durable and
- * its recipients' cursors stay put, so `coalescePending` picks it up on the next turn.
+ * T0 is never dropped, but its pending set is ceiling-batched by `selectT0` (N5) — past the ceiling
+ * ONE digest interrupt carries the count and the records stay above the recipient's cursor. T2 is
+ * cursor-only, except that its pending set is digested by `coalescePending` (N/T) onto the next
+ * T0/T1 delivery for that recipient. A post past the producer's srTCM burst is coalesced for the
+ * digest — the record is already durable and its recipients' cursors stay put.
  */
 async function notifyRecipients(
   pi: ExtensionAPI,
@@ -247,18 +270,47 @@ async function notifyRecipients(
     // §5.2 — the producer's bucket, consumed once per appended post (claim/release are not posts).
     const coalesced =
       records.some((r) => r.kind === "msg") && admitPost(store, actorId, Date.now()) === "red";
-    for (const record of records) {
-      for (const target of recipients(store, actorId)) {
-        try {
-          const viewer = viewerFor(store, target);
-          const tier = classify(record, viewer);
+    for (const target of recipients(store, actorId)) {
+      try {
+        const viewer = viewerFor(store, target);
+        const cursor = store.cursors.get(target) ?? 0;
+        // The recipient's whole pending set, minus muted and cursor-only T2: exactly what a
+        // push may show. T0 is exempt from K/B; T1 is admitted oldest-first by `selectT1`.
+        const pending = store.records.filter(
+          (r) => r.seq > cursor && !isMuted(store, viewer, r) && classify(r, viewer) !== "T2",
+        );
+        // N5 — past its ceiling the T0 set batches into ONE digest interrupt, never dropped.
+        const t0 = selectT0(pending.filter((r) => classify(r, viewer) === "T0"));
+        const admitted = [...t0.injected];
+        for (const record of records) {
           if (isMuted(store, viewer, record)) continue;
-          if (tier === "T1" && (coalesced || !t1Admitted(store, viewer, record))) continue;
-          if (coalesced && tier === "T2") continue; // leave it pending for the digest
-          await deliver(pi, ctx, target, record, tier);
-        } catch (error) {
-          note(error);
+          if (classify(record, viewer) !== "T1") continue;
+          if (!coalesced && t1Admitted(store, viewer, record)) admitted.push(record);
         }
+        // N/T — the T2 backlog rides the next T0/T1 for this recipient as ONE line.
+        const digest =
+          admitted.length > 0 || t0.summaryLine !== null
+            ? coalescePending(store, viewer, Date.now())
+            : null;
+        let extra = digest !== null ? [digest] : [];
+        for (const record of admitted) {
+          await deliver(pi, ctx, target, record, classify(record, viewer), extra);
+          extra = [];
+        }
+        if (t0.summaryLine !== null) {
+          await notice(pi, ctx, target, t0.summaryLine, "steer");
+        } else if (extra.length > 0) {
+          await notice(pi, ctx, target, extra.join("\n"), "aside");
+        }
+        // A red (coalesced) producer's records are left pending for the digest: the log is already
+        // durable and the cursor must NOT advance, or `coalescePending` could never see them.
+        // A non-coalesced T2 is cursor-only — never injected, and consumed on arrival.
+        if (coalesced) continue;
+        for (const record of records) {
+          if (classify(record, viewer) === "T2") await deliver(pi, ctx, target, record, "T2");
+        }
+      } catch (error) {
+        note(error);
       }
     }
   } catch (error) {
@@ -353,19 +405,38 @@ export function registerRoomTool(pi: ExtensionAPI): void {
         }
 
         case "read": {
-          viewerFor(store, agentId);
+          const viewer = viewerFor(store, agentId);
           const cursor = cursorFor(store, agentId);
           const since = p.since ?? cursor;
           const limit = clamp(p.limit ?? READ_LIMIT_DEFAULT, 1, READ_LIMIT_MAX);
           const pending = store.records.filter((r) => r.seq > since);
-          const records = pending.slice(0, limit);
-          const next = records.length > 0 ? records[records.length - 1]!.seq : since;
+          // K20 — `read` is routed through the same per-turn K/B budget as the injection path.
+          const { injected } = selectT1(store, viewer, pending, { spend: true, limit });
+          const next = injected.length > 0 ? injected[injected.length - 1]!.seq : since;
           bumpCursor(store, agentId, next);
-          const body = records.map(recordLine).join("\n");
+          const body = injected.map(recordLine).join("\n");
+          // The summary must name the resume point — the last delivered seq, not the pre-read
+          // cursor — or the caller would re-read the records it was just shown.
+          const remaining = pending.slice(injected.length);
+          const summary =
+            remaining.length > 0
+              ? moreLine(
+                  remaining.length,
+                  remaining.filter((r) => r.kind === "msg" && r.mention?.includes(agentId)).length,
+                  next,
+                )
+              : null;
           return ok(
-            { ok: true, op: "read", records, cursor: next, more: pending.length > records.length },
-            `room read → ${records.length} record(s) since seq ${since}` +
-              (body ? `\n${body}` : ""),
+            {
+              ok: true,
+              op: "read",
+              records: injected,
+              cursor: next,
+              more: remaining.length > 0,
+            },
+            `room read → ${injected.length} record(s) since seq ${since}` +
+              (body ? `\n${body}` : "") +
+              (summary !== null ? `\n${summary}` : ""),
           );
         }
 

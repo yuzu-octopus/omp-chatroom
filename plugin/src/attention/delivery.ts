@@ -7,13 +7,15 @@ import { roomStoreFor } from "../store/room-store";
 import type { RoomRecord } from "../store/schema";
 import type { Tier } from "./tiers";
 
-// §5.3 — verbatim.
+// §5.3 — verbatim, plus `extra` — the optional digest lines (the T2 coalescing digest) that ride
+// the same message, so the digest never needs a timer or a second push channel (§5.2 N/T).
 export async function deliver(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
   target: string,
   record: RoomRecord,
   tier: Tier,
+  extra: readonly string[] = [],
 ): Promise<void> {
   const store = roomStoreFor(ctx);
 
@@ -49,9 +51,10 @@ export async function deliver(
   // ("your claim was revoked"). Only the RESULTING string is escaped.
   const safeBody = escapeForDelivery(roomBodyOf(record));
   const line = renderLine(record, safeBody, tier); // K17 — from · topic · tier badge
+  const content = [line, ...extra].join("\n");
   const payload = {
     customType: cardTypeFor(record),
-    content: line,
+    content,
     display: true,
     details: record,
   };

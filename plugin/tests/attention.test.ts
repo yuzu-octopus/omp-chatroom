@@ -714,3 +714,86 @@ test("a delivery failure never throws out of execute and the record survives", a
   expect(Array.isArray(res.content)).toBe(true);
   expect(h.store.records.some((r) => r.kind === "msg" && r.body === "still durable")).toBe(true);
 });
+
+// --- 11. the T0 ceiling and the T2 digest on the delivery path (F9/F10) ----
+
+test("T0 coalescing: >50 pending T0 interrupts for one recipient become ONE batched interrupt", async () => {
+  const root = tempRoot();
+  const bCalls: Send[] = [];
+  const b = `attn-t0batch-${Date.now()}`;
+  registerSession(b, bCalls);
+  const h = roomHarness(root, "A");
+  // 51 interrupts already pending for B (its cursor never advanced past them).
+  for (let i = 0; i < 51; i++) {
+    h.store.append({ kind: "msg", from: "X", topic: "build", body: `ping ${i}`, mention: [b] });
+  }
+
+  const res = await h.execute({ op: "post", topic: "build", body: "over to you", mention: [b] });
+  expect(res.details).toMatchObject({ ok: true, op: "post" });
+  expect(bCalls.length).toBe(1); // ONE interrupt, never 52
+  expect(bCalls[0]!.options).toMatchObject({ deliverAs: "steer" });
+  const content = String(bCalls[0]!.payload.content);
+  expect(content).toContain("52"); // the count proves nothing was dropped
+  expect(content).toContain('room{op:"read"');
+  // Batching is not a drop: the records stay above B's cursor, so `read` returns them.
+  expect(h.store.cursors.get(b) ?? 0).toBe(0);
+});
+
+test("T2 digest: 20 pending T2 records ride the next T0 delivery as exactly one line", async () => {
+  const root = tempRoot();
+  const bCalls: Send[] = [];
+  const b = `attn-t2ride-${Date.now()}`;
+  registerSession(b, bCalls);
+  const h = roomHarness(root, "A");
+  for (let i = 0; i < 20; i++) {
+    h.store.append({ kind: "msg", from: "X", topic: "chat", body: `noise ${i}` });
+  }
+
+  const res = await h.execute({ op: "post", topic: "build", body: "over to you", mention: [b] });
+  expect(res.details).toMatchObject({ ok: true, op: "post" });
+  expect(bCalls.length).toBe(1);
+  const content = String(bCalls[0]!.payload.content);
+  expect(content).toContain("over to you"); // the T0 itself is still delivered
+  expect(content.match(/room ⟵ 20 new message/g)?.length).toBe(1); // exactly ONE digest line
+});
+
+test("T2 digest: 19 pending T2 records attach no digest line", async () => {
+  const root = tempRoot();
+  const bCalls: Send[] = [];
+  const b = `attn-t2under-${Date.now()}`;
+  registerSession(b, bCalls);
+  const h = roomHarness(root, "A");
+  for (let i = 0; i < 19; i++) {
+    h.store.append({ kind: "msg", from: "X", topic: "chat", body: `noise ${i}` });
+  }
+
+  await h.execute({ op: "post", topic: "build", body: "over to you", mention: [b] });
+  expect(bCalls.length).toBe(1);
+  expect(String(bCalls[0]!.payload.content)).not.toContain("new message");
+});
+
+test("T2 digest: it rides a T1 aside too, not only a T0 steer", async () => {
+  const root = tempRoot();
+  const bCalls: Send[] = [];
+  const b = `attn-t2aside-${Date.now()}`;
+  registerSession(b, bCalls);
+  const h = roomHarness(root, "A");
+  // B follows the topic → the post is T1 for B. Registered directly: a `member` record is T2 and
+  // would add itself to the digest count.
+  h.store.members.set(b, {
+    agentId: b,
+    joinedAtSeq: 0,
+    topics: new Set(["build"]),
+    muted: new Set(),
+    threadRoots: new Set(),
+    heldTopics: new Set(),
+  });
+  for (let i = 0; i < 20; i++) {
+    h.store.append({ kind: "msg", from: "X", topic: "chat", body: `noise ${i}` });
+  }
+
+  await h.execute({ op: "post", topic: "build", body: "status" });
+  expect(bCalls.length).toBe(1);
+  expect(bCalls[0]!.options).toMatchObject({ deliverAs: "aside" });
+  expect(String(bCalls[0]!.payload.content)).toContain("20 new message");
+});

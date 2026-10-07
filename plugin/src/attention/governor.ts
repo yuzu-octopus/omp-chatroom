@@ -108,32 +108,83 @@ export function admitPost(store: RoomStore, agentId: string, now: number): PostV
 
 // --- T1 injection cap (K messages / B tokens per turn) --------------------
 
-/** §5.2 — oldest-first up to K records AND B tokens, then one summary line for the remainder. */
+// §5.2 — K/B are PER TURN, so the ledger lives on the store beside the cursors. `turn_start`
+// (onboarding/hook.ts) resets it; a store created before the first turn starts with a full budget.
+interface TurnBudget {
+  records: number;
+  tokens: number;
+}
+const TURN_BUDGET = new WeakMap<RoomStore, Map<string, TurnBudget>>();
+
+function budgetFor(store: RoomStore, agentId: string): TurnBudget {
+  let byAgent = TURN_BUDGET.get(store);
+  if (byAgent === undefined) {
+    byAgent = new Map();
+    TURN_BUDGET.set(store, byAgent);
+  }
+  let budget = byAgent.get(agentId);
+  if (budget === undefined) {
+    budget = { records: 0, tokens: 0 };
+    byAgent.set(agentId, budget);
+  }
+  return budget;
+}
+
+/** §5.2 — `turn_start` refills the per-turn K/B budget. Never throws. */
+export function resetTurnBudget(store: RoomStore, agentId: string): void {
+  TURN_BUDGET.get(store)?.delete(agentId);
+}
+
+/** §5.2 — the one summary line the push cap and `read` both append for the unshown remainder. */
+export function moreLine(dropped: number, mentions: number, since: number): string {
+  const mentionNote = mentions > 0 ? ` (${mentions} mention you)` : "";
+  return `+${dropped} more room messages${mentionNote} — read with room{op:"read", since:${since}}`;
+}
+
+/**
+ * §5.2 — oldest-first up to K records AND B tokens, then one summary line for the remainder.
+ * `spend` charges this turn's ledger as it admits, so a second pull in the same turn sees what is
+ * left; the push path (already turn-scoped) leaves it unset. `limit` is `read`'s own bound and can
+ * only narrow the result. The first record is always admitted (progress over a stall).
+ */
 export function selectT1(
   store: RoomStore,
   viewer: MemberState,
   pending: readonly RoomRecord[],
+  options: { spend?: boolean; limit?: number } = {},
 ): { injected: RoomRecord[]; summaryLine: string | null } {
+  const budget = options.spend === true ? budgetFor(store, viewer.agentId) : undefined;
+  const maxRecords = Math.min(
+    DEFAULT_CAPS.maxT1PerTurn - (budget?.records ?? 0),
+    options.limit ?? Number.POSITIVE_INFINITY,
+  );
+  const maxTokens = DEFAULT_CAPS.maxT1Tokens - (budget?.tokens ?? 0);
   const injected: RoomRecord[] = [];
   let tokens = 0;
-  for (const record of pending) {
-    if (injected.length >= DEFAULT_CAPS.maxT1PerTurn) break;
-    const cost = estimateTokens(roomBodyOf(record));
-    // Always admit the first record (progress over a stall); a later one must fit the budget.
-    if (injected.length > 0 && tokens + cost > DEFAULT_CAPS.maxT1Tokens) break;
-    injected.push(record);
-    tokens += cost;
+  if (maxRecords > 0) {
+    for (const record of pending) {
+      const cost = estimateTokens(roomBodyOf(record));
+      if (injected.length > 0) {
+        if (injected.length >= maxRecords) break;
+        if (tokens + cost > maxTokens) break;
+      }
+      injected.push(record);
+      tokens += cost;
+    }
+  }
+  if (budget !== undefined && injected.length > 0) {
+    budget.records += injected.length;
+    budget.tokens += tokens;
   }
   const dropped = pending.length - injected.length;
   if (dropped <= 0) return { injected, summaryLine: null };
-  const cursor = store.cursors.get(viewer.agentId) ?? 0;
-  const mentions = pending.filter(
-    (r) => r.kind === "msg" && r.mention?.includes(viewer.agentId),
-  ).length;
-  const mentionNote = mentions > 0 ? ` (${mentions} mention you)` : "";
   return {
     injected,
-    summaryLine: `+${dropped} more room messages${mentionNote} — read with room{op:"read", since:${cursor}}`,
+    summaryLine: moreLine(
+      dropped,
+      pending.filter((r) => r.kind === "msg" && r.mention?.includes(viewer.agentId)).length,
+      store.cursors.get(viewer.agentId) ?? 0,
+    ),
   };
 }
 

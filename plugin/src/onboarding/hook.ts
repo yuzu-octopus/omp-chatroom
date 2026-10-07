@@ -3,6 +3,7 @@ import type {
   BeforeAgentStartEventResult,
   ExtensionAPI,
 } from "@oh-my-pi/pi-coding-agent";
+import { resetTurnBudget } from "../attention/governor";
 import { cursorFor, initCursor, persistOwnCursor } from "../store/cursors";
 import {
   disposeRoomSession,
@@ -55,5 +56,10 @@ export function registerHooks(pi: ExtensionAPI): void {
   // evicts the root (K9). Calling `store.dispose()` here instead would decrement twice.
   pi.on("session_shutdown", (_event, ctx) => {
     disposeRoomSession(ctx);
+  });
+
+  // §5.2 K/B are PER TURN: refill the agent's injection/read budget at the turn boundary.
+  pi.on("turn_start", (_event, ctx) => {
+    resetTurnBudget(roomStoreFor(ctx), ctx.agent.id);
   });
 }
