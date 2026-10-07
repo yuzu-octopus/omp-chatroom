@@ -15,7 +15,7 @@ import {
   unreadCounts,
 } from "../attention/governor";
 import { classify, type Tier } from "../attention/tiers";
-import { buildDigest } from "../onboarding/digest";
+import { buildDigest, DIGEST_CLAIMS_CAP, ROSTER_CAP } from "../onboarding/digest";
 import { safeRoomText } from "../onboarding/escape";
 import { contended, grant, reclaimIfStale, release } from "../store/claims";
 import { resolveRoomConfig } from "../store/config";
@@ -156,6 +156,43 @@ function recordLine(record: RoomRecord): string {
     case "gap":
       return `${head} · gap · ${record.skipped} skipped (${record.reason})`;
   }
+}
+
+/**
+ * The board as MODEL-FACING lines. `details.board` never reaches the model — `coerceToolResult`
+ * (pi-agent-core `agent-loop.ts:540`) keeps only `content` on the wire, so a counts-only content
+ * line makes "who holds this resource" unanswerable. Capped like the join digest (§5.4) so a large
+ * roster cannot blow the reply.
+ */
+function boardLines(board: BoardResult): string[] {
+  const lines: string[] = [];
+  const claims = board.claims.slice(0, DIGEST_CLAIMS_CAP);
+  for (const claim of claims) {
+    const left = Math.max(0, Math.round((claim.expiresAt - Date.now()) / 1000));
+    const waiting = claim.contended > 0 ? ` · ${claim.contended} waiting` : "";
+    lines.push(`claim ${safe(claim.resource)} · ${safe(claim.holder)} · ${left}s left${waiting}`);
+  }
+  if (board.claims.length > claims.length)
+    lines.push(`… +${board.claims.length - claims.length} more claim(s)`);
+
+  const roster = board.roster.slice(0, ROSTER_CAP);
+  for (const member of roster) {
+    const topics = member.topics.length > 0 ? ` · ${member.topics.map(safe).join(", ")}` : "";
+    lines.push(`${safe(member.agentId)} · ${member.status} · lag ${member.lag}${topics}`);
+  }
+  if (board.roster.length > roster.length)
+    lines.push(`… +${board.roster.length - roster.length} more member(s)`);
+
+  for (const topic of board.topics) {
+    lines.push(`topic ${safe(topic.topic)} · ${topic.unread} unread · last seq ${topic.lastSeq}`);
+  }
+  return lines;
+}
+
+/** Append rendered rows to a content line. `read` already renders; the count-only ops did not. */
+function withRows(line: string, rows: readonly string[], more?: string): string {
+  if (rows.length === 0) return line;
+  return [line, ...rows, ...(more !== undefined ? [more] : [])].join("\n");
 }
 
 function buildBoard(store: RoomStore, viewer: MemberState): BoardResult {
@@ -561,7 +598,10 @@ export function registerRoomTool(pi: ExtensionAPI): void {
           const board = buildBoard(store, viewerFor(store, agentId));
           return ok(
             { ok: true, op: "board", board },
-            `room board → ${board.claims.length} claim(s), ${board.roster.length} member(s), ${board.topics.length} topic(s)`,
+            withRows(
+              `room board → ${board.claims.length} claim(s), ${board.roster.length} member(s), ${board.topics.length} topic(s)`,
+              boardLines(board),
+            ),
           );
         }
 
@@ -581,7 +621,15 @@ export function registerRoomTool(pi: ExtensionAPI): void {
             row.lastSeq = record.seq;
             row.unread = counts.get(record.topic) ?? 0;
           }
-          return ok({ ok: true, op: "topics", topics }, `room topics → ${topics.length} topic(s)`);
+          return ok(
+            { ok: true, op: "topics", topics },
+            withRows(
+              `room topics → ${topics.length} topic(s)`,
+              topics.map(
+                (t) => `topic ${safe(t.topic)} · ${t.unread} unread · last seq ${t.lastSeq}`,
+              ),
+            ),
+          );
         }
 
         case "mute": {
@@ -617,7 +665,16 @@ export function registerRoomTool(pi: ExtensionAPI): void {
             const summary = raw ? undefined : (tree.getNode(lo, hi) ?? undefined);
             return { lo, hi, size, raw, ...(summary !== undefined ? { summary } : {}) };
           });
-          return ok({ ok: true, op: "tree", blocks }, `room tree → ${blocks.length} block(s)`);
+          return ok(
+            { ok: true, op: "tree", blocks },
+            withRows(
+              `room tree → ${blocks.length} block(s)`,
+              blocks.map(
+                (b) =>
+                  `[${b.lo},${b.hi}) size ${b.size} ${b.raw ? "raw" : "summary"}${b.summary !== undefined ? ` · "${safe(b.summary)}"` : ""}`,
+              ),
+            ),
+          );
         }
 
         case "zoom": {
@@ -634,7 +691,10 @@ export function registerRoomTool(pi: ExtensionAPI): void {
           });
           return ok(
             { ok: true, op: "zoom", children },
-            `room zoom → ${children.length} child(ren)`,
+            withRows(
+              `room zoom → ${children.length} child(ren)`,
+              children.map((c) => `[${c.lo},${c.hi}) size ${c.size} ${c.raw ? "raw" : "summary"} · ${safe(c.text)}`),
+            ),
           );
         }
 
@@ -658,7 +718,10 @@ export function registerRoomTool(pi: ExtensionAPI): void {
           }
           return ok(
             { ok: true, op: "recall", matches },
-            `room recall → ${matches.length} match(es)`,
+            withRows(
+              `room recall → ${matches.length} match(es)`,
+              matches.map((m) => recordLine(m.record)),
+            ),
           );
         }
       }

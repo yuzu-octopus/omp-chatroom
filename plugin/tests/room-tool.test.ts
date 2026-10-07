@@ -5,6 +5,7 @@ import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { AgentRegistry, type ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { DEFAULT_CAPS, resetTurnBudget } from "../src/attention/governor";
+import { DIGEST_CLAIMS_CAP } from "../src/onboarding/digest";
 import {
   contended,
   dequeueWaiter,
@@ -746,4 +747,49 @@ test("read: the budget is per turn — a repeat read is throttled and the turn b
   resetTurnBudget(store, "AgentA"); // the turn_start hook
   const third = await invokeRoom(ctx, { op: "read", limit: 200 });
   expect(((third.details?.records ?? []) as unknown[]).length).toBeGreaterThan(0);
+});
+
+// --- K1 content contract: what the MODEL sees ---
+// `details` never reaches the model — pi-agent-core's `coerceToolResult` (agent-loop.ts:540) keeps
+// only `content` on the wire. So an op whose content is a bare count is unanswerable to a model.
+// These tests assert on `content`, which no earlier test did — the gap that hid the board defect.
+
+test("board content names the holder, not just the count", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "room-tool-"));
+  const ctx = fakeCtx(root, "AgentA");
+  await invokeRoom(ctx, { op: "join" });
+  await invokeRoom(ctx, { op: "claim", topic: "build", key: "parser", ttl: 300_000 });
+
+  const res = await invokeRoom(ctx, { op: "board" });
+  const text = res.content[0]?.text ?? "";
+  expect(text).toContain("build/parser"); // the resource
+  expect(text).toContain("AgentA"); // the holder
+  expect(text).toContain("left"); // the remaining TTL
+  expect(text).not.toBe("room board → 1 claim(s), 1 member(s), 0 topic(s)");
+});
+
+test("board content stays capped on a large roster (no context blowout)", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "room-tool-"));
+  const ctx = fakeCtx(root, "AgentA");
+  await invokeRoom(ctx, { op: "join" });
+  for (let i = 0; i < 60; i++) {
+    await invokeRoom(ctx, { op: "claim", topic: "bulk", key: `k${i}`, ttl: 300_000 });
+  }
+  const text = (await invokeRoom(ctx, { op: "board" })).content[0]?.text ?? "";
+  const rows = text.split("\n").filter((l) => l.startsWith("claim "));
+  expect(rows.length).toBe(DIGEST_CLAIMS_CAP); // §5.4 cap
+  expect(text).toContain("more claim(s)"); // the remainder is disclosed, not hidden
+});
+
+test("topics/recall content carries the rows, not a count", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "room-tool-"));
+  const ctx = fakeCtx(root, "AgentA");
+  await invokeRoom(ctx, { op: "join" });
+  await invokeRoom(ctx, { op: "post", topic: "alpha", body: "needle in here" });
+
+  const topics = (await invokeRoom(ctx, { op: "topics" })).content[0]?.text ?? "";
+  expect(topics).toContain("alpha");
+
+  const recall = (await invokeRoom(ctx, { op: "recall", pattern: "needle" })).content[0]?.text ?? "";
+  expect(recall).toContain("needle in here");
 });
