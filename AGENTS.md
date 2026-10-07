@@ -170,6 +170,29 @@ mechanisms and their fallbacks.
 - **What must not be tested away**: invariants I1–I6, the "no agent blocked on compaction" rule,
   and the "tree is rebuildable from the log" property.
 
+### Probes (run the host, don't just read it)
+
+`probes/*.mjs` execute the plan's load-bearing assumptions against the installed host. See
+`docs/research/omp-agent-chatroom/PROBES.md` for results and the full recipe.
+
+**Environment gotcha that costs ~20 minutes every time:** the native loader resolves
+`pi_natives.*.node` relative to the module's own directory. When the package is reached through
+Bun's cache the path becomes `~/.bun/install/cache/@oh-my-pi/pi-natives@<v>@@@1/native/`, and that
+directory ships **without** the `.node` files. A bare symlink to the global install therefore fails
+with `Failed to load pi_natives native addon`. Fix:
+
+```sh
+mkdir -p /tmp/roomprobe && cd /tmp/roomprobe
+cp -r ~/.bun/install/global/node_modules/@oh-my-pi node_modules/@oh-my-pi
+cp ~/.bun/install/global/node_modules/@oh-my-pi/pi-natives-linux-x64/*.node \
+   node_modules/@oh-my-pi/pi-natives/native/
+bun probes/probe2.mjs
+```
+
+**Probe limit worth remembering:** the K1 result-shape coercion lives in the **agent loop**
+(`coerceToolResult`), not at the `execute()` boundary. A probe that calls `execute()` directly
+cannot observe it — the raw object comes back unchanged. Assert on a real agent turn instead.
+
 ## Open Questions
 
 Do not present these as settled. They are flagged as unmeasured in the corpus:

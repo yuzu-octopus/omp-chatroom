@@ -2349,7 +2349,9 @@ test("room: claim → wait_for_claim → durable log", async () => {
   const winner = await Promise.race([waitP, Bun.sleep(1000).then(() => "TIMEOUT")]);
   expect(winner).not.toBe("TIMEOUT");                          // cross-session notification, no polling
   expect(winner.details).toMatchObject({ ok: true, outcome: "event", acquired: true, claim: { holder: "AgentB" } });
-  expect(Array.isArray(winner.content)).toBe(true);            // K1 — host-valid shape
+  // K1 — a direct execute() return proves only the PLUGIN's shape. The host's coercion runs in the
+  // agent loop, so this assertion is a smoke check, not proof. See PROBES.md P3 and §11.2.
+  expect(Array.isArray(winner.content)).toBe(true);            // smoke: plugin returned content[]
 
   // First-writer-wins: A's re-claim loses (B now holds it)
   const second = await roomA.execute("c-claim2", { op: "claim", topic: "build", key: "step", ttl: 300000 }, undefined, undefined);
@@ -2382,7 +2384,7 @@ test("room: claim → wait_for_claim → durable log", async () => {
 |---|---|
 | B's `wait_for_claim` is still pending before A releases | the wait actually blocks (no busy-poll) |
 | It resolves with `details:{outcome:"event", acquired:true, claim:{holder:"AgentB"}}` after A's release | cross-session notification + auto-grant of the lease |
-| Every result carries a `content` array (K1) | the host does not coerce the result to `isError:true` |
+| A **real agent turn**'s tool result is not `isError` (K1) | the host accepted the shape — the coercion lives in the agent loop (`coerceToolResult`), **not** at the `execute()` boundary, so asserting on a direct `execute()` return proves only what the plugin returned, not what the host accepted. Probe P3 confirmed the raw return carries `content: undefined, isError: undefined` for a bad shape. |
 | The JSONL contains the `claim` line | the O_APPEND append pattern works and is durable |
 | A second `claim` from A returns `details:{ok:false, holder:"AgentB"}` | first-writer-wins |
 | The same file resolved from both roots via `logPathFor(root, resolveRoomId(root))` is identical, and `roomIdFor(rootA) === roomIdFor(rootB)` | subagents share the parent's `local://` root; the room id is **root-stable** (X1) and the filename convention is single (K14) |
