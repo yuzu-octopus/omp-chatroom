@@ -81,10 +81,10 @@ test("wait_for_claim blocks, then resolves {outcome:'event', acquired:true, clai
 		const claim = await roomA.execute("c-claim", { op: "claim", topic: "build", key: "step", ttl: 300_000 });
 		expect(claim.details).toMatchObject({ ok: true, op: "claim", holder: "AgentA" });
 
-		// The wait is pending the moment `execute` returns; one microtask turn is
-		// enough to prove it did not settle early — no guessed duration.
+		// One microtask proves only that it did not settle synchronously; a broken implementation
+		// that resolves on the next macrotask would pass. Give it a bounded settle window instead.
 		const waitP = waitB.execute("c-wait", { resource: "build/step", ttl: 300_000, timeout: 5_000 });
-		const settledEarly = await Promise.race([waitP.then(() => true), Promise.resolve(false)]);
+		const settledEarly = await Promise.race([waitP.then(() => true), Bun.sleep(50).then(() => false)]);
 		expect(settledEarly).toBe(false);
 
 		await roomA.execute("c-release", { op: "release", topic: "build", key: "step" });

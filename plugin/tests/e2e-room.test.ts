@@ -91,7 +91,9 @@ test("room: claim → wait_for_claim → durable log (§11.1)", async () => {
 
 		// B waits for the claim to be released — still blocked.
 		const waitP = waitClaimB.execute("c-wait", { resource: "build/step", ttl: 300_000, timeout: 5_000 });
-		const settledEarly = await Promise.race([waitP.then(() => true), Promise.resolve(false)]);
+		// One microtask proves only that it did not settle synchronously; a broken implementation
+		// that resolves on the next macrotask would pass. Give it a bounded settle window instead.
+		const settledEarly = await Promise.race([waitP.then(() => true), Bun.sleep(50).then(() => false)]);
 		expect(settledEarly).toBe(false); // still blocked — no polling
 
 		// A releases → B's waiter is resolved AND granted the lease.
@@ -317,9 +319,12 @@ test("the same file read from B's root options is identical (subagents share the
 	}
 });
 
-test("a claimed resource past its TTL is swept by the 5 s job and appends release{reason:'expired'} (K3)", async () => {
-	// Integration test against the real `ctx.setInterval` sweep — a fake clock
-	// cannot advance the session-owned timer, so this one waits on the real job.
+test("the real 5 s sweep job expires a stale claim (K3 integration)", async () => {
+	// INTEGRATION EXCEPTION to ts-no-test-timers, deliberately: the thing under test IS the
+	// session-owned `ctx.setInterval` job, and a fake clock cannot advance a timer the host owns
+	// (`vi.advanceTimersByTime` does not reach it). The DETERMINISTIC proof of the sweep logic is in
+	// tests/room-tool.test.ts, which calls `expireStale(store, now)` with an injected clock; this
+	// test only proves the job is wired and fires. It is the suite's one wall-clock dependency.
 	const root = freshRoot();
 	const bus = new EventBus();
 	const registry = new AgentRegistry();
@@ -333,6 +338,7 @@ test("a claimed resource past its TTL is swept by the 5 s job and appends releas
 			await Bun.sleep(250);
 			expired = readLog(root).find((l) => l.kind === "release" && l.reason === "expired");
 		}
+		expect(expired, "the sweep job should have expired the claim within 12 s").toBeDefined();
 		expect(expired).toMatchObject({ reason: "expired", prevHolder: "AgentA", resource: "ttl/x" });
 	} finally {
 		await a.dispose();
