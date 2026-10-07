@@ -390,7 +390,9 @@ export function appendLine(fd: number, line: string): void {        // line MUST
 export function readSince(fd: number, seq: number, limit: number): RoomRecord[] {
   throw new Error("not implemented");
 }
-export function replay(fd: number): { records: RoomRecord[]; skipped: number };   // §3.3
+export function replay(fd: number): { records: RoomRecord[]; skipped: number } {   // §3.3
+  throw new Error("not implemented");
+}
 export function closeRoomLog(root: string, roomId: string): void {  // K8 — last live session only
   throw new Error("not implemented");
 }
@@ -479,7 +481,9 @@ export function contended(store: RoomStore, resource: string): string[] {
 
 // K3/K12 — the TIMER path (nobody waiting): drop the stale claim, no successor.
 // Distinct from reclaimIfStale, the CONTENDED path (replace + notify the previous holder).
-export function expireStale(store: RoomStore, now: number): Array<{ resource: string; prev: string; next?: string }>;
+export function expireStale(store: RoomStore, now: number): Array<{ resource: string; prev: string; next?: string }> {
+  throw new Error("not implemented");
+}
 
 // §3.4 "claim state is rebuilt by replaying the log on first open"
 export function hydrateClaims(store: RoomStore, records: readonly RoomRecord[]): void {
@@ -583,8 +587,12 @@ export const RAW_TAIL_R = 50;           // §5.2 (matches §3.5 join cursor)
 export function openTreeStore(treePath: string): TreeStore {
   throw new Error("not implemented");
 }
-export function zoom(tree: TreeStore, lo: number, hi: number): Array<{ lo: number; hi: number; size: number; raw: boolean; text: string }>;  // §4.1
-export function validateZoomRange(lo: number, hi: number, n: number): { ok: true } | { ok: false; error: string };  // §4.1
+export function zoom(tree: TreeStore, lo: number, hi: number): Array<{ lo: number; hi: number; size: number; raw: boolean; text: string }> {  // §4.1
+  throw new Error("not implemented");
+}
+export function validateZoomRange(lo: number, hi: number, n: number): { ok: true } | { ok: false; error: string } {  // §4.1
+  throw new Error("not implemented");
+}
 ```
 
 **Imports.** none (leaf; `treePath` is a plain string).
@@ -903,7 +911,9 @@ export function admitPost(store: RoomStore, agentId: string, now: number): PostV
   throw new Error("not implemented");
 }
 export function selectT1(store: RoomStore, viewer: MemberState, pending: readonly RoomRecord[]):
-  { injected: RoomRecord[]; summaryLine: string | null };                       // §5.2 K/B caps
+  { injected: RoomRecord[]; summaryLine: string | null } {                      // §5.2 K/B caps
+  throw new Error("not implemented");
+}
 export function coalescePending(store: RoomStore, viewer: MemberState, now: number): string | null {  // §5.2 N/T
   throw new Error("not implemented");
 }
@@ -928,7 +938,9 @@ export function unreadCounts(store: RoomStore, viewer: MemberState): Map<string,
 export function noteGap(store: RoomStore, skipped: number, reason: "retention" | "invalid" | "corrupt"): RoomRecord {  // [invented]
   throw new Error("not implemented");
 }
-export function truncateOversized(body: string, tokenBudget: number): { head: string; handle: string };  // §5.2 N7
+export function truncateOversized(body: string, tokenBudget: number): { head: string; handle: string } {  // §5.2 N7
+  throw new Error("not implemented");
+}
 ```
 
 **Imports.**
@@ -1536,7 +1548,9 @@ export const PANEL_KEY_MAP: Readonly<Record<string, PanelAction>> = {
 export function actionFor(
   data: string,
   state: { splitMode: "split" | "narrow"; editorEmpty: boolean; filterOpen: boolean },
-): PanelAction | null;                                     // [invented]
+): PanelAction | null {                                    // [invented]
+  throw new Error("not implemented");
+}
 ```
 
 **Imports.** none.

@@ -1,70 +1,68 @@
-# Round 4 — scaffold typecheck: final verified state
+# Round 4 — scaffold typecheck: FINAL
 
-Date 2026-10-07. Orchestrator-verified, reproducible.
+Date 2026-10-07. Orchestrator-verified, reproducible, **non-vacuous**.
 
-## Result
-
-`SCAFFOLD.md` extracted to a real tree and typechecked with `tsc` (typescript 7.0.2) against the
-installed omp **18.7.0** host types.
+## Result: the scaffold now typechecks clean
 
 | State | Errors |
 |---|---|
-| Round-4 scaffold **before** the fix pass | 28 |
-| Round-4 scaffold **after** the fix pass | **7** |
+| Round-4 scaffold, before the fix pass | 28 |
+| After the fix pass | 7 |
+| **After fixing the 7 (trailing-comment pattern)** | **0** |
 
-Sanity: `tsc --listFiles` reports 36 repo files in the program; a deliberately injected
-`export const bad: number = "string"` produces exactly 1 error, so a clean count is meaningful.
+**Non-vacuity proof** (I was burned by a vacuous 0 earlier — an empty tree also reports 0):
 
-## The 7 remaining errors — all one defect class
+| Check | Result |
+|---|---|
+| `tsc --listFiles` repo files | **36** |
+| Total TypeScript bytes extracted | **57,298** |
+| Files under 1 KB (i.e. empty) | **0** |
+| Deliberately injected `export const probe: number = "str"` | **1 error** (detected) |
 
-```
-src/attention/governor.ts(24,17)  TS2389: Function implementation name must be 'selectT1'
-src/attention/governor.ts(48,17)  TS2391: Function implementation is missing
-src/panel/keys.ts(12,17)          TS2391: Function implementation is missing
-src/store/claims.ts(36,17)        TS2389: Function implementation name must be 'expireStale'
-src/store/log.ts(15,17)           TS2389: Function implementation name must be 'replay'
-src/store/tree-store.ts(18,17)    TS2391: Function implementation is missing
-src/store/tree-store.ts(19,17)    TS2391: Function implementation is missing
-```
+So a clean run is meaningful: the compiler read 36 real files and would have reported a defect.
 
-**Root cause — one pattern, seven times.** A declaration-only signature ends with `};` **followed
-by a trailing comment**, e.g. `SCAFFOLD.md` §9:
+## The 7 fixes — one pattern
+
+Every remaining error was a declaration-only signature whose terminating `;` was followed by a
+**trailing comment**, so an inserted `{ throw … }` landed after the comment:
 
 ```ts
+// before
 export function replay(fd: number): { records: RoomRecord[]; skipped: number };   // §3.3
-export function closeRoomLog(root: string, roomId: string): void {  // K8 — last live session only
+// after
+export function replay(fd: number): { records: RoomRecord[]; skipped: number } {   // §3.3
+  throw new Error("not implemented");
+}
 ```
 
-The body-stub pass inserts `{ throw … }` at the terminating `;`, which lands **after** the
-trailing comment, so the brace opens inside the comment. The fix is mechanical: put the body
-before the comment, or move the comment above the signature.
+Fixed at all 7 sites: `replay`, `expireStale`, `zoom`, `validateZoomRange`, `selectT1`,
+`truncateOversized`, `actionFor`.
 
-**These 7 are real scaffold defects, not tooling artefacts** — the surrounding code is valid
-TypeScript (verified: the 28 pre-existing errors were fixed with proper bodies; no stubbing is
-applied in the final run).
+## Reproduce
 
-## What was fixed in this pass (28 → 7)
+```sh
+# 1. extract: split SCAFFOLD.md on '^## N. `path`', take fenced blocks whose language matches
+#    the path extension, order .ts blocks imports-first, write to path
+# 2. link host types
+ln -sfn ~/.bun/install/global/node_modules/@oh-my-pi node_modules/@oh-my-pi
+bun add -d @types/bun
+# 3. typecheck
+bunx --bun tsc --noEmit -p tsconfig.json
+```
 
-| Group | Fix |
-|---|---|
-| `src/index.ts` (5) | duplicate `ExtensionAPI` import removed; `__roomTest` initialised; the two module-scope `pi.registerFlag` calls moved into the factory |
-| `src/attention/governor.ts` (5) | `MemberState` import added |
-| `src/panel/panel.ts` (4) | constructor + method bodies |
-| 14 `export const X: T;` | given real literal initialisers |
-| `src/store/compactor.ts` (1) | declaration/implementation name unified on `withWriteMutex` |
-| X1 | `roomIdFor(root)` — root-stable (sha256), with the why-not-session-id note |
-| X6 | host relabelled 18.6.1 → **18.7.0**; `engines` + `peerDependencies` pin added |
-| M11 | `prevHolder: string` added to the `release` record |
-| D3 | `src/version.ts` + `tests/drift.test.ts` added |
+## Why this matters
 
-## Tooling note (mine, worth recording)
+This is the check that no review lens could perform. Rounds 1-4 read prose; the compiler read
+code and found 28 defects — including a duplicated import and two calls to an out-of-scope `pi`
+that every lens had walked past. The scaffold is now a **valid compile target**, which is the
+precondition for starting P0.
 
-Writing the body-stub pass cost several iterations because the naive regex matched **nested** `;`
-inside return types (`{ records: RoomRecord[]; skipped: number }`) and inside multi-line
-signatures. A brace/paren-depth-aware scan is required. Recorded so the next pass does not repeat
-it. The final run applies **no** stubbing — the 7 errors are what the file actually produces.
+## Note on the extraction tooling
 
-## Verdict
+Two bugs in my extractor cost real time and are recorded so they are not repeated:
+- `os.path.splitext(p)[1]` returns `".ts"` **with the dot**; a `{'ts': …}` map yields `None`,
+  silently falling back to one block and dropping the import block.
+- `open(p,'w').write(stub(open(p).read()))` **truncates before reading** → 0-byte files.
 
-The scaffold went from **not compiling at all** (28 errors) to **7 mechanical defects**. It is
-close to a valid compile target and the remaining fix is one pattern applied seven times.
+A naive regex body-stub also corrupts nested `;` inside return types
+(`{ records: RoomRecord[]; skipped: number }`); a paren/brace-depth-aware scan is required.
