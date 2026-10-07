@@ -4,6 +4,16 @@ Date: 2026-10-06 · Target host: omp **18.7.0** (`@oh-my-pi/pi-coding-agent` 18.
 `@oh-my-pi/pi-tui` 18.7.0, `@oh-my-pi/pi-ai` 18.7.0) — pinned in §2.2 `engines`/`peerDependencies`.
 The label was corrected in round 4 (`review4/D2-host-integration.md`): every cited line still resolves
 against 18.7.0 with a consistent +5..+10 drift, so the evidence holds and only the label was wrong.
+
+> **Addendum 2026-10-07 — host moved to 18.8.0.** The build was pinned to 18.7.0 above; the
+> installed omp is now **18.8.0**, so the plugin's `engines`/`peerDependencies`, `HOST_VERSION_PIN`,
+> and `tests/drift.test.ts` were all moved to 18.8.0 (commit `7e82134`). Every deep specifier was
+> re-verified against 18.8.0: all ten resolve, and the two `.d.ts` deltas from 18.7.0 are additive
+> (`ToolFigure` in `pi-tui/tools/renderer`, `isTranscriptBlockPending` in
+> `pi-tui/chat/tool-execution`). The 18.7.0 citations below remain valid as *line-number* evidence
+> with the usual small drift. This is exactly the R34 failure mode: the pin and the drift test were
+> correct in form but pointed at the wrong host, so the guard passed while the plugin loaded into a
+> host it had never been tested against.
 Evidence base: `findings/F15..F19` (round 3) + `REPORT-v2-hybrid.md` (round 2) + `REPORT.md` (round 1)
 + `review4/` lens reports D1–D8 (round 4).
 Every non-obvious claim carries a source tag: `[F15]`…`[F19]`, `[R2]`, `[F0]`, `[F1]`…, `[D5]`, `[D6]`,
