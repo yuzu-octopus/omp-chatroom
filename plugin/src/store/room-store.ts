@@ -57,10 +57,16 @@ const STORES: Map<string, RoomStore> = ((globalThis as unknown as {
   __roomStores?: Map<string, RoomStore>;
 }).__roomStores ??= new Map<string, RoomStore>());
 
-// One live-session ref per `storeFor` call; the last `dispose()` closes the fd and evicts the root.
+// One ref per live session, not per call: `storeFor` bumps the root's refcount, `dispose()` drops
+// it. `roomStoreFor` is called per operation, so it dedupes on the agent id (one ref per agent) and
+// `disposeRoomSession(ctx)` — the session_shutdown hook — drops exactly that ref. The last ref
+// closes the fd and evicts the root (K9).
 const REFS: Map<string, number> = ((globalThis as unknown as {
   __roomStoreRefs?: Map<string, number>;
 }).__roomStoreRefs ??= new Map<string, number>());
+const SESSIONS: Map<string, Set<string>> = ((globalThis as unknown as {
+  __roomSessions?: Map<string, Set<string>>;
+}).__roomSessions ??= new Map<string, Set<string>>());
 
 function newMember(agentId: string, joinedAtSeq: number): MemberState {
   return {
@@ -146,7 +152,9 @@ function createStore(root: string, roomId: string): RoomStore {
         REFS.set(root, n);
         return;
       }
-      // Last live session: close the shared fd (K8) and evict the root (K9).
+      // Last live session: stop the background jobs, close the shared fd (K8), evict the root (K9).
+      roomTimers.stop(root);
+      claimSweeper.stop(root);
       closeRoomLog(root, roomId);
       STORES.delete(root);
       REFS.delete(root);
@@ -188,19 +196,47 @@ export function storeFor(root: string, roomId: string): RoomStore {             
   return store;
 }
 
-export function roomStoreFor(ctx: ExtensionContext): RoomStore {                 // [invented] R10
+function rootOf(ctx: ExtensionContext): string {
   const opts: LocalProtocolOptions = ctx.localProtocolOptions ?? {
     getArtifactsDir: () => ctx.sessionManager.getArtifactsDir(),
     getSessionId: () => ctx.sessionManager.getSessionId(),
   };
-  const root = resolveLocalRoot(opts);
-  return storeFor(root, resolveRoomId(root));
+  return resolveLocalRoot(opts);
+}
+
+export function roomStoreFor(ctx: ExtensionContext): RoomStore {                 // [invented] R10
+  const root = rootOf(ctx);
+  const agentId = ctx.agent.id;
+  const live = SESSIONS.get(root);
+  // One ref per session: a repeat call from the same agent must not bump the refcount again.
+  if (live?.has(agentId) && STORES.has(root)) return STORES.get(root)!;
+  const store = storeFor(root, resolveRoomId(root));
+  (live ?? (SESSIONS.set(root, new Set()), SESSIONS.get(root)!)).add(agentId);
+  // R11/R28 — the three background jobs (claim sweep, pruning, compactor) MUST run from the main
+  // session only: a tick scheduled on a subagent dies when that subagent's session_shutdown clears
+  // its timers. `roomTimers.start` is idempotent per root.
+  if (ctx.agent.kind === "main") roomTimers.start(root, ctx);
+  return store;
+}
+
+/** session_shutdown — drop this session's single ref; the last one closes the fd and evicts (K9). */
+export function disposeRoomSession(ctx: ExtensionContext): void {
+  const root = rootOf(ctx);
+  const set = SESSIONS.get(root);
+  if (set === undefined || !set.delete(ctx.agent.id)) return;
+  if (set.size === 0) SESSIONS.delete(root);
+  STORES.get(root)?.dispose();
 }
 
 export function resetRoomStores(): void {                                        // [invented] __roomTest
-  for (const [root, store] of STORES) closeRoomLog(root, store.roomId);
+  for (const [root, store] of STORES) {
+    roomTimers.stop(root);
+    claimSweeper.stop(root);
+    closeRoomLog(root, store.roomId);
+  }
   STORES.clear();
   REFS.clear();
+  SESSIONS.clear();
 }
 
 // §3.6 S5 pruning job — in-memory records array ONLY; the JSONL file is never truncated (K19).

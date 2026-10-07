@@ -22,18 +22,15 @@ interface ToolCall {
 	execute(
 		toolCallId: string,
 		params: Record<string, unknown>,
-		signal?: AbortSignal,
-		onUpdate?: unknown,
 	): Promise<ToolResultEnvelope>;
 }
 
-// K14 — the harness derives the path from the same helpers the store uses.
 // X1 — ROOT-STABLE: the id comes from the resolved root (shared by the parent and every subagent),
-// never from a session id (`task/executor.ts:4181,4186`).
-const ROOM_ID = (root: string): string => roomIdFor(root);
-const logPath = (root: string): string => logPathFor(root, ROOM_ID(root));
-
-/** §11.1 — REAL sessions in one process, sharing the parent `local://` root (PROBES.md P1). */
+// never from a session id (`task/executor.ts:4181,4186`). `resolveLocalRoot` appends "local".
+const LOCAL_ROOT = (root: string): string =>
+	resolveLocalRoot({ getArtifactsDir: () => root, getSessionId: () => "harness" });
+const ROOM_ID = (root: string): string => roomIdFor(LOCAL_ROOT(root));
+const logPath = (root: string): string => logPathFor(LOCAL_ROOT(root), ROOM_ID(root));
 async function newSession(bus: EventBus, registry: AgentRegistry, root: string, id: string) {
 	const { session } = await createAgentSession({
 		eventBus: bus,
@@ -230,8 +227,13 @@ test("a second claim from A returns details:{ok:false, holder:'AgentB'} (first-w
 	const a = await newSession(bus, registry, root, "AgentA");
 	const b = await newSession(bus, registry, root, "AgentB");
 	try {
+		// §11.1's sequence: A claims, A releases, B's waiter takes the lease, then A's re-claim loses.
 		await toolOf(a, "room").execute("c-claim", { op: "claim", topic: "build", key: "step", ttl: 300_000 });
-		await toolOf(b, "room").execute("c-claim", { op: "claim", topic: "build", key: "step", ttl: 300_000 });
+		const waitP = toolOf(b, "wait_for_claim").execute("c-wait", { resource: "build/step", timeout: 5_000 });
+		await toolOf(a, "room").execute("c-release", { op: "release", topic: "build", key: "step" });
+		const winner = await Promise.race([waitP, Bun.sleep(2_000).then(() => null)]);
+		expect(winner!.details).toMatchObject({ ok: true, acquired: true, claim: { holder: "AgentB" } });
+
 		const second = await toolOf(a, "room").execute("c-claim2", {
 			op: "claim",
 			topic: "build",
@@ -308,7 +310,7 @@ test("the same file read from B's root options is identical (subagents share the
 		expect(boardB.details?.ok).toBe(true);
 		const board = boardB.details?.board as { claims: Array<{ resource: string; holder: string }> };
 		expect(board.claims.find((c) => c.resource === "shared/res")).toMatchObject({ holder: "AgentA" });
-		expect(logPath(root)).toBe(logPathFor(root, resolveRoomId(root)));
+		expect(logPath(root)).toBe(logPathFor(LOCAL_ROOT(root), resolveRoomId(LOCAL_ROOT(root))));
 	} finally {
 		await a.dispose();
 		await b.dispose();

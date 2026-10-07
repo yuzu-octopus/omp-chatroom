@@ -168,10 +168,15 @@ export function registerRoomTool(pi: ExtensionAPI): void {     // §2.1.1
     approval: "read",
     strict: true,
     async execute(_toolCallId, p, _signal, _onUpdate, ctx): Promise<RoomToolResult> {
-      const store = roomStoreFor(ctx);
+      // U6 — a missing/unwritable/corrupt room file returns a normal result, never a throw.
+      let store: RoomStore;
+      try {
+        store = roomStoreFor(ctx);
+      } catch (error) {
+        return fail(error instanceof Error ? error.message : "room file corrupt");
+      }
       const agentId = ctx.agent.id;
       const config = resolveRoomConfig(pi, store.root);
-
       switch (p.op) {
         case "join": {
           const viewer = viewerFor(store, agentId);

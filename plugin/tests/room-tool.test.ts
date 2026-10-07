@@ -2,8 +2,10 @@ import { test, expect, afterEach } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { AgentRegistry } from "@oh-my-pi/pi-coding-agent";
-import { storeFor, resetRoomStores, type RoomStore } from "../src/store/room-store";
+import { AgentRegistry, type ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import {
+  storeFor, resetRoomStores, roomStoreFor, disposeRoomSession, type RoomStore,
+} from "../src/store/room-store";
 import {
   grant, release, reclaimIfStale, expireStale, hydrateClaims, contended,
   enqueueWaiter, dequeueWaiter, requeueWaiter, resolveWaiters,
@@ -293,4 +295,82 @@ test("contended lists the waiters for a resource, oldest first", () => {
   enqueueWaiter(s, "build/step", "B");             // duplicate ignored
   expect(contended(s, "build/step")).toEqual(["B", "C"]);
   expect(contended(s, "other/thing")).toEqual([]);
+});
+
+// --- session refcount + main-only timers (K9, R11/R28) --------------------------
+
+function fakeCtx(root: string, agentId: string, kind: "main" | "sub" = "main",
+                 onInterval?: () => void): ExtensionContext {
+  const opts = { getArtifactsDir: () => root, getSessionId: () => agentId };
+  return {
+    agent: { kind, id: agentId, name: kind, depth: 0 },
+    localProtocolOptions: opts,
+    sessionManager: { ...opts, getEntries: () => [] },
+    setInterval: () => { onInterval?.(); return 0 as unknown as Timer; },
+    clearTimer: () => {},
+  } as unknown as ExtensionContext;
+}
+
+test("roomStoreFor refs once per session; disposeRoomSession evicts on the last", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "room-tool-"));
+  const a = roomStoreFor(fakeCtx(root, "AgentA"));
+  // per-operation calls from the same session must not inflate the refcount
+  expect(roomStoreFor(fakeCtx(root, "AgentA"))).toBe(a);
+  expect(roomStoreFor(fakeCtx(root, "AgentA"))).toBe(a);
+  const b = roomStoreFor(fakeCtx(root, "AgentB"));
+  expect(b).toBe(a);
+
+  disposeRoomSession(fakeCtx(root, "AgentA"));      // one session leaves; B still holds the root
+  expect(roomStoreFor(fakeCtx(root, "AgentB"))).toBe(a);
+
+  disposeRoomSession(fakeCtx(root, "AgentB"));      // last session → fd closed, root evicted
+  expect(roomStoreFor(fakeCtx(root, "AgentC"))).not.toBe(a);
+});
+
+test("background jobs start from the main session only (R11/R28)", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "room-tool-"));
+  let intervals = 0;
+  roomStoreFor(fakeCtx(root, "Sub", "sub", () => { intervals++; }));
+  expect(intervals).toBe(0);                        // a subagent must not own the tick
+  roomStoreFor(fakeCtx(root, "Main", "main", () => { intervals++; }));
+  expect(intervals).toBe(2);                        // prune + claim sweep, from the main session
+});
+
+// --- TDD: refcount leak fix (R10) --------------------------------------------
+
+test("refcount does not leak: 50 roomStoreFor calls + 1 dispose evicts the root", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "room-tool-"));
+  const ctx = fakeCtx(root, "AgentA");
+  const first = roomStoreFor(ctx);
+  for (let i = 0; i < 49; i++) {
+    roomStoreFor(ctx);
+  }
+  // One dispose from the single session must evict the root
+  disposeRoomSession(ctx);
+  // A fresh roomStoreFor must return a new object (root was evicted)
+  expect(roomStoreFor(ctx)).not.toBe(first);
+});
+
+test("distinct agents each hold a ref: two disposes evict, one does not", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "room-tool-"));
+  const a = roomStoreFor(fakeCtx(root, "AgentA"));
+  const b = roomStoreFor(fakeCtx(root, "AgentB"));
+  expect(b).toBe(a);
+
+  // One dispose — B still holds the root (same store, no refcount-inflating probe).
+  disposeRoomSession(fakeCtx(root, "AgentA"));
+  expect(roomStoreFor(fakeCtx(root, "AgentB"))).toBe(a);
+
+  // Second dispose — last ref, root evicted.
+  disposeRoomSession(fakeCtx(root, "AgentB"));
+  expect(roomStoreFor(fakeCtx(root, "AgentB"))).not.toBe(a);
+});
+
+test("idempotent accessor: 50 roomStoreFor calls return the same store object", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "room-tool-"));
+  const ctx = fakeCtx(root, "AgentA");
+  const first = roomStoreFor(ctx);
+  for (let i = 0; i < 49; i++) {
+    expect(roomStoreFor(ctx)).toBe(first);
+  }
 });

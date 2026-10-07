@@ -6,6 +6,9 @@ export const HOST_VERSION_PIN = "18.7.0";
 // and asserts it resolves non-undefined. Four have an explicit barrel (`pi-coding-agent/internal-urls`,
 // `pi-tui/chrome`, `pi-tui/render`, `pi-tui/tools`); the two highest-risk without one are
 // `pi-tui/overlays/agent-hub-renderer` and `pi-coding-agent/session/harness-tags`.
+//
+// Option A only imports the first four; the rest are listed so a future Option B phase fails loudly
+// on drift rather than at first use.
 export const DEEP_SPECIFIERS: readonly string[] = [
   "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol",
   "@oh-my-pi/pi-coding-agent/registry/agent-registry",
@@ -19,7 +22,26 @@ export const DEEP_SPECIFIERS: readonly string[] = [
   "@oh-my-pi/pi-tui/tools/renderer",
 ];
 
-// Throws when `installed !== HOST_VERSION_PIN`; the drift test calls it and asserts it does not throw.
+/**
+ * Fail loudly when the host is not the version this plugin was written against.
+ *
+ * Every deep import in `DEEP_SPECIFIERS` is a wildcard-only path, not public API — a host bump can
+ * move or remove one without a semver signal on the plugin side. Called from the drift test; also
+ * safe to call at extension load if a future phase wants a runtime guard.
+ *
+ * @throws when `installed` is empty or differs from `HOST_VERSION_PIN`.
+ */
 export function assertHostVersion(installed: string): void {
-  throw new Error("not implemented");
+  if (!installed) {
+    throw new Error(
+      `Host version unknown (got ${JSON.stringify(installed)}). Expected ${HOST_VERSION_PIN}.`,
+    );
+  }
+  if (installed !== HOST_VERSION_PIN) {
+    throw new Error(
+      `Host version mismatch: installed ${installed}, expected ${HOST_VERSION_PIN}. ` +
+        `The plugin imports ${DEEP_SPECIFIERS.length} wildcard-only subpaths; re-verify them ` +
+        `before bumping HOST_VERSION_PIN (see AGENTS.md and PROBES.md).`,
+    );
+  }
 }

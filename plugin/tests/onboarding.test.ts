@@ -20,7 +20,7 @@ import {
 } from "../src/onboarding/digest";
 import { buildPromptBlock, registerHooks } from "../src/onboarding/hook";
 import rule from "../src/onboarding/routing-rule.md" with { type: "text" };
-import { resetRoomStores, storeFor, type MemberState, type RoomStore } from "../src/store/room-store";
+import { resetRoomStores, roomStoreFor, storeFor, type MemberState, type RoomStore } from "../src/store/room-store";
 
 // ---------------------------------------------------------------------------------------------
 // Fixtures: a real store on a real temp root (the same root the plugin resolves at runtime).
@@ -164,7 +164,7 @@ test("the routing rule is present in full regardless of digest size", () => {
 // 5. Hook idempotence per agent.
 // ---------------------------------------------------------------------------------------------
 
-function fakePi(): { pi: ExtensionAPI; fire: (event: unknown, ctx: unknown) => Promise<unknown> } {
+function fakePi(): { pi: ExtensionAPI; fire: (event: string, payload: unknown, ctx: unknown) => Promise<unknown> } {
   const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
   const pi = {
     on(event: string, handler: (event: unknown, ctx: unknown) => unknown) {
@@ -178,10 +178,10 @@ function fakePi(): { pi: ExtensionAPI; fire: (event: unknown, ctx: unknown) => P
     },
     registerFlag() {},
   } as unknown as ExtensionAPI;
-  const fire = async (event: unknown, ctx: unknown) => {
+  const fire = async (event: string, payload: unknown, ctx: unknown) => {
     let result: unknown;
-    for (const handler of handlers.get("before_agent_start") ?? []) {
-      result = await handler(event, ctx);
+    for (const handler of handlers.get(event) ?? []) {
+      result = await handler(payload, ctx);
     }
     return result;
   };
@@ -196,6 +196,10 @@ function fakeCtx(agentId: string): ExtensionContext {
       getSessionId: () => "sess-1",
     },
     sessionManager: { getEntries: () => [] },
+    // The real ExtensionContext always provides these; the room jobs start from the main session
+    // (R11/R28), so the double must complete the timer API.
+    setInterval: () => 0 as unknown as Timer,
+    clearTimer: () => {},
   } as unknown as ExtensionContext;
 }
 
@@ -204,7 +208,7 @@ test("the hook is idempotent: two before_agent_start firings for one agent do no
   const { pi, fire } = fakePi();
   registerHooks(pi);
   const ctx = fakeCtx("AgentA");
-  const first = (await fire({ type: "before_agent_start", prompt: "hi", systemPrompt: ["BASE"] }, ctx)) as
+  const first = (await fire("before_agent_start", { type: "before_agent_start", prompt: "hi", systemPrompt: ["BASE"] }, ctx)) as
     | { systemPrompt?: string[] }
     | undefined;
   expect(first?.systemPrompt).toBeDefined();
@@ -216,6 +220,7 @@ test("the hook is idempotent: two before_agent_start firings for one agent do no
   // The host chains the previous result into the next preparation, so the second firing sees the
   // injected block — the duplicate is only prevented if the hook REPLACES it, not appends.
   const second = (await fire(
+    "before_agent_start",
     { type: "before_agent_start", prompt: "again", systemPrompt: first?.systemPrompt ?? [] },
     ctx,
   )) as { systemPrompt?: string[] } | undefined;
@@ -259,4 +264,33 @@ test("the digest advertises the active caps and honours the roster/claim caps", 
   // Claims are capped at the top 10 by remaining TTL: the 5 lowest-TTL claims are dropped first.
   expect(digest).toContain("topic/key-14");
   expect(digest).not.toContain("topic/key-0");
+});
+
+// ---------------------------------------------------------------------------------------------
+// 6. session_shutdown drops this session's store ref (K8/K9) without decrementing twice.
+// ---------------------------------------------------------------------------------------------
+
+test("session_shutdown disposes this session's store ref exactly once", async () => {
+  post(0, "still alive");
+  const { pi, fire } = fakePi();
+  registerHooks(pi);
+  const ctx = fakeCtx("AgentA");
+
+  // The hook's own before_agent_start already registered the session with the store.
+  await fire("before_agent_start", { type: "before_agent_start", prompt: "hi", systemPrompt: [] }, ctx);
+  expect(roomStoreFor(ctx)).toBe(store);   // deduped: one ref, the same store
+
+  await fire("session_shutdown", { type: "session_shutdown" }, ctx);
+  // A second shutdown is idempotent — the agent was already removed from the root's live set, so
+  // this must NOT decrement the refcount again (which is why the hook calls disposeRoomSession).
+  await fire("session_shutdown", { type: "session_shutdown" }, ctx);
+
+  // The store survived the session's shutdown (the test's own fixture still holds a ref) and stays
+  // usable — the handler dropped exactly one ref, not the store.
+  expect(roomStoreFor(ctx)).toBe(store);
+  store.append({ kind: "msg", from: "AgentB", topic: "build", body: "after-shutdown" });
+  // The log is untouched and no error escaped any handler.
+  const log = fs.readFileSync(path.join(root, "room", `${roomIdFor(root)}.jsonl`), "utf8");
+  expect(log).toContain("still alive");
+  expect(log).toContain("after-shutdown");
 });

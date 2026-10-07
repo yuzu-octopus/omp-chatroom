@@ -15,7 +15,7 @@ import {
   type ClaimState,
 } from "../store/claims";
 import { resolveRoomConfig } from "../store/config";
-import { roomStoreFor } from "../store/room-store";
+import { roomStoreFor, type RoomStore } from "../store/room-store";
 import type { RoomRecord } from "../store/schema";
 
 export const WAIT_FOR_CLAIM_NAME = "wait_for_claim";
@@ -37,12 +37,13 @@ export interface WaitForClaimParams {            // SCAFFOLD-DEFINED (derived fr
   maxWaitMs?: number;
 }
 
-// K1 — payload inside `details`.
+// K1 — payload inside `details`. `ok:false` carries the U6 file-state failures; the tool never throws.
 export interface WaitForClaimDetails {
-  ok: true;
+  ok: boolean;
   outcome: WaitOutcome;
   acquired: boolean;
   claim?: ClaimState;
+  error?: string;
 }
 export type WaitForClaimResult = AgentToolResult<WaitForClaimDetails>;
 
@@ -95,7 +96,18 @@ async function waitForClaim(
   params: WaitForClaimParams,
   signal: AbortSignal | undefined,
 ): Promise<WaitForClaimResult> {
-  const store = roomStoreFor(ctx);
+  // U6 — a missing/unwritable/corrupt room file is a normal result, never a throw.
+  let store: RoomStore;
+  try {
+    store = roomStoreFor(ctx);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "room file corrupt";
+    return {
+      content: [{ type: "text", text: `wait_for_claim ${safe(params.resource)} → ${message}` }],
+      details: { ok: false, outcome: "aborted", acquired: false, error: message },
+      isError: true,
+    };
+  }
   const agentId = ctx.agent.id;
   const resource = params.resource;
   const ttlMs = clamp(params.ttl ?? resolveRoomConfig(pi, store.root).claimTtlMs, CLAIM_WAIT_MIN_MS, 86_400_000);
