@@ -693,7 +693,10 @@ export function registerRoomTool(pi: ExtensionAPI): void {
             { ok: true, op: "zoom", children },
             withRows(
               `room zoom → ${children.length} child(ren)`,
-              children.map((c) => `[${c.lo},${c.hi}) size ${c.size} ${c.raw ? "raw" : "summary"} · ${safe(c.text)}`),
+              children.map(
+                (c) =>
+                  `[${c.lo},${c.hi}) size ${c.size} ${c.raw ? "raw" : "summary"} · ${safe(c.text)}`,
+              ),
             ),
           );
         }

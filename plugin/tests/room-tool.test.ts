@@ -790,6 +790,7 @@ test("topics/recall content carries the rows, not a count", async () => {
   const topics = (await invokeRoom(ctx, { op: "topics" })).content[0]?.text ?? "";
   expect(topics).toContain("alpha");
 
-  const recall = (await invokeRoom(ctx, { op: "recall", pattern: "needle" })).content[0]?.text ?? "";
+  const recall =
+    (await invokeRoom(ctx, { op: "recall", pattern: "needle" })).content[0]?.text ?? "";
   expect(recall).toContain("needle in here");
 });
