@@ -14,6 +14,7 @@ import {
 } from "../store/config";
 import { cursorFor, initCursor, lagFor } from "../store/cursors";
 import { roomStoreFor, type RoomStore } from "../store/room-store";
+import { openRoomPanel } from "../panel/panel";
 
 export const ROOM_COMMAND_NAME = "room";
 
@@ -38,7 +39,7 @@ const SUBCOMMAND_HELP: Readonly<Record<RoomSubcommand, string>> = {
   config: "show the resolved config; `config set <key>=<value>` writes it",
 };
 
-const USAGE = `usage: /room <${ROOM_SUBCOMMANDS.join("|")}>`;
+const USAGE = `usage: /room [<${ROOM_SUBCOMMANDS.join("|")}>]`;
 
 // §3.4 — the `room` tool clamps with these bounds; the command must not accept a wider lease.
 const CLAIM_TTL_MIN_MS = 1_000;
@@ -151,9 +152,9 @@ function configLines(pi: ExtensionAPI, store: RoomStore): string[] {
   ];
 }
 
-export function registerRoomCommand(pi: ExtensionAPI): void {      // §6.1 (panel-free: Option A)
+export function registerRoomCommand(pi: ExtensionAPI): void {      // §6.1
   pi.registerCommand(ROOM_COMMAND_NAME, {
-    description: "Run a room subcommand (board, join, claim, release, post, config)",
+    description: "Open the agent chatroom panel, or run a room subcommand",
     getArgumentCompletions: (prefix: string) => roomCompletions(prefix),
     handler: async (args: string, ctx: ExtensionCommandContext): Promise<void> => {
       const raw = args.trim();
@@ -161,8 +162,10 @@ export function registerRoomCommand(pi: ExtensionAPI): void {      // §6.1 (pan
       const sub = (gap < 0 ? raw : raw.slice(0, gap)).toLowerCase();
       const rest = gap < 0 ? "" : raw.slice(gap + 1).trim();
 
+      // §6.1 — bare `/room` opens the panel. `openRoomPanel` degrades (notify / no-op) without a
+      // TUI, so a headless caller never throws; the subcommands below stay unchanged.
       if (sub === "") {
-        report(ctx, pi, USAGE, "warning");
+        await openRoomPanel(pi, ctx);
         return;
       }
       if (!(ROOM_SUBCOMMANDS as readonly string[]).includes(sub)) {

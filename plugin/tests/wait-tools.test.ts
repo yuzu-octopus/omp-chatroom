@@ -197,3 +197,157 @@ test('a room post containing a forged <irc from="parent"> tag is escaped in cont
 		await a.dispose();
 	}
 });
+
+// --- P2: wait_for_agent / wait_for_message (Option B, PLAN §4.2/§4.3) ------
+
+/** The params schema the host validates tool arguments against before execute(). */
+function paramsOf(session: Session, name: string): { safeParse(input: unknown): { success: boolean } } {
+	const t = session.getToolByName(name);
+	if (!t) throw new Error(`tool ${name} not registered`);
+	const params = (t as unknown as { parameters?: { safeParse(input: unknown): { success: boolean } } }).parameters;
+	if (!params?.safeParse) throw new Error(`tool ${name} exposes no safeParse-able params schema`);
+	return params;
+}
+
+test("wait_for_agent requires an explicit `agents` list: omitted/empty is rejected, never a broadcast", async () => {
+	const root = freshRoot();
+	const bus = new EventBus();
+	const registry = new AgentRegistry();
+	const a = await newSession(bus, registry, root, "AgentA");
+	try {
+		// 1. the schema the host validates arguments with rejects an omitted list …
+		const params = paramsOf(a, "wait_for_agent");
+		expect(params.safeParse({}).success).toBe(false);
+		expect(params.safeParse({ timeout: 1_000 }).success).toBe(false);
+		expect(params.safeParse({ agents: [] }).success).toBe(true);
+		expect(params.safeParse({ agents: ["AgentB"] }).success).toBe(true);
+
+		// 2. … and the definition itself refuses to treat a missing list as "any agent".
+		const wait = toolOf(a, "wait_for_agent");
+		for (const bad of [{}, { agents: [] }] as Array<Record<string, unknown>>) {
+			const res = await wait.execute("c-bad", bad);
+			expect(res.details?.ok).toBe(false);
+			expect(String(res.details?.error ?? "")).toContain("agents");
+			expect(Array.isArray(res.content)).toBe(true);
+			expect(res.content.length).toBeGreaterThan(0);
+			// a rejected call must not have waited, and must not report an event
+			expect(res.details?.outcome).not.toBe("event");
+		}
+	} finally {
+		await a.dispose();
+	}
+});
+
+test("wait_for_message has no `irc` source: the enum is room-only and an irc request is rejected", async () => {
+	const root = freshRoot();
+	const bus = new EventBus();
+	const registry = new AgentRegistry();
+	const a = await newSession(bus, registry, root, "AgentA");
+	try {
+		const params = paramsOf(a, "wait_for_message");
+		expect(params.safeParse({ source: "room" }).success).toBe(true);
+		expect(params.safeParse({}).success).toBe(true);
+		expect(params.safeParse({ source: "irc" }).success).toBe(false);
+
+		const wait = toolOf(a, "wait_for_message");
+		const res = await wait.execute("c-irc", { source: "irc", timeout: 1_000 });
+		expect(res.details?.ok).toBe(false);
+		expect(String(res.details?.error ?? "")).toContain("irc");
+		expect(Array.isArray(res.content)).toBe(true);
+		expect(res.details?.outcome).not.toBe("event");
+	} finally {
+		await a.dispose();
+	}
+});
+
+test("wait_for_agent times out normally: {outcome:'timeout'}, useless:true, content array, no throw", async () => {
+	const root = freshRoot();
+	const bus = new EventBus();
+	const registry = new AgentRegistry();
+	const a = await newSession(bus, registry, root, "AgentA");
+	try {
+		// WAIT_MIN_MS is 1000 — the shortest legal bound is a real second, so the tool's own
+		// timer is what fires. "Ghost" never registers, so nothing can satisfy the wait.
+		const res = await toolOf(a, "wait_for_agent").execute("c-agent-to", { agents: ["Ghost"], timeout: 1_000 });
+		expect(res.details).toMatchObject({ ok: true, outcome: "timeout" });
+		expect(res.useless).toBe(true);
+		expect(res.isError).not.toBe(true);
+		expect(Array.isArray(res.content)).toBe(true);
+		expect(res.content[0]?.type).toBe("text");
+		expect(typeof res.content[0]?.text).toBe("string");
+	} finally {
+		await a.dispose();
+	}
+});
+
+test("wait_for_message times out normally: {outcome:'timeout'}, useless:true, content array, no throw", async () => {
+	const root = freshRoot();
+	const bus = new EventBus();
+	const registry = new AgentRegistry();
+	const a = await newSession(bus, registry, root, "AgentA");
+	try {
+		const res = await toolOf(a, "wait_for_message").execute("c-msg-to", { from: "Nobody", timeout: 1_000 });
+		expect(res.details).toMatchObject({ ok: true, outcome: "timeout" });
+		expect(res.useless).toBe(true);
+		expect(res.isError).not.toBe(true);
+		expect(Array.isArray(res.content)).toBe(true);
+		expect(res.content[0]?.type).toBe("text");
+		expect(typeof res.content[0]?.text).toBe("string");
+	} finally {
+		await a.dispose();
+	}
+});
+
+test("wait_for_message resolves on a matching room post and the listener is released in finally", async () => {
+	const root = freshRoot();
+	const bus = new EventBus();
+	const registry = new AgentRegistry();
+	const a = await newSession(bus, registry, root, "AgentA");
+	const b = await newSession(bus, registry, root, "AgentB");
+	try {
+		const wait = toolOf(a, "wait_for_message");
+		const pending = wait.execute("c-msg-event", { from: "AgentB", timeout: 5_000 });
+		// B posts; A's wait must resolve on it (not on a poll).
+		await toolOf(b, "room").execute("c-post", { op: "post", topic: "sync", body: "done with the parser" });
+		const res = await Promise.race([pending, Bun.sleep(2_000).then(() => null)]);
+		expect(res).not.toBeNull();
+		expect(res!.details).toMatchObject({ ok: true, outcome: "event" });
+		expect(res!.useless).not.toBe(true);
+		expect(Array.isArray(res!.content)).toBe(true);
+		// the matched record travels in details
+		const message = res!.details?.message as { from?: string; body?: string } | undefined;
+		expect(message?.from).toBe("AgentB");
+		expect(message?.body).toBe("done with the parser");
+	} finally {
+		await a.dispose();
+		await b.dispose();
+	}
+});
+
+test("both new waits settle on abort and never throw", async () => {
+	const root = freshRoot();
+	const bus = new EventBus();
+	const registry = new AgentRegistry();
+	const a = await newSession(bus, registry, root, "AgentA");
+	try {
+		const ac = new AbortController();
+		const agentP = toolOf(a, "wait_for_agent").execute("c-abort-a", { agents: ["Ghost"], timeout: 30_000 }, ac.signal);
+		ac.abort();
+		const agent = await Promise.race([agentP, Bun.sleep(2_000).then(() => null)]);
+		expect(agent).not.toBeNull();
+		expect(agent!.details?.outcome).toBe("aborted");
+		expect(agent!.useless).toBe(true);
+		expect(Array.isArray(agent!.content)).toBe(true);
+
+		const ac2 = new AbortController();
+		const msgP = toolOf(a, "wait_for_message").execute("c-abort-m", { timeout: 30_000 }, ac2.signal);
+		ac2.abort();
+		const msg = await Promise.race([msgP, Bun.sleep(2_000).then(() => null)]);
+		expect(msg).not.toBeNull();
+		expect(msg!.details?.outcome).toBe("aborted");
+		expect(msg!.useless).toBe(true);
+		expect(Array.isArray(msg!.content)).toBe(true);
+	} finally {
+		await a.dispose();
+	}
+});
