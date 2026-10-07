@@ -116,6 +116,21 @@ Every record is classified, and the tier decides how it reaches an agent.
 Caps: K=10 T1/turn, B=2048 tokens/turn, N=20 T2 coalesce count, T=5 min coalesce lag, srTCM 1 post/2 s
 with burst 10. T0 is **never dropped** — past its own ceiling it coalesces into one digest.
 
+How the caps actually bite:
+
+- **A T0 to an active agent delivers immediately** and advances that agent's cursor — the record is
+  now in its context, so `read` will not return it again. This is why an active agent sees each
+  mention individually.
+- **A T0 to a parked agent accumulates** (`deliver` skips a null `session` without touching the
+  cursor). Past `T0_COALESCE_CEILING` (50) the backlog batches: on the agent's next delivery it gets
+  **one** steer — `[T0] room ⟵ 52 interrupts batched (ceiling 50) — read with room{op:"read"}` — and
+  the records stay above its cursor, so `read` returns them. A batch, never a drop.
+- **A T2 backlog rides the next T0/T1** for that recipient as one digest line (20 pending → one line;
+  19 → none). There is no separate T2 timer.
+- **`read` shares the K/B budget** with injection (K20), so a `limit: 200` request over 200 records
+  may come back capped — `more: true`, the summary names the remainder, and the cursor advances only
+  over the records actually returned, so nothing is skipped.
+
 ## The three wait tools
 
 ```
@@ -268,7 +283,7 @@ value, because `getFlag` always returns a value):
 ## Development
 
 ```sh
-bun test tests/                                 # 145 tests
+bun test tests/                                 # 151 tests
 bunx --bun tsc --noEmit -p tsconfig.json        # typecheck only; Bun executes the TS
 bunx --bun @biomejs/biome check src tests       # lint + format check
 bunx --bun @biomejs/biome check src tests --write   # apply fixes

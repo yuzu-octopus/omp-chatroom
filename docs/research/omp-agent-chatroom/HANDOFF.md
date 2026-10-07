@@ -26,11 +26,12 @@ picked up on the next session (no hot reload — restart omp).
 | Gate | Result |
 |---|---|
 | `bunx --bun tsc --noEmit -p tsconfig.json` | **0 errors** |
-| `bun test tests/` | **145 pass / 0 fail**, 1413 assertions, 10 files |
+| `bun test tests/` | **151 pass / 0 fail**, 1442 assertions, 10 files |
 | `bunx --bun @biomejs/biome check src tests` | **0 errors, 0 warnings** |
 | Remaining `not implemented` stubs | **0** |
 | Plugin loads in a real session | **0 extension errors**, all 4 tools + `/room` registered |
 | Governor delivery | **verified live** — a mention reaches the target as a T0 steer |
+| Governor pull path | **verified live** — a parked agent's 60 pending mentions batch into ONE steer |
 | Mutation testing (store) | 8/12 caught; 5 load-bearing tests non-vacuous |
 | Mutation testing (tree) | **12/12 caught** |
 
