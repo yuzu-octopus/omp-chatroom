@@ -1,10 +1,12 @@
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { resolveLocalRoot, type LocalProtocolOptions }
   from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
-import { logPathFor, roomIdFor, newMessageId } from "../ids";
-import { appendLine, openRoomLog, readSince, replay, closeRoomLog } from "./log";
-import { expireStale, hydrateClaims, resolveWaiters, type ClaimState } from "./claims";
+import { logPathFor, newMessageId } from "../ids";
+import { appendLine, openRoomLog, replay, closeRoomLog } from "./log";
+import { expireStale, hydrateClaims, type ClaimState } from "./claims";
+import { resolveRoomId } from "./config";
 import type { RoomRecord, RoomRecordDraft } from "./schema";
+
 // K11 — MemberState is declared ONCE, here (the store owns it); imported by tiers, governor,
 // digest, chat-pane, delivery.
 export interface MemberState {
@@ -29,6 +31,8 @@ export interface RoomStore {
   claims: Map<string, ClaimState>;
   cursors: Map<string, number>;
   members: Map<string, MemberState>;
+  // [invented] §4.4 — the in-store condition variable for wait_for_claim: resource → FIFO waiter ids.
+  waiters: Map<string, string[]>;
   listeners: Set<(r: RoomRecord) => void>;
   seq: number;
 
@@ -48,15 +52,155 @@ export interface RoomStore {
 
 export interface RoomStoreOptions { root: string; roomId: string }   // [invented]
 
-// K9 — the globalThis-anchored registry, keyed by the absolute root; create-on-first-use. [invented]
+// K9 — the globalThis-anchored registries, keyed by the absolute root; create-on-first-use. [invented]
+const STORES: Map<string, RoomStore> = ((globalThis as unknown as {
+  __roomStores?: Map<string, RoomStore>;
+}).__roomStores ??= new Map<string, RoomStore>());
+
+// One live-session ref per `storeFor` call; the last `dispose()` closes the fd and evicts the root.
+const REFS: Map<string, number> = ((globalThis as unknown as {
+  __roomStoreRefs?: Map<string, number>;
+}).__roomStoreRefs ??= new Map<string, number>());
+
+function newMember(agentId: string, joinedAtSeq: number): MemberState {
+  return {
+    agentId, joinedAtSeq,
+    topics: new Set(), muted: new Set(), threadRoots: new Set(), heldTopics: new Set(),
+  };
+}
+
+// The record projection (K15 "append … projects"): a live `member` record updates the roster map
+// and a `claim`/`release` record updates the claim map. Claim state is projected HERE, before
+// listeners run, so a listener woken by a promotion sees the grant it is reacting to (claims.ts
+// owns the arbiter's rules — TTL/staleness/waiter promotion — not this projection).
+function project(store: RoomStore, record: RoomRecord): void {
+  if (record.kind === "member") {
+    if (record.action === "join") {
+      if (!store.members.has(record.from)) store.members.set(record.from, newMember(record.from, record.seq));
+    } else {
+      store.members.delete(record.from);
+    }
+    return;
+  }
+  if (record.kind === "claim") {
+    store.claims.set(record.resource, {
+      resource: record.resource, holder: record.from, ttlMs: record.ttlMs,
+      acquiredAt: record.ts, seq: record.seq,
+    });
+  } else if (record.kind === "release") {
+    store.claims.delete(record.resource);
+  }
+}
+
+function createStore(root: string, roomId: string): RoomStore {
+  const logPath = logPathFor(root, roomId);
+  const opened = openRoomLog(root, roomId);
+  if (!opened.ok) throw new Error(opened.error);
+  const fd = opened.fd;
+
+  const store: RoomStore = {
+    root,
+    roomId,
+    logPath,
+    treePath: `${root}/room/tree/`,
+    records: [],
+    byId: new Map(),
+    claims: new Map(),
+    cursors: new Map(),
+    members: new Map(),
+    waiters: new Map(),
+    listeners: new Set(),
+    seq: 0,
+
+    append(draft: RoomRecordDraft): RoomRecord {
+      // I1 — synchronous critical section: mint, write, project, notify with no await between.
+      const seq = store.seq + 1;
+      const record = { v: 1, seq, ts: Date.now(), id: newMessageId(), ...draft } as RoomRecord;
+      appendLine(fd, `${JSON.stringify(record)}\n`);
+      store.seq = seq;
+      store.records.push(record);
+      store.byId.set(record.id, record);
+      project(store, record);
+      for (const fn of [...store.listeners]) {
+        try {
+          fn(record);
+        } catch {
+          // listeners must not break the append path
+        }
+      }
+      return record;
+    },
+
+    addListener(fn: (r: RoomRecord) => void): () => void {
+      store.listeners.add(fn);
+      return () => store.listeners.delete(fn);
+    },
+
+    removeListener(fn: (r: RoomRecord) => void): void {
+      store.listeners.delete(fn);
+    },
+
+    dispose(): void {
+      const n = (REFS.get(root) ?? 1) - 1;
+      if (n > 0) {
+        REFS.set(root, n);
+        return;
+      }
+      // Last live session: close the shared fd (K8) and evict the root (K9).
+      closeRoomLog(root, roomId);
+      STORES.delete(root);
+      REFS.delete(root);
+    },
+
+    reset(): void {
+      store.records.length = 0;
+      store.byId.clear();
+      store.claims.clear();
+      store.cursors.clear();
+      store.members.clear();
+      store.waiters.clear();
+      store.seq = 0;
+    },
+  };
+
+  // §3.3/§3.4 — first open rebuilds the projection and claim state by replaying the log.
+  const { records } = replay(fd);
+  for (const record of records) {
+    store.records.push(record);
+    store.byId.set(record.id, record);
+    if (record.seq > store.seq) store.seq = record.seq;
+    project(store, record);
+  }
+  hydrateClaims(store, records);
+
+  return store;
+}
+
 export function storeFor(root: string, roomId: string): RoomStore {              // [invented]
-  throw new Error("not implemented");
+  const existing = STORES.get(root);
+  if (existing !== undefined) {
+    REFS.set(root, (REFS.get(root) ?? 0) + 1);
+    return existing;
+  }
+  const store = createStore(root, roomId);
+  STORES.set(root, store);
+  REFS.set(root, 1);
+  return store;
 }
+
 export function roomStoreFor(ctx: ExtensionContext): RoomStore {                 // [invented] R10
-  throw new Error("not implemented");
+  const opts: LocalProtocolOptions = ctx.localProtocolOptions ?? {
+    getArtifactsDir: () => ctx.sessionManager.getArtifactsDir(),
+    getSessionId: () => ctx.sessionManager.getSessionId(),
+  };
+  const root = resolveLocalRoot(opts);
+  return storeFor(root, resolveRoomId(root));
 }
+
 export function resetRoomStores(): void {                                        // [invented] __roomTest
-  throw new Error("not implemented");
+  for (const [root, store] of STORES) closeRoomLog(root, store.roomId);
+  STORES.clear();
+  REFS.clear();
 }
 
 // §3.6 S5 pruning job — in-memory records array ONLY; the JSONL file is never truncated (K19).
@@ -64,17 +208,29 @@ export const LOG_MAX_RECORDS = 5_000;
 export const LOG_MAX_AGE_MS = 604_800_000;
 export const PRUNE_INTERVAL_MS = 60_000;       // [invented]
 export function enforceRetention(store: RoomStore, now: number): RoomRecord | null {
-  throw new Error("not implemented");
+  const cutoff = now - LOG_MAX_AGE_MS;
+  let dropped = 0;
+  while (
+    store.records.length > 0 &&
+    (store.records.length > LOG_MAX_RECORDS || store.records[0].ts < cutoff)
+  ) {
+    const record = store.records.shift()!;
+    store.byId.delete(record.id);
+    dropped++;
+  }
+  if (dropped === 0) return null;
+  // The drop is itself a record — the file is never truncated, only the projection (K19).
+  return store.append({ kind: "gap", from: "system", skipped: dropped, reason: "retention" });
 }
 export function startPruneJob(store: RoomStore, ctx: ExtensionContext): void {   // [invented placement]
-  throw new Error("not implemented");
+  ctx.setInterval(() => { enforceRetention(store, Date.now()); }, PRUNE_INTERVAL_MS);
 }
 
 // K3 — the third refcounted ctx.setInterval job: expireStale → release{reason:"expired"} →
 // promote the oldest waiter → T0 notice. The ONLY producer of release{reason:"expired"}.
 export const CLAIM_SWEEP_INTERVAL_MS = 5_000;  // [invented] [calibrate]
 export function startClaimSweep(store: RoomStore, ctx: ExtensionContext): void {  // [invented]
-  throw new Error("not implemented");
+  ctx.setInterval(() => { expireStale(store, Date.now()); }, CLAIM_SWEEP_INTERVAL_MS);
 }
 
 // [invented] — the refcounted timer registry (I4/R11/R28). One entry per root; the tick runs in the
@@ -83,9 +239,26 @@ export interface RoomTimerRegistry {
   start(root: string, ctx: ExtensionContext): void;
   stop(root: string): void;
 }
+const TIMERS: Map<string, Timer[]> = ((globalThis as unknown as {
+  __roomTimers?: Map<string, Timer[]>;
+}).__roomTimers ??= new Map<string, Timer[]>());
+
 export const roomTimers: RoomTimerRegistry = {
-  start(): void { throw new Error("not implemented"); },
-  stop(): void { throw new Error("not implemented"); },
+  start(root: string, ctx: ExtensionContext): void {
+    if (TIMERS.has(root)) return;
+    const store = STORES.get(root);
+    if (store === undefined) return;
+    TIMERS.set(root, [
+      ctx.setInterval(() => { enforceRetention(store, Date.now()); }, PRUNE_INTERVAL_MS),
+      ctx.setInterval(() => { expireStale(store, Date.now()); }, CLAIM_SWEEP_INTERVAL_MS),
+    ]);
+  },
+  stop(root: string): void {
+    const handles = TIMERS.get(root);
+    if (handles === undefined) return;
+    for (const handle of handles) clearInterval(handle);
+    TIMERS.delete(root);
+  },
 };
 
 // K3 — the claim-expiry sweep as a named lifecycle object, so the three jobs (sweep, prune,
@@ -94,7 +267,19 @@ export interface ClaimSweeper {                                          // [inv
   start(store: RoomStore, ctx: ExtensionContext): void;
   stop(root: string): void;
 }
+const SWEEPERS: Map<string, Timer> = ((globalThis as unknown as {
+  __roomSweepers?: Map<string, Timer>;
+}).__roomSweepers ??= new Map<string, Timer>());
+
 export const claimSweeper: ClaimSweeper = {                              // [invented]
-  start(): void { throw new Error("not implemented"); },
-  stop(): void { throw new Error("not implemented"); },
+  start(store: RoomStore, ctx: ExtensionContext): void {
+    if (SWEEPERS.has(store.root)) return;
+    SWEEPERS.set(store.root, ctx.setInterval(() => { expireStale(store, Date.now()); }, CLAIM_SWEEP_INTERVAL_MS));
+  },
+  stop(root: string): void {
+    const handle = SWEEPERS.get(root);
+    if (handle === undefined) return;
+    clearInterval(handle);
+    SWEEPERS.delete(root);
+  },
 };

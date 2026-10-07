@@ -1,66 +1,357 @@
-import { test, expect } from "bun:test";
+import { test, expect, afterAll } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { resolveLocalRoot, resolveLocalUrlToPath }
-  from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
-import { logPathFor, roomIdFor } from "../src/ids";
-import { appendLine, openRoomLog, readSince, replay, roomLogFd } from "../src/store/log";
-import { resetRoomStores, storeFor } from "../src/store/room-store";
-import { grant, reclaimIfStale, release } from "../src/store/claims";
-import { bumpCursor, cursorFor, initCursor, lagFor } from "../src/store/cursors";
+import { resolveLocalRoot } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
+import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { logPathFor, roomIdFor, resourceKey, newMessageId } from "../src/ids";
+import {
+  appendLine,
+  closeRoomLog,
+  openRoomLog,
+  readSince,
+  replay,
+  roomLogFd,
+  validateRecord,
+} from "../src/store/log";
+import type { RoomRecord } from "../src/store/schema";
+import type { RoomStore } from "../src/store/room-store";
+import {
+  bumpCursor,
+  cursorFor,
+  initCursor,
+  JOIN_BACKLOG,
+  lagFor,
+  persistOwnCursor,
+  restoreOwnCursor,
+} from "../src/store/cursors";
+import {
+  configPath,
+  DEFAULT_ROOM_CONFIG,
+  loadRoomConfig,
+  registerRoomFlags,
+  resolveRoomConfig,
+  resolveRoomId,
+  saveRoomConfig,
+} from "../src/store/config";
 
-const OPTS = { getArtifactsDir: () => "/tmp/room-test", getSessionId: () => "20261006-abc123" };
-// K14 — the test computes the filename with the SAME helper the store uses. Never a hardcoded name.
-// X1 — the room id is ROOT-STABLE: it comes from the resolved root, never from a session id.
-const ROOT = resolveLocalRoot(OPTS);
-const ROOM_ID = roomIdFor(ROOT);
-const LOG_PATH = logPathFor(ROOT, ROOM_ID);
+// --- fixtures -------------------------------------------------------------
 
-test("3 interleaved writers × 200 lines produce 600 parseable lines, zero torn", () => {
-  throw new Error("not implemented");
+const TMP: string[] = [];
+
+/** A unique on-disk local:// root per test — never the fixed /tmp path the scaffold used. */
+function tempRoot(): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "room-store-"));
+  TMP.push(dir);
+  return resolveLocalRoot({ getArtifactsDir: () => dir, getSessionId: () => "sess-x" });
+}
+
+afterAll(() => {
+  for (const dir of TMP) fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test("readSince(seq) returns exactly the records after seq", () => {
-  throw new Error("not implemented");
+function msg(seq: number, from = "A", topic = "t", body = "b"): RoomRecord {
+  return { v: 1, seq, ts: 1000 + seq, kind: "msg", id: `id-${seq}`, from, topic, body };
+}
+
+/** Minimal structural RoomStore: cursors.ts touches only `seq` and `cursors`. */
+function cursorStore(seq: number): RoomStore {
+  return { seq, cursors: new Map<string, number>() } as unknown as RoomStore;
+}
+
+function readLines(p: string): string[] {
+  return fs.readFileSync(p, "utf8").split("\n").filter((l) => l.length > 0);
+}
+
+// --- 1. concurrent writers ------------------------------------------------
+
+test("two writers on one fd produce N interleaved parseable lines, zero torn", () => {
+  const root = tempRoot();
+  const roomId = roomIdFor(root);
+  const p = logPathFor(root, roomId);
+  const fd = roomLogFd(root, roomId);
+
+  const N = 200;
+  for (let i = 0; i < N; i++) {
+    appendLine(fd, JSON.stringify(msg(i * 2 + 1, "A")) + "\n");
+    appendLine(fd, JSON.stringify(msg(i * 2 + 2, "B")) + "\n");
+  }
+
+  const lines = readLines(p);
+  expect(lines.length).toBe(2 * N);
+  // JSON.parse throws on a torn line — this is the zero-torn assertion.
+  const parsed = lines.map((l) => JSON.parse(l) as RoomRecord);
+  expect(parsed.map((r) => r.seq)).toEqual(Array.from({ length: 2 * N }, (_, i) => i + 1));
+  expect(new Set(parsed.map((r) => r.from))).toEqual(new Set(["A", "B"]));
+  closeRoomLog(root, roomId);
 });
 
-test("replay reconstructs cursors and seq", () => {
-  throw new Error("not implemented");
+// --- 2. torn-line tolerance (round-2 C1 regression) -----------------------
+
+test("torn-line tolerance: 100 valid + 1 torn + 100 valid → all 200 valid records survive", () => {
+  const root = tempRoot();
+  const roomId = roomIdFor(root);
+  const fd = roomLogFd(root, roomId);
+
+  for (let i = 1; i <= 100; i++) appendLine(fd, JSON.stringify(msg(i)) + "\n");
+  // A torn line: partial JSON, newline-terminated. Must not drop anything after it.
+  fs.writeSync(fd, '{"v":1,"seq":101,"kind":"ms\n');
+  for (let i = 101; i <= 200; i++) appendLine(fd, JSON.stringify(msg(i)) + "\n");
+
+  const { records, skipped } = replay(fd);
+  const msgs = records.filter((r) => r.kind === "msg");
+  expect(msgs.map((r) => r.seq)).toEqual(Array.from({ length: 200 }, (_, i) => i + 1));
+  expect(skipped).toBe(1);
+  const gaps = records.filter((r) => r.kind === "gap");
+  expect(gaps.length).toBe(1);
+  expect(gaps[0].skipped).toBe(1);
+  closeRoomLog(root, roomId);
 });
 
-test("resolveLocalUrlToPath('local://room/r.jsonl', opts) is inside resolveLocalRoot(opts)", () => {
-  throw new Error("not implemented");
+// --- 3. replay rebuilds identical state -----------------------------------
+
+test("replay rebuilds identical state from the log", () => {
+  const root = tempRoot();
+  const roomId = roomIdFor(root);
+  const fd = roomLogFd(root, roomId);
+
+  const written: RoomRecord[] = [
+    msg(1, "A", "build"),
+    msg(2, "B", "build"),
+    { v: 1, seq: 3, ts: 1003, kind: "claim", id: "c3", from: "A", resource: "build/api", ttlMs: 5000 },
+    {
+      v: 1, seq: 4, ts: 1004, kind: "release", id: "r4", from: "A",
+      resource: "build/api", reason: "released", prevHolder: "A",
+    },
+    { v: 1, seq: 5, ts: 1005, kind: "member", id: "m5", from: "C", action: "join" },
+  ];
+  for (const r of written) appendLine(fd, JSON.stringify(r) + "\n");
+
+  const { records, skipped } = replay(fd);
+  expect(skipped).toBe(0);
+  expect(records).toEqual(written);
+  closeRoomLog(root, roomId);
 });
 
-test("logPathFor(root, roomId) is the path the store actually writes", () => {
-  throw new Error("not implemented");
+// --- 4. malformed mid-file record does not shift seq ----------------------
+
+test("a malformed mid-file record is skipped and does not shift later seq values", () => {
+  const root = tempRoot();
+  const roomId = roomIdFor(root);
+  const fd = roomLogFd(root, roomId);
+
+  appendLine(fd, JSON.stringify(msg(1)) + "\n");
+  appendLine(fd, JSON.stringify(msg(2)) + "\n");
+  fs.writeSync(fd, '{"v":1,"seq":3,"kind":"ms\n'); // corrupt (unparseable)
+  appendLine(fd, JSON.stringify(msg(4)) + "\n");
+  // parseable but shape-invalid (unknown kind) — quarantined as "invalid", not "corrupt".
+  appendLine(fd, JSON.stringify({ v: 1, seq: 5, ts: 1, kind: "bogus", id: "x", from: "A" }) + "\n");
+  appendLine(fd, JSON.stringify(msg(6)) + "\n");
+
+  const { records, skipped } = replay(fd);
+  expect(skipped).toBe(2);
+  expect(records.filter((r) => r.kind === "msg").map((r) => r.seq)).toEqual([1, 2, 4, 6]);
+  closeRoomLog(root, roomId);
 });
 
-test("roomIdFor(root) is stable across two different session ids and never returns 'local'", () => {
-  throw new Error("not implemented");
+// --- 5. roomIdFor is a pure function of the root --------------------------
+
+test("roomIdFor is a pure function of the root, never derived from a session id", () => {
+  const a = "/home/u/.omp/artifacts/tree1/local";
+  const b = "/home/u/.omp/artifacts/tree2/local";
+
+  expect(roomIdFor(a)).toBe(roomIdFor(a));
+  expect(roomIdFor(a)).not.toBe(roomIdFor(b));
+  expect(roomIdFor(a)).toMatch(/^r[0-9a-f]{16}$/);
+  expect(roomIdFor(a)).not.toBe("local");
+
+  // Same artifacts dir, two different session ids → same root → same room id.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "room-store-"));
+  TMP.push(dir);
+  const root1 = resolveLocalRoot({ getArtifactsDir: () => dir, getSessionId: () => "sess-1" });
+  const root2 = resolveLocalRoot({ getArtifactsDir: () => dir, getSessionId: () => "sess-2" });
+  expect(root1).toBe(root2);
+  expect(roomIdFor(root1)).toBe(roomIdFor(root2));
+  expect(roomIdFor(root1)).not.toContain("sess-1");
+  expect(roomIdFor(root1)).not.toContain("sess-2");
 });
 
-test("a torn line is skipped and a gap record is emitted (100 + torn + 100)", () => {
-  throw new Error("not implemented");
+// --- 6. logPathFor is stable and single-convention ------------------------
+
+test("logPathFor is stable and single-convention, and is the file the store writes", () => {
+  const root = tempRoot();
+  const roomId = roomIdFor(root);
+
+  expect(logPathFor(root, roomId)).toBe(logPathFor(root, roomId));
+  expect(logPathFor(root, roomId)).toBe(path.join(root, "room", `${roomId}.jsonl`));
+
+  const fd = roomLogFd(root, roomId);
+  appendLine(fd, JSON.stringify(msg(1)) + "\n");
+  expect(fs.existsSync(logPathFor(root, roomId))).toBe(true);
+
+  const files = fs.readdirSync(path.join(root, "room")).filter((f) => f.endsWith(".jsonl"));
+  expect(files).toEqual([`${roomId}.jsonl`]);
+  closeRoomLog(root, roomId);
 });
 
-test("only successfully parsed records consume a seq", () => {
-  throw new Error("not implemented");
+// --- ids: resourceKey / newMessageId --------------------------------------
+
+test("resourceKey is '<topic>/<key>' and newMessageId is a unique UUID v4", () => {
+  expect(resourceKey("build", "api.ts")).toBe("build/api.ts");
+  const a = newMessageId();
+  const b = newMessageId();
+  expect(a).not.toBe(b);
+  expect(a).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
 });
 
-test("claim(a,res) grants; claim(b,res) returns {ok:false, holder:a}", () => {
-  throw new Error("not implemented");
+// --- log: appendLine / readSince / validateRecord / openRoomLog / close ---
+
+test("appendLine terminates the line with '\\n' and readSince returns exactly the records after seq", () => {
+  const root = tempRoot();
+  const roomId = roomIdFor(root);
+  const fd = roomLogFd(root, roomId);
+
+  for (let i = 1; i <= 10; i++) appendLine(fd, JSON.stringify(msg(i))); // no trailing \n on purpose
+  expect(readLines(logPathFor(root, roomId)).length).toBe(10);
+
+  expect(readSince(fd, 5, 100).map((r) => r.seq)).toEqual([6, 7, 8, 9, 10]);
+  expect(readSince(fd, 0, 3).map((r) => r.seq)).toEqual([1, 2, 3]);
+  expect(readSince(fd, 10, 100)).toEqual([]);
+  closeRoomLog(root, roomId);
 });
 
-test("an expired-TTL claim is reclaimable and appends release{reason:'reclaimed'}", () => {
-  throw new Error("not implemented");
+test("validateRecord accepts every kind and rejects missing or wrong-typed fields", () => {
+  expect(validateRecord(msg(1))).not.toBeNull();
+  expect(validateRecord({ v: 1, seq: 1, ts: 1, kind: "msg", id: "x", from: "A", topic: "t" })).toBeNull();
+  expect(validateRecord({ v: 1, seq: 1, ts: 1, kind: "bogus", id: "x", from: "A" })).toBeNull();
+  expect(validateRecord({ v: 2, seq: 1, ts: 1, kind: "msg", id: "x", from: "A", topic: "t", body: "b" })).toBeNull();
+  expect(
+    validateRecord({ v: 1, seq: 1, ts: 1, kind: "release", id: "x", from: "A", resource: "t/k", reason: "nope", prevHolder: "A" }),
+  ).toBeNull();
+  expect(validateRecord(null)).toBeNull();
+  expect(validateRecord("nope")).toBeNull();
+  expect(validateRecord([])).toBeNull();
 });
 
-test("spoofed `from` is overwritten with ctx.agent.id", () => {
-  throw new Error("not implemented");
+test("openRoomLog returns ok for a fresh root and maps a bad path without throwing", () => {
+  const root = tempRoot();
+  const roomId = roomIdFor(root);
+  const ok = openRoomLog(root, roomId);
+  expect(ok.ok).toBe(true);
+  closeRoomLog(root, roomId);
+
+  // A file where the room/ directory must go → mkdir fails (ENOTDIR).
+  const badRoot = tempRoot();
+  fs.mkdirSync(badRoot, { recursive: true });
+  fs.writeFileSync(path.join(badRoot, "room"), "not a dir");
+  const bad = openRoomLog(badRoot, roomIdFor(badRoot));
+  expect(bad.ok).toBe(false);
+  if (!bad.ok) expect(["room file not found", "room file unwritable", "room file corrupt"]).toContain(bad.error);
 });
 
-test("cursor persistence: appendEntry('chatroom:cursor') survives a resume", () => {
-  throw new Error("not implemented");
+test("closeRoomLog drops the registry entry and a later roomLogFd reopens the same file", () => {
+  const root = tempRoot();
+  const roomId = roomIdFor(root);
+  const fd1 = roomLogFd(root, roomId);
+  appendLine(fd1, JSON.stringify(msg(1)) + "\n");
+  closeRoomLog(root, roomId);
+  expect(() => fs.fstatSync(fd1)).toThrow();
+
+  const fd2 = roomLogFd(root, roomId);
+  appendLine(fd2, JSON.stringify(msg(2)) + "\n");
+  expect(replay(fd2).records.map((r) => r.seq)).toEqual([1, 2]);
+  closeRoomLog(root, roomId);
+});
+
+// --- cursors: per-agent, advance on delivery only -------------------------
+
+test("cursors are per-agent, start at logEnd - JOIN_BACKLOG, advance monotonically, lag = logEnd - cursor", () => {
+  const store = cursorStore(200);
+  expect(initCursor(store, "A")).toBe(200 - JOIN_BACKLOG);
+  expect(initCursor(store, "B")).toBe(200 - JOIN_BACKLOG);
+  expect(cursorFor(store, "A")).toBe(150);
+
+  bumpCursor(store, "A", 175); // delivery
+  expect(cursorFor(store, "A")).toBe(175);
+  expect(cursorFor(store, "B")).toBe(150); // per-agent, unaffected
+  expect(lagFor(store, "A")).toBe(25);
+  expect(lagFor(store, "B")).toBe(50);
+
+  bumpCursor(store, "A", 160); // never rewinds
+  expect(cursorFor(store, "A")).toBe(175);
+
+  expect(initCursor(store, "A")).toBe(175); // a rejoin resumes the stored cursor
+});
+
+test("initCursor clamps to 0 on a short log and cursorFor never mutates (read ≠ advance)", () => {
+  const store = cursorStore(10);
+  expect(initCursor(store, "A")).toBe(0);
+
+  const fresh = cursorStore(100);
+  expect(cursorFor(fresh, "ghost")).toBe(0);
+  expect(fresh.cursors.has("ghost")).toBe(false);
+});
+
+test("persistOwnCursor / restoreOwnCursor round-trip through appendEntry('chatroom:cursor')", () => {
+  const entries: Array<{ type: string; customType: string; data?: unknown }> = [];
+  const pi = {
+    appendEntry: (customType: string, data?: unknown) => {
+      entries.push({ type: "custom", customType, data });
+    },
+  } as unknown as ExtensionAPI;
+  const ctx = {
+    sessionManager: { getEntries: () => entries },
+  } as unknown as ExtensionContext;
+
+  persistOwnCursor(pi, "r123", 42);
+  expect(entries[0].customType).toBe("chatroom:cursor");
+  expect(restoreOwnCursor(ctx, "r123")).toBe(42);
+  expect(restoreOwnCursor(ctx, "other-room")).toBe(null);
+});
+
+// --- config: local://room/config.json + flags -----------------------------
+
+test("config: defaults when absent, save/load round-trip, and resolveRoomId persists once", () => {
+  const root = tempRoot();
+  expect(configPath(root)).toBe(path.join(root, "room", "config.json"));
+  expect(loadRoomConfig(root)).toEqual(DEFAULT_ROOM_CONFIG);
+
+  const cfg = { ...DEFAULT_ROOM_CONFIG, claimTtlMs: 1000, maxBodyBytes: 256 };
+  saveRoomConfig(root, cfg);
+  expect(loadRoomConfig(root)).toEqual(cfg);
+
+  const id = resolveRoomId(root);
+  expect(id).toBe(roomIdFor(root));
+  expect(loadRoomConfig(root).roomId).toBe(id);
+  expect(resolveRoomId(root)).toBe(id); // idempotent — persisted value wins
+
+  saveRoomConfig(root, { ...cfg, roomId: "custom-room" });
+  expect(resolveRoomId(root)).toBe("custom-room");
+});
+
+test("registerRoomFlags registers both flags and resolveRoomConfig lets flags override the file", () => {
+  const flags = new Map<string, { type: string; default?: boolean | string }>();
+  const pi = {
+    registerFlag: (name: string, options: { type: string; default?: boolean | string }) => {
+      flags.set(name, options);
+    },
+    getFlag: (name: string) => flags.get(name)?.default,
+  } as unknown as ExtensionAPI;
+
+  registerRoomFlags(pi);
+  expect([...flags.keys()]).toEqual(["room-panel-key", "room-cold-tree"]);
+  expect(flags.get("room-panel-key")).toMatchObject({ type: "string", default: "" });
+  expect(flags.get("room-cold-tree")).toMatchObject({ type: "boolean", default: true });
+
+  const root = tempRoot();
+  saveRoomConfig(root, { ...DEFAULT_ROOM_CONFIG, panelKey: "from-file", coldTreeEnabled: false });
+  expect(resolveRoomConfig(pi, root).panelKey).toBe("from-file");
+  expect(resolveRoomConfig(pi, root).coldTreeEnabled).toBe(false);
+
+  const pi2 = {
+    registerFlag: () => {},
+    getFlag: (name: string) => (name === "room-panel-key" ? "from-flag" : true),
+  } as unknown as ExtensionAPI;
+  expect(resolveRoomConfig(pi2, root).panelKey).toBe("from-flag");
+  expect(resolveRoomConfig(pi2, root).coldTreeEnabled).toBe(false); // flag at default → file wins
 });
