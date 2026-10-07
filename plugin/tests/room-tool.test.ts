@@ -333,7 +333,7 @@ test("background jobs start from the main session only (R11/R28)", () => {
   roomStoreFor(fakeCtx(root, "Sub", "sub", () => { intervals++; }));
   expect(intervals).toBe(0);                        // a subagent must not own the tick
   roomStoreFor(fakeCtx(root, "Main", "main", () => { intervals++; }));
-  expect(intervals).toBe(2);                        // prune + claim sweep, from the main session
+  expect(intervals).toBe(3);                        // prune + claim sweep + compactor, from the main session
 });
 
 // --- TDD: refcount leak fix (R10) --------------------------------------------

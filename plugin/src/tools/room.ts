@@ -1,5 +1,8 @@
-import type { AgentToolResult, ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent";
+import { admitPost, isMuted, selectT1 } from "../attention/governor";
+import { deliver } from "../attention/delivery";
+import { classify } from "../attention/tiers";
 import { safeRoomText } from "../onboarding/escape";
 import { buildDigest } from "../onboarding/digest";
 import { grant, release, reclaimIfStale, contended } from "../store/claims";
@@ -36,9 +39,9 @@ export interface RoomParams {
 export type RoomToolDetails =
   | { ok: true; op: "join"; digest: string; cursor: number }
   | { ok: true; op: "read"; records: RoomRecord[]; cursor: number; more: boolean }
-  | { ok: true; op: "post"; id: string; seq: number }   // Option A: no attention tiers (§1.4)
-  | { ok: true; op: "claim"; holder: string; expiresAt: number }
-  | { ok: true; op: "release" }
+  | { ok: true; op: "post"; id: string; seq: number; deliveryError?: string }
+  | { ok: true; op: "claim"; holder: string; expiresAt: number; deliveryError?: string }
+  | { ok: true; op: "release"; deliveryError?: string }
   | { ok: true; op: "board"; board: BoardResult }
   | { ok: false; error: string; holder?: string; expiresAt?: number };   // "not holder" carries the expiry
 
@@ -141,6 +144,89 @@ function clamp(value: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, Math.trunc(value)));
 }
 
+// --- §5.3 the post-append delivery pass -----------------------------------
+
+/**
+ * The agents considered for a record: the room roster plus every live registry ref, minus the
+ * acting agent (self-authored records never echo back), advisor transcripts (observability-only,
+ * never messageable) and aborted refs. Parked refs stay in the set — `deliver` skips them.
+ */
+function recipients(store: RoomStore, actorId: string): string[] {
+  const ids = new Set<string>(store.members.keys());
+  for (const ref of AgentRegistry.global().list()) {
+    if (ref.kind === "advisor" || ref.status === "aborted") continue;
+    ids.add(ref.id);
+  }
+  ids.delete(actorId);
+  return [...ids];
+}
+
+/**
+ * §5.2 K/B injection cap: the T1 records pending above the viewer's cursor are admitted oldest-first
+ * up to K and B; a record past the cap is left to the digest instead of pushed. T0/T2 are not
+ * bounded here (T0 is never dropped; T2 never injects).
+ */
+function t1Admitted(store: RoomStore, viewer: MemberState, record: RoomRecord): boolean {
+  const cursor = store.cursors.get(viewer.agentId) ?? 0;
+  const pending = store.records.filter(
+    (r) => r.seq > cursor && classify(r, viewer) === "T1" && !isMuted(store, viewer, r),
+  );
+  return selectT1(store, viewer, pending).injected.some((r) => r.seq === record.seq);
+}
+
+/**
+ * §5.3 — deliver each just-appended record to every relevant recipient. Runs AFTER the synchronous
+ * append (I1/I5): the log is already durable, so a delivery failure can only be reported, never
+ * corrupt the record or throw out of `execute`. Returns the first failure message, if any.
+ *
+ * T0 is never dropped (its ceiling batches in the pull path, not here); T2 is cursor-only. A post
+ * past the producer's srTCM burst is coalesced for the digest — the record is already durable and
+ * its recipients' cursors stay put, so `coalescePending` picks it up on the next turn.
+ */
+async function notifyRecipients(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  store: RoomStore,
+  records: readonly RoomRecord[],
+  actorId: string,
+): Promise<string | undefined> {
+  let failure: string | undefined;
+  const note = (error: unknown): void => {
+    failure ??= error instanceof Error ? error.message : "delivery failed";
+  };
+  try {
+    // §5.2 — the producer's bucket, consumed once per appended post (claim/release are not posts).
+    const coalesced = records.some((r) => r.kind === "msg") && admitPost(store, actorId, Date.now()) === "red";
+    for (const record of records) {
+      for (const target of recipients(store, actorId)) {
+        try {
+          const viewer = viewerFor(store, target);
+          const tier = classify(record, viewer);
+          if (isMuted(store, viewer, record)) continue;
+          if (tier === "T1" && (coalesced || !t1Admitted(store, viewer, record))) continue;
+          if (coalesced && tier === "T2") continue;       // leave it pending for the digest
+          await deliver(pi, ctx, target, record, tier);
+        } catch (error) {
+          note(error);
+        }
+      }
+    }
+  } catch (error) {
+    note(error);
+  }
+  return failure;
+}
+
+/** The records an operation appended: everything with a seq above the pre-op watermark. */
+function appendedSince(store: RoomStore, before: number): RoomRecord[] {
+  return store.records.filter((r) => r.seq > before);
+}
+
+/** K1 — an ok result carrying the optional delivery-failure note. */
+function okWithDelivery<T extends RoomToolDetails>(details: T, text: string, failure?: string): AgentToolResult<T> {
+  return ok(failure === undefined ? details : { ...details, deliveryError: failure }, text);
+}
+
 export function registerRoomTool(pi: ExtensionAPI): void {     // §2.1.1
   const z = pi.zod;
   const params = z.object({
@@ -231,9 +317,11 @@ export function registerRoomTool(pi: ExtensionAPI): void {     // §2.1.1
           });
           viewer.lastMessageId = record.id;
           viewer.topics.add(topic);
-          return ok(
+          const failure = await notifyRecipients(pi, ctx, store, [record], agentId);
+          return okWithDelivery(
             { ok: true, op: "post", id: record.id, seq: record.seq },
             `room post → ${safe(topic)} · seq ${record.seq}`,
+            failure,
           );
         }
 
@@ -244,13 +332,16 @@ export function registerRoomTool(pi: ExtensionAPI): void {     // §2.1.1
           const resource = `${topic}/${key}`;
           viewerFor(store, agentId);
           const ttlMs = clamp(p.ttl ?? config.claimTtlMs, CLAIM_TTL_MIN_MS, CLAIM_TTL_MAX_MS);
+          const before = store.seq;
           const result = grant(store, resource, agentId, ttlMs);
           if (!result.ok) {
             return fail(`claim ${resource} denied — held by ${result.holder}`, result.holder, result.expiresAt);
           }
-          return ok(
+          const failure = await notifyRecipients(pi, ctx, store, appendedSince(store, before), agentId);
+          return okWithDelivery(
             { ok: true, op: "claim", holder: result.claim.holder, expiresAt: result.claim.acquiredAt + result.claim.ttlMs },
             `room claim ${safe(resource)} → granted, expires in ${Math.round(ttlMs / 1000)}s`,
+            failure,
           );
         }
 
@@ -261,16 +352,19 @@ export function registerRoomTool(pi: ExtensionAPI): void {     // §2.1.1
           const resource = `${topic}/${key}`;
           const held = store.claims.get(resource);
           if (!held) return fail("unknown resource");
+          const before = store.seq;
           if (held.holder !== agentId) {
             // §4.1 — a reclaim against a stale claim is explicit and logged, never silent.
             const reclaimed = reclaimIfStale(store, resource, Date.now());
             if (reclaimed) {
-              return ok({ ok: true, op: "release" }, `room release ${safe(resource)} → reclaimed (was stale)`);
+              const failure = await notifyRecipients(pi, ctx, store, appendedSince(store, before), agentId);
+              return okWithDelivery({ ok: true, op: "release" }, `room release ${safe(resource)} → reclaimed (was stale)`, failure);
             }
             return fail(`release ${resource} denied — not holder`, held.holder, held.acquiredAt + held.ttlMs);
           }
           release(store, resource, agentId, "released");
-          return ok({ ok: true, op: "release" }, `room release ${safe(resource)} → released`);
+          const failure = await notifyRecipients(pi, ctx, store, appendedSince(store, before), agentId);
+          return okWithDelivery({ ok: true, op: "release" }, `room release ${safe(resource)} → released`, failure);
         }
 
         case "board": {

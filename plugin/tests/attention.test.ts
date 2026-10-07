@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
   AgentRegistry,
+  zod,
   type ExtensionAPI,
   type ExtensionContext,
 } from "@oh-my-pi/pi-coding-agent";
@@ -26,6 +27,8 @@ import {
   unreadCounts,
 } from "../src/attention/governor";
 import { deliver, escapeForDelivery, renderLine, roomBodyOf } from "../src/attention/delivery";
+import { registerRoomTool, type RoomToolResult } from "../src/tools/room";
+import { enqueueWaiter } from "../src/store/claims";
 
 // --- fixtures -------------------------------------------------------------
 
@@ -455,4 +458,123 @@ test("a single message over B=2048 tokens is truncated to head + read handle", (
   const small = truncateOversized("short", DEFAULT_CAPS.maxT1Tokens);
   expect(small.head).toBe("short");
   expect(small.handle).toBe("");
+});
+
+// --- 10. the post/claim/release delivery pass (§5.3 wiring) ---------------
+
+interface RoomHarness {
+  sends: Send[];
+  store: RoomStore;
+  execute(params: Record<string, unknown>): Promise<RoomToolResult>;
+}
+
+/** The real room tool over a real store, with `zod` + `registerTool` + `sendMessage` faked. */
+function roomHarness(root: string, caller: string): RoomHarness {
+  const sends: Send[] = [];
+  let tool: { execute: (...args: unknown[]) => Promise<RoomToolResult> } | undefined;
+  const pi = {
+    zod,
+    sendMessage(payload: unknown, options?: unknown): void {
+      sends.push({ payload: payload as Record<string, unknown>, options: options as Record<string, unknown> });
+    },
+    registerTool(t: unknown): void {
+      tool = t as typeof tool;
+    },
+  } as unknown as ExtensionAPI;
+  registerRoomTool(pi);
+  if (!tool) throw new Error("registerRoomTool registered no tool");
+  const ctx = fakeCtx(root, caller);
+  const store = roomStoreFor(ctx);
+  return {
+    sends,
+    store,
+    execute: (params) => tool!.execute("t", params, undefined, undefined, ctx),
+  };
+}
+
+/** A live sibling whose delivery transport rejects — the failure the pass must survive. */
+function registerFailingSession(id: string): void {
+  AgentRegistry.global().register({
+    id, displayName: id, kind: "sub", status: "running",
+    session: {
+      async sendCustomMessage(): Promise<boolean> {
+        throw new Error("transport down");
+      },
+    } as never,
+  });
+}
+
+test("a post mentioning B delivers to B as a T0 steer", async () => {
+  const root = tempRoot();
+  const bCalls: Send[] = [];
+  const b = `attn-mention-${Date.now()}`;
+  registerSession(b, bCalls);
+  const h = roomHarness(root, "A");
+
+  const res = await h.execute({ op: "post", topic: "build", body: "over to you", mention: [b] });
+  expect(res.details).toMatchObject({ ok: true, op: "post" });
+  expect(bCalls.length).toBe(1);
+  expect(bCalls[0]!.options).toMatchObject({ deliverAs: "steer" });
+  expect(bCalls[0]!.payload).toMatchObject({ display: true });
+  expect(JSON.stringify(bCalls[0]!.payload)).toContain("over to you");
+});
+
+test("an unaddressed post to a followed topic delivers as an aside (T1)", async () => {
+  const root = tempRoot();
+  const bCalls: Send[] = [];
+  const b = `attn-follow-${Date.now()}`;
+  registerSession(b, bCalls);
+  const h = roomHarness(root, "A");
+  h.store.append({ kind: "member", from: b, action: "join" });
+  h.store.members.get(b)!.topics.add("build");       // B follows the topic
+
+  const res = await h.execute({ op: "post", topic: "build", body: "status" });
+  expect(res.details?.ok).toBe(true);
+  expect(bCalls.length).toBe(1);
+  expect(bCalls[0]!.options).toMatchObject({ deliverAs: "aside" });
+});
+
+test("an unaddressed post to an unfollowed topic delivers nothing (T2 — cursor only)", async () => {
+  const root = tempRoot();
+  const bCalls: Send[] = [];
+  const b = `attn-t2-${Date.now()}`;
+  registerSession(b, bCalls);
+  const h = roomHarness(root, "A");
+
+  const res = await h.execute({ op: "post", topic: "chat", body: "noise" });
+  expect(res.details).toMatchObject({ ok: true, op: "post" });
+  const seq = res.details?.ok === true && res.details.op === "post" ? res.details.seq : undefined;
+  expect(bCalls.length).toBe(0);
+  expect(h.store.cursors.get(b)).toBe(seq);   // the cursor advanced instead
+});
+
+test("a release whose prevHolder is B notifies B as T0 (M11)", async () => {
+  const root = tempRoot();
+  const bCalls: Send[] = [];
+  const b = `attn-release-${Date.now()}`;
+  registerSession(b, bCalls);
+  const h = roomHarness(root, "A");
+  // B holds the lease; its TTL is already past, and A is queued to take it over.
+  h.store.append({ kind: "claim", from: b, resource: "build/step", ttlMs: 5_000 });
+  h.store.claims.get("build/step")!.acquiredAt = 0;
+  enqueueWaiter(h.store, "build/step", "A");
+
+  const res = await h.execute({ op: "release", topic: "build", key: "step" });
+  expect(res.details?.ok).toBe(true);
+  const steer = bCalls.find((c) => c.options?.deliverAs === "steer");
+  expect(steer).toBeDefined();
+  expect(JSON.stringify(steer!.payload)).toContain("build/step");
+});
+
+test("a delivery failure never throws out of execute and the record survives", async () => {
+  const root = tempRoot();
+  const b = `attn-fail-${Date.now()}`;
+  registerFailingSession(b);
+  const h = roomHarness(root, "A");
+
+  const res = await h.execute({ op: "post", topic: "build", body: "still durable", mention: [b] });
+  // The failure is surfaced on the K1 result, not thrown, and never reaches the log.
+  expect(res.details).toMatchObject({ ok: true, deliveryError: "transport down" });
+  expect(Array.isArray(res.content)).toBe(true);
+  expect(h.store.records.some((r) => r.kind === "msg" && r.body === "still durable")).toBe(true);
 });

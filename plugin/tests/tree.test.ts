@@ -8,7 +8,7 @@ import { createAssistantMessageEventStream, registerCustomApi } from "@oh-my-pi/
 import type { Api, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import { logPathFor, roomIdFor } from "../src/ids";
 import { appendLine, closeRoomLog, roomLogFd } from "../src/store/log";
-import type { RoomStore } from "../src/store/room-store";
+import { disposeRoomSession, resetRoomStores, roomStoreFor, type RoomStore } from "../src/store/room-store";
 import type { RoomRecord } from "../src/store/schema";
 import { RAW_MAX, TREE_REC, openTreeStore, validateZoomRange, zoom } from "../src/store/tree-store";
 import {
@@ -442,4 +442,94 @@ test("the compactor never runs from a subagent session (R11/R28)", () => {
   startCompactor(store, main3.ctx);
   expect(main3.intervals).toHaveLength(1); // restartable after the last session disposes
   stopCompactor(root);
+});
+
+// --- 9. wiring: roomStoreFor starts the compactor (main only, R11/R28) ------
+//
+// The gap this pins: `startCompactor` had NO production caller, so the cold tree was never built
+// in a real session. The job must be a fourth refcounted timer, started beside `roomTimers.start`
+// under the same `ctx.agent.kind === "main"` guard and stopped on the same last-dispose path.
+
+interface SessionCtx {
+  ctx: ExtensionContext;
+  intervals: Array<() => void>;
+  cleared: Timer[];
+}
+
+/** A raw artifacts dir (a real room root is `<dir>/local`, resolved by `roomStoreFor`). */
+function tmpArtifacts(): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "room-tree-wire-"));
+  TMP.push(dir);
+  return dir;
+}
+
+/** A real session ctx: `roomStoreFor` resolves the root from `localProtocolOptions`. */
+function sessionCtx(artifactsDir: string, kind: "main" | "sub", id: string): SessionCtx {
+  const intervals: Array<() => void> = [];
+  const cleared: Timer[] = [];
+  const opts = { getArtifactsDir: () => artifactsDir, getSessionId: () => id };
+  const ctx = {
+    agent: { kind, id, name: kind, depth: 0 },
+    localProtocolOptions: opts,
+    sessionManager: { ...opts, getEntries: () => [] },
+    setInterval: (cb: () => void) => {
+      intervals.push(cb);
+      return {} as Timer;
+    },
+    clearTimer: (handle: Timer) => { cleared.push(handle); },
+  };
+  return { ctx: ctx as unknown as ExtensionContext, intervals, cleared };
+}
+
+test("roomStoreFor from a main session starts the compactor for the root", () => {
+  const dir = tmpArtifacts();
+  const main = sessionCtx(dir, "main", "Main");
+  const store = roomStoreFor(main.ctx);
+
+  // prune + claim sweep (roomTimers) + compactor — the fourth refcounted job is the third tick.
+  expect(main.intervals).toHaveLength(3);
+
+  // Pin it to the compactor: a fresh main ctx starting the compactor for this root adds NO tick,
+  // so `roomStoreFor` already registered it. (Without the wiring this probe adds a 4th tick.)
+  const probe = sessionCtx(dir, "main", "Main2");
+  startCompactor(store, probe.ctx);
+  expect(probe.intervals).toHaveLength(0);
+
+  resetRoomStores();
+});
+
+test("a subagent session does NOT start the compactor (R11/R28)", () => {
+  const dir = tmpArtifacts();
+  const sub = sessionCtx(dir, "sub", "0-Sub");
+  roomStoreFor(sub.ctx);
+  expect(sub.intervals).toHaveLength(0); // no prune, no sweep, no compactor
+
+  // The sub session must not have registered the root either: the main session that follows owns
+  // all three jobs (prune + sweep + compactor) for this root, and the tick never moved to the sub.
+  const main = sessionCtx(dir, "main", "Main");
+  roomStoreFor(main.ctx);
+  expect(main.intervals).toHaveLength(3);
+  expect(sub.intervals).toHaveLength(0);
+
+  resetRoomStores();
+});
+
+test("dispose() on the last session stops the compactor — the timer is cleared exactly once", () => {
+  const dir = tmpArtifacts();
+  const main = sessionCtx(dir, "main", "Main");
+  roomStoreFor(main.ctx);
+  expect(main.cleared).toHaveLength(0);
+
+  disposeRoomSession(main.ctx); // last session → the compactor tick is cleared, not leaked
+  expect(main.cleared).toHaveLength(1);
+
+  disposeRoomSession(main.ctx); // idempotent: an already-dropped session clears nothing again
+  expect(main.cleared).toHaveLength(1);
+
+  // The root was evicted, so a fresh session restarts all three jobs.
+  const again = sessionCtx(dir, "main", "Main");
+  roomStoreFor(again.ctx);
+  expect(again.intervals).toHaveLength(3);
+
+  resetRoomStores();
 });

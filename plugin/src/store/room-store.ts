@@ -5,6 +5,7 @@ import { logPathFor, newMessageId } from "../ids";
 import { appendLine, openRoomLog, replay, closeRoomLog } from "./log";
 import { expireStale, hydrateClaims, type ClaimState } from "./claims";
 import { resolveRoomId } from "./config";
+import { startCompactor, stopCompactor } from "./compactor";
 import type { RoomRecord, RoomRecordDraft } from "./schema";
 
 // K11 — MemberState is declared ONCE, here (the store owns it); imported by tiers, governor,
@@ -155,6 +156,7 @@ function createStore(root: string, roomId: string): RoomStore {
       // Last live session: stop the background jobs, close the shared fd (K8), evict the root (K9).
       roomTimers.stop(root);
       claimSweeper.stop(root);
+      stopCompactor(root);
       closeRoomLog(root, roomId);
       STORES.delete(root);
       REFS.delete(root);
@@ -212,10 +214,13 @@ export function roomStoreFor(ctx: ExtensionContext): RoomStore {                
   if (live?.has(agentId) && STORES.has(root)) return STORES.get(root)!;
   const store = storeFor(root, resolveRoomId(root));
   (live ?? (SESSIONS.set(root, new Set()), SESSIONS.get(root)!)).add(agentId);
-  // R11/R28 — the three background jobs (claim sweep, pruning, compactor) MUST run from the main
+  // R11/R28 — the background jobs (claim sweep, pruning, compactor) MUST run from the main
   // session only: a tick scheduled on a subagent dies when that subagent's session_shutdown clears
-  // its timers. `roomTimers.start` is idempotent per root.
-  if (ctx.agent.kind === "main") roomTimers.start(root, ctx);
+  // its timers. Both registries are idempotent per root.
+  if (ctx.agent.kind === "main") {
+    roomTimers.start(root, ctx);
+    startCompactor(store, ctx);
+  }
   return store;
 }
 
@@ -232,6 +237,7 @@ export function resetRoomStores(): void {                                       
   for (const [root, store] of STORES) {
     roomTimers.stop(root);
     claimSweeper.stop(root);
+    stopCompactor(root);
     closeRoomLog(root, store.roomId);
   }
   STORES.clear();
