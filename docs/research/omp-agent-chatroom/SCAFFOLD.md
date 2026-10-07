@@ -1,6 +1,6 @@
 # SCAFFOLD.md — structural scaffold for `omp-agent-chatroom`
 
-Date 2026-10-06 · Host omp 18.6.1 · Derived from `PLAN-build.md` (revised after round 3, snapshot `[D629]`).
+Date 2026-10-06 · Host omp **18.7.0** · Derived from `PLAN-build.md` (revised after round 3, snapshot `[D629]`).
 
 **What this is.** Every file in `PLAN-build.md` §2.1 (plus the files the plan's prose requires but §2.1
 omits), each with: exact path, exported symbols as **signatures only**, imports (module → symbols),
@@ -25,7 +25,7 @@ conformance table.
 - Deep host imports are flagged `[deep]`; they resolve through the package `"./*"` wildcard export
   (RISK R2 / R22), never through a documented subpath.
 
-### Host type map (all verified against installed 18.6.1 source)
+### Host type map (all verified against the **installed 18.7.0** source — X6: the pre-round-4 label said 18.6.1)
 
 | Symbol | Module | Verified at |
 |---|---|---|
@@ -54,6 +54,13 @@ conformance table.
 | `createAgentSession`, `SessionManager` | `@oh-my-pi/pi-coding-agent` | `sdk.ts:1618`, `session/session-manager.ts:786` |
 | `test`, `expect` | `bun:test` | Bun builtin |
 
+**Note (X6).** This table was verified against the installed **18.7.0** tree
+(`@oh-my-pi/pi-coding-agent` 18.7.0, `pi-tui` 18.7.0, `pi-ai` 18.7.0); the pre-round-4 label said
+18.6.1 on every claim of the form "verified against …". The cited line numbers carry a consistent
++5..+10 drift from the numbers quoted in `PLAN-build.md` and the earlier reviews, but each still
+resolves to the same declaration, so the evidence holds and only the label was wrong. The pin is
+declared as a constant in `src/version.ts` (§44) and asserted by `tests/drift.test.ts` (§45).
+
 ---
 
 ## 1. `package.json`
@@ -78,6 +85,12 @@ conformance table.
     },
     "settings": { "…": "11 settings verbatim from PLAN §2.2" }
   },
+  "engines": { "bun": ">=1.3.14" },
+  "peerDependencies": {
+    "@oh-my-pi/pi-coding-agent": "^18.7.0",
+    "@oh-my-pi/pi-tui": "^18.7.0",
+    "@oh-my-pi/pi-ai": "^18.7.0"
+  },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
     "test": "bun test"
@@ -87,6 +100,11 @@ conformance table.
 ```
 
 **Imports.** none.
+**Note (X6).** The host is **18.7.0**, not 18.6.1. `engines.bun` mirrors the host's own
+(`>=1.3.14`, verified in the installed `@oh-my-pi/pi-coding-agent/package.json`) and
+`peerDependencies` pin the three host packages to `^18.7.0`, which makes "verified against 18.7.0"
+checkable rather than asserted. `src/version.ts` (§44) declares the same pin as a constant and
+`tests/drift.test.ts` (§45) asserts the installed version against it.
 **Note (R6).** `settings` is CLI-facing only and unreachable from extension code (§10 R6) — the plugin
 owns `local://room/config.json` (§14). No `keybindings` field and no `skills` field exist in
 `PluginManifest` (§2.2).
@@ -110,7 +128,8 @@ field gates only *which entry files load*; it does **not** gate runtime behaviou
     "noEmit": true,
     "skipLibCheck": true,
     "types": ["bun"],
-    "allowImportingTsExtensions": true
+    "allowImportingTsExtensions": true,
+    "allowArbitraryExtensions": true
   },
   "include": ["src", "tests"]
 }
@@ -181,22 +200,25 @@ declare module "*.md" {
 **Exports.**
 
 ```ts
-import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
-export default function roomExtension(pi: ExtensionAPI): void;
+
+export default function roomExtension(pi: ExtensionAPI): void {
+  registerRoomFlags(pi);   // §14/K6 — the ONE registration site for --room-panel-key / --room-cold-tree
+  throw new Error("not implemented");
+}
 
 /**
  * Test-only seam (§2.1.1 M-4). Clears the in-memory store between tests.
  */
-export const __roomTest: {
-  store: { reset(): void };
+export const __roomTest: { store: { reset(): void } } = {
+  store: { reset(): void { resetRoomStores(); } },
 };
 ```
 
 **Imports.**
 
 ```ts
-import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";   // imported ONCE (D0)
 import { registerRoomTool } from "./tools/room";
 import { registerWaitForAgent } from "./tools/wait-for-agent";
 import { registerWaitForMessage } from "./tools/wait-for-message";
@@ -216,13 +238,20 @@ feature state belongs to the plugin *loader* (`extensibility/plugins/types.ts:11
 point at `./src/index.ts`, so they gate nothing at runtime. Runtime toggles are CLI flags with
 exactly one registration site:
 
-```ts
-// [invented] names — K6. Owned by registerRoomFlags (§14); shown here for the wiring.
-pi.registerFlag("room-panel-key", { type: "string", default: "" });     // §6.1, RISK R4
-pi.registerFlag("room-cold-tree", { type: "boolean", default: true });  // §3.6 fallback switch
+```text
+// [invented] names — K6. These calls live in the BODY of `registerRoomFlags(pi)` (§14), inside the
+// factory, where `pi` is the factory parameter:
+//   pi.registerFlag("room-panel-key", { type: "string", default: "" });     // §6.1, RISK R4
+//   pi.registerFlag("room-cold-tree", { type: "boolean", default: true });  // §3.6 fallback switch
 ```
 
 `resolveRoomConfig(pi, root)` (§14) reads them back with `pi.getFlag`.
+
+`pi.registerFlag(...)` is called from `registerRoomFlags(pi)` (§14), which the factory body above
+invokes. Both calls MUST live in the factory body — `pi` is a factory **parameter**, not a module
+binding (D0: two `TS2304: Cannot find name 'pi'` errors came from the module-scope snippet that
+used to sit here). The two flag names are documented in §14.
+
 
 ---
 
@@ -233,17 +262,36 @@ pi.registerFlag("room-cold-tree", { type: "boolean", default: true });  // §3.6
 **Exports.**
 
 ```ts
-export function roomIdFor(sessionId: string): string;              // K7 — session id, never the root path
-export function logPathFor(root: string, roomId: string): string;  // K14 — the ONE log filename
-export function resourceKey(topic: string, key: string): string;   // "<topic>/<key>"
-export function newMessageId(): string;                            // UUID v4
+export function roomIdFor(root: string): string {                   // K7/X1 — ROOT-STABLE, never a session id
+  throw new Error("not implemented");
+}
+export function logPathFor(root: string, roomId: string): string {  // K14 — the ONE log filename
+  throw new Error("not implemented");
+}
+export function resourceKey(topic: string, key: string): string {   // "<topic>/<key>"
+  throw new Error("not implemented");
+}
+export function newMessageId(): string {                            // UUID v4
+  throw new Error("not implemented");
+}
 ```
 
-**Scaffold note (K7, applied).** `roomIdFor` takes the **session id**, not the root.
-`resolveLocalRoot(opts)` returns `path.resolve(artifactsDir, "local")` whenever an artifacts dir
-exists (`local-protocol.ts:229-240`), so its last segment is *always* `"local"` and a root-derived id
-collapses every session tree in every project onto the room id `"local"`. The rule is
-`sessionId.replace(/[^a-zA-Z0-9]/g, "").toLowerCase().slice(0, 32) || "room"`.
+**Scaffold note (K7/X1, applied).** `roomIdFor` takes the **absolute `local://` root**, never a
+session id. The earlier rule (`roomIdFor(sessionId)`) was design-breaking: each subagent is
+constructed with its **own** `SessionManager` (`task/executor.ts:4181` `SessionManager.open(...)`,
+`:4186` `SessionManager.inMemory(...)`) and `getSessionId()` returns that manager's own id
+(`session-manager.ts:2989`, minted at `:129`), so the parent and every child resolved a **different**
+`<root>/room/<id>.jsonl` — one room per agent, exactly the fragmentation the rule existed to
+prevent, and §11.1's `expect(logPathA).toBe(logPathB)` was false by construction.
+
+**Scaffold note (root stability, X1).** The rule is `"r" + sha256(root).slice(0, 16)`. The hash is
+over the **whole absolute path**, never the tail: `resolveLocalRoot(opts)` returns
+`path.resolve(artifactsDir, "local")` whenever an artifacts dir exists (`local-protocol.ts:229-240`),
+so the last segment is *always* `"local"` and a tail-derived id would collapse every session tree in
+every project onto the room id `"local"`. Hashing the root is deterministic, so every session on the
+same root — including every subagent, which shares the parent root — resolves the same id with no
+shared mutable state. An explicit override lives in `local://room/config.json` and is resolved by
+`resolveRoomId(root)` (§14).
 
 **Scaffold note (K14, applied).** `logPathFor(root, roomId)` is the single filename authority:
 `<root>/room/<roomId>.jsonl`. §3.1, §3.3 and the §11.1 test all call it; no module re-derives the
@@ -273,7 +321,7 @@ export type RoomRecord =
       performative?: Performative; replyWith?: string; replyBy?: string }
   | { v: 1; seq: number; ts: number; kind: "claim";   id: string; from: string; resource: string; ttlMs: number }
   | { v: 1; seq: number; ts: number; kind: "release"; id: string; from: string; resource: string;
-      reason: "released" | "expired" | "reclaimed" | "aborted" }
+      reason: "released" | "expired" | "reclaimed" | "aborted"; prevHolder: string }
   | { v: 1; seq: number; ts: number; kind: "note";    id: string; from: string; topic: string; body: string }
   | { v: 1; seq: number; ts: number; kind: "member";  id: string; from: string; action: "join" | "leave" }
   | { v: 1; seq: number; ts: number; kind: "gap";     id: string; from: string; skipped: number;
@@ -312,6 +360,15 @@ export interface BoardResult {
 }
 ```
 
+
+**`release.prevHolder` (M11).** `from` on a `release` record is **the agent who released** — for a
+reclaim that is the *new* claimant, not the agent who lost the lease. `prevHolder` is therefore
+**required**, not optional: the arbiter/sweep that writes the record always knows the displaced
+holder (`release()`/`reclaimIfStale()`/`expireStale()`, §10), and a plain release by the holder sets
+`prevHolder === from`. The T0 eviction notice is classified on `record.prevHolder === viewer.agentId`
+(§16) — classifying on `from` or on `reason` notifies the wrong agents, because `reason:"reclaimed"`
+is a single record that cannot be targeted to one viewer.
+
 **Imports.** none (leaf module — no runtime deps, no cycles).
 
 ---
@@ -324,22 +381,42 @@ export interface BoardResult {
 
 ```ts
 // §2.1 §3.3 — K8: one fd per process per logPath, in a globalThis registry.
-export function roomLogFd(root: string, roomId: string): number;   // mkdirSync + O_APPEND|O_CLOEXEC
-export function appendLine(fd: number, line: string): void;        // line MUST end "\n"
-export function readSince(fd: number, seq: number, limit: number): RoomRecord[];
+export function roomLogFd(root: string, roomId: string): number {   // mkdirSync + O_APPEND|O_CLOEXEC
+  throw new Error("not implemented");
+}
+export function appendLine(fd: number, line: string): void {        // line MUST end "\n"
+  throw new Error("not implemented");
+}
+export function readSince(fd: number, seq: number, limit: number): RoomRecord[] {
+  throw new Error("not implemented");
+}
 export function replay(fd: number): { records: RoomRecord[]; skipped: number };   // §3.3
-export function closeRoomLog(root: string, roomId: string): void;  // K8 — last live session only
+export function closeRoomLog(root: string, roomId: string): void {  // K8 — last live session only
+  throw new Error("not implemented");
+}
 
 // S3 requires per-kind field validation on replay; §2.1 assigns it no file.
-export function validateRecord(value: unknown): RoomRecord | null;       // [invented placement]
+export function validateRecord(value: unknown): RoomRecord | null {       // [invented placement]
+  throw new Error("not implemented");
+}
 
-export const LOG_VALIDATION_FIELDS: Readonly<Record<RecordKind, readonly string[]>>; // [invented]
+// [invented] — §3.3's per-kind required-field table, as data (the validator's single source).
+export const LOG_VALIDATION_FIELDS: Readonly<Record<RecordKind, readonly string[]>> = {
+  msg:     ["v", "seq", "ts", "kind", "id", "from", "topic", "body"],
+  claim:   ["v", "seq", "ts", "kind", "id", "from", "resource", "ttlMs"],
+  release: ["v", "seq", "ts", "kind", "id", "from", "resource", "reason", "prevHolder"],
+  note:    ["v", "seq", "ts", "kind", "id", "from", "topic", "body"],
+  member:  ["v", "seq", "ts", "kind", "id", "from", "action"],
+  gap:     ["v", "seq", "ts", "kind", "id", "from", "skipped", "reason"],
+};
 
 // F8 — [invented] the U6 mapping: errno → the detail string. Never throws.
 export type LogOpenResult =
   | { ok: true; fd: number }
   | { ok: false; error: "room file not found" | "room file unwritable" | "room file corrupt" };
-export function openRoomLog(root: string, roomId: string): LogOpenResult;   // [invented] F8 wrapper
+export function openRoomLog(root: string, roomId: string): LogOpenResult {   // [invented] F8 wrapper
+  throw new Error("not implemented");
+}
 ```
 
 **Imports.**
@@ -384,23 +461,44 @@ export type GrantResult =
 // §3.2 defines the release-reason union inside RoomRecord; alias it rather than redeclare.
 export type ReleaseReason = Extract<RoomRecord, { kind: "release" }>["reason"];
 
-export function grant(store: RoomStore, resource: string, holder: string, ttlMs: number): GrantResult;
-export function release(store: RoomStore, resource: string, holder: string, reason: ReleaseReason): boolean;
-export function reclaimIfStale(store: RoomStore, resource: string, now: number): ClaimState | null;
-export function contended(store: RoomStore, resource: string): string[];
+export function grant(store: RoomStore, resource: string, holder: string, ttlMs: number): GrantResult {
+  throw new Error("not implemented");
+}
+// M11 — `prevHolder` is required on the record: for a reclaim it is the displaced holder; a plain
+// release by the holder defaults it to `holder`. The T0 eviction notice classifies on it (§16).
+export function release(store: RoomStore, resource: string, holder: string, reason: ReleaseReason,
+                        prevHolder: string = holder): boolean {
+  throw new Error("not implemented");
+}
+export function reclaimIfStale(store: RoomStore, resource: string, now: number): ClaimState | null {
+  throw new Error("not implemented");
+}
+export function contended(store: RoomStore, resource: string): string[] {
+  throw new Error("not implemented");
+}
 
 // K3/K12 — the TIMER path (nobody waiting): drop the stale claim, no successor.
 // Distinct from reclaimIfStale, the CONTENDED path (replace + notify the previous holder).
 export function expireStale(store: RoomStore, now: number): Array<{ resource: string; prev: string; next?: string }>;
 
 // §3.4 "claim state is rebuilt by replaying the log on first open"
-export function hydrateClaims(store: RoomStore, records: readonly RoomRecord[]): void;
+export function hydrateClaims(store: RoomStore, records: readonly RoomRecord[]): void {
+  throw new Error("not implemented");
+}
 
 // §4.4 — the in-store condition variable for wait_for_claim.
-export function enqueueWaiter(store: RoomStore, resource: string, agentId: string): void;   // [invented]
-export function dequeueWaiter(store: RoomStore, resource: string, agentId: string): void;  // [invented]
-export function requeueWaiter(store: RoomStore, resource: string, agentId: string): void;  // [invented]
-export function resolveWaiters(store: RoomStore, resource: string, ttlMs: number): ClaimState | null; // [invented]
+export function enqueueWaiter(store: RoomStore, resource: string, agentId: string): void {   // [invented]
+  throw new Error("not implemented");
+}
+export function dequeueWaiter(store: RoomStore, resource: string, agentId: string): void {  // [invented]
+  throw new Error("not implemented");
+}
+export function requeueWaiter(store: RoomStore, resource: string, agentId: string): void {  // [invented]
+  throw new Error("not implemented");
+}
+export function resolveWaiters(store: RoomStore, resource: string, ttlMs: number): ClaimState | null { // [invented]
+  throw new Error("not implemented");
+}
 ```
 
 **Imports.**
@@ -430,14 +528,26 @@ of `release{reason:"expired"}`; without it a long-TTL claim is squattable foreve
 ```ts
 export const JOIN_BACKLOG = 50;                       // §3.5 "starts at logEnd - 50"
 
-export function initCursor(store: RoomStore, agentId: string): number;   // [invented]
-export function cursorFor(store: RoomStore, agentId: string): number;
-export function bumpCursor(store: RoomStore, agentId: string, seq: number): void;   // §5.3 uses this
-export function lagFor(store: RoomStore, agentId: string): number;       // logEnd - cursor
+export function initCursor(store: RoomStore, agentId: string): number {   // [invented]
+  throw new Error("not implemented");
+}
+export function cursorFor(store: RoomStore, agentId: string): number {
+  throw new Error("not implemented");
+}
+export function bumpCursor(store: RoomStore, agentId: string, seq: number): void {   // §5.3 uses this
+  throw new Error("not implemented");
+}
+export function lagFor(store: RoomStore, agentId: string): number {       // logEnd - cursor
+  throw new Error("not implemented");
+}
 
 // §3.5 — the session's own cursor survives resume via pi.appendEntry("chatroom:cursor", …)
-export function persistOwnCursor(pi: ExtensionAPI, roomId: string, seq: number): void;
-export function restoreOwnCursor(ctx: ExtensionContext, roomId: string): number | null;  // [invented]
+export function persistOwnCursor(pi: ExtensionAPI, roomId: string, seq: number): void {
+  throw new Error("not implemented");
+}
+export function restoreOwnCursor(ctx: ExtensionContext, roomId: string): number | null {  // [invented]
+  throw new Error("not implemented");
+}
 ```
 
 **Imports.**
@@ -470,7 +580,9 @@ export const RAW_MAX = 16;          // §3.6 merge shape
 export const COVER_BUDGET_LINES = 96;   // §5.2 (OptMem WAKE_LINES)
 export const RAW_TAIL_R = 50;           // §5.2 (matches §3.5 join cursor)
 
-export function openTreeStore(treePath: string): TreeStore;
+export function openTreeStore(treePath: string): TreeStore {
+  throw new Error("not implemented");
+}
 export function zoom(tree: TreeStore, lo: number, hi: number): Array<{ lo: number; hi: number; size: number; raw: boolean; text: string }>;  // §4.1
 export function validateZoomRange(lo: number, hi: number, n: number): { ok: true } | { ok: false; error: string };  // §4.1
 ```
@@ -502,7 +614,7 @@ export interface MemberState {
 // §3.1 — verbatim fields, plus the K8/K9/K10/K15 members.
 export interface RoomStore {
   root: string;                 // absolute local:// root (§3.3)
-  roomId: string;               // K7 — from roomIdFor(sessionId)
+  roomId: string;               // K7/X1 — from resolveRoomId(root) (§14); root-stable, never a session id
   logPath: string;              // logPathFor(root, roomId) — §2.1.2 (K14)
   treePath: string;             // <root>/room/tree/ (§3.6)
   records: RoomRecord[];
@@ -531,21 +643,33 @@ export interface RoomStore {
 export interface RoomStoreOptions { root: string; roomId: string }   // [invented]
 
 // K9 — the globalThis-anchored registry, keyed by the absolute root; create-on-first-use. [invented]
-export function storeFor(root: string, roomId: string): RoomStore;              // [invented]
-export function roomStoreFor(ctx: ExtensionContext): RoomStore;                 // [invented] R10
-export function resetRoomStores(): void;                                        // [invented] __roomTest
+export function storeFor(root: string, roomId: string): RoomStore {              // [invented]
+  throw new Error("not implemented");
+}
+export function roomStoreFor(ctx: ExtensionContext): RoomStore {                 // [invented] R10
+  throw new Error("not implemented");
+}
+export function resetRoomStores(): void {                                        // [invented] __roomTest
+  throw new Error("not implemented");
+}
 
 // §3.6 S5 pruning job — in-memory records array ONLY; the JSONL file is never truncated (K19).
 export const LOG_MAX_RECORDS = 5_000;
 export const LOG_MAX_AGE_MS = 604_800_000;
 export const PRUNE_INTERVAL_MS = 60_000;       // [invented]
-export function enforceRetention(store: RoomStore, now: number): RoomRecord | null;
-export function startPruneJob(store: RoomStore, ctx: ExtensionContext): void;   // [invented placement]
+export function enforceRetention(store: RoomStore, now: number): RoomRecord | null {
+  throw new Error("not implemented");
+}
+export function startPruneJob(store: RoomStore, ctx: ExtensionContext): void {   // [invented placement]
+  throw new Error("not implemented");
+}
 
 // K3 — the third refcounted ctx.setInterval job: expireStale → release{reason:"expired"} →
 // promote the oldest waiter → T0 notice. The ONLY producer of release{reason:"expired"}.
 export const CLAIM_SWEEP_INTERVAL_MS = 5_000;  // [invented] [calibrate]
-export function startClaimSweep(store: RoomStore, ctx: ExtensionContext): void;  // [invented]
+export function startClaimSweep(store: RoomStore, ctx: ExtensionContext): void {  // [invented]
+  throw new Error("not implemented");
+}
 
 // [invented] — the refcounted timer registry (I4/R11/R28). One entry per root; the tick runs in the
 // main session only and is cleared when the last live session disposes.
@@ -553,7 +677,10 @@ export interface RoomTimerRegistry {
   start(root: string, ctx: ExtensionContext): void;
   stop(root: string): void;
 }
-export const roomTimers: RoomTimerRegistry;
+export const roomTimers: RoomTimerRegistry = {
+  start(): void { throw new Error("not implemented"); },
+  stop(): void { throw new Error("not implemented"); },
+};
 
 // K3 — the claim-expiry sweep as a named lifecycle object, so the three jobs (sweep, prune,
 // compactor) are symmetric and the timer registry can drive them from one place.
@@ -561,7 +688,10 @@ export interface ClaimSweeper {                                          // [inv
   start(store: RoomStore, ctx: ExtensionContext): void;
   stop(root: string): void;
 }
-export const claimSweeper: ClaimSweeper;                                 // [invented]
+export const claimSweeper: ClaimSweeper = {                              // [invented]
+  start(): void { throw new Error("not implemented"); },
+  stop(): void { throw new Error("not implemented"); },
+};
 ```
 
 **Imports.**
@@ -600,7 +730,7 @@ asserts, and it keeps K7 (id from the session id) from splitting one room into N
 ```ts
 // SCAFFOLD-DEFINED — mirrors the manifest settings, which are unreachable at runtime (R6).
 export interface RoomConfig {
-  roomId: string;                 // "" = derive from the session id (K7)
+  roomId: string;                 // "" = mint from the root (roomIdFor(root)); non-empty = explicit override
   maxT1PerTurn: number;
   maxT1Tokens: number;
   coalesceCount: number;
@@ -618,20 +748,43 @@ export interface RoomConfig {
   coldTreeEnabled: boolean;       // K6 — the runtime toggle (flag), not a manifest feature
 }
 
-export const DEFAULT_ROOM_CONFIG: RoomConfig;
-export function configPath(root: string): string;               // <root>/room/config.json
-export function loadRoomConfig(root: string): RoomConfig;
-export function saveRoomConfig(root: string, config: RoomConfig): void;
+// Values are the §5.2 caps verbatim (10 / 2048 / 20 / 5 min / 1 per 2 s / 10 / 300 s / 5 s /
+// 8192 / 5000 / 7 d / 20000 / 3800); `roomId: ""` means "mint from the root".
+export const DEFAULT_ROOM_CONFIG: RoomConfig = {
+  roomId: "", maxT1PerTurn: 10, maxT1Tokens: 2048, coalesceCount: 20, coalesceMs: 300_000,
+  postsPerWindow: 1, burstPosts: 10, claimTtlMs: 300_000, claimSweepMs: 5_000,
+  maxBodyBytes: 8192, logMaxRecords: 5_000, logMaxAgeMs: 604_800_000,
+  compactionCallsPerDay: 20_000, digestBudgetTokens: 3_800, panelKey: "", coldTreeEnabled: true,
+};
+export function configPath(root: string): string {               // <root>/room/config.json
+  throw new Error("not implemented");
+}
+export function loadRoomConfig(root: string): RoomConfig {
+  throw new Error("not implemented");
+}
+export function saveRoomConfig(root: string, config: RoomConfig): void {
+  throw new Error("not implemented");
+}
+
+// X1 — the ONE room-id resolver: config override > roomIdFor(root). Root-stable, never a session id.
+export function resolveRoomId(root: string): string {                            // [invented]
+  throw new Error("not implemented");
+}
 
 // K6 — the ONLY feature-toggle mechanism. Registers every flag once; nothing reads a manifest feature.
-export function registerRoomFlags(pi: ExtensionAPI): void;      // [invented name]
-export function resolveRoomConfig(pi: ExtensionAPI, root: string): RoomConfig;   // flags > file > defaults
+export function registerRoomFlags(pi: ExtensionAPI): void {      // [invented name]
+  throw new Error("not implemented");
+}
+export function resolveRoomConfig(pi: ExtensionAPI, root: string): RoomConfig {   // flags > file > defaults
+  throw new Error("not implemented");
+}
 ```
 
 **Flag names** (K6, `// [invented]`): `room-panel-key` (string, default `""`, §6.1/RISK R4) and
 `room-cold-tree` (boolean, default `true`, §3.6 fallback switch). Both are read back with
 `pi.getFlag(name)`, which returns `boolean | string | undefined`
-(`extensibility/extensions/types.ts:1539,1552`).
+(`extensibility/extensions/types.ts:1539,1552`). `registerRoomFlags(pi)` is the single registration
+site for both; `src/index.ts` (§6) calls it from the factory body.
 
 **Imports.**
 
@@ -655,12 +808,24 @@ export const SUMMARY_MAX_BYTES = 288;             // = TREE_REC
 export const COMPACT_INTERVAL_MS = 5_000;         // [invented]
 export const COMPACT_MAX_RETRIES = 3;             // §3.6 [invented]
 
-export function withWriteMutex<T>(criticalSection: () => Promise<T>): Promise<T>;   // §3.6 verbatim
-export function startCompactor(store: RoomStore, ctx: ExtensionContext): void;
-export function stopCompactor(root: string): void;                        // [invented]
-export function compactionSpendToday(): number;                           // [invented] T5 cap probe
-export function compactOnce(store: RoomStore, ctx: ExtensionContext, block: [number, number]): Promise<boolean>;
-export function summarizeBlock(ctx: ExtensionContext, store: RoomStore, lo: number, hi: number): Promise<string>;  // [invented]
+export function withWriteMutex<T>(criticalSection: () => Promise<T>): Promise<T> {   // §3.6 verbatim
+  throw new Error("not implemented");
+}
+export function startCompactor(store: RoomStore, ctx: ExtensionContext): void {
+  throw new Error("not implemented");
+}
+export function stopCompactor(root: string): void {                        // [invented]
+  throw new Error("not implemented");
+}
+export function compactionSpendToday(): number {                           // [invented] T5 cap probe
+  throw new Error("not implemented");
+}
+export function compactOnce(store: RoomStore, ctx: ExtensionContext, block: [number, number]): Promise<boolean> {
+  throw new Error("not implemented");
+}
+export function summarizeBlock(ctx: ExtensionContext, store: RoomStore, lo: number, hi: number): Promise<string> {  // [invented]
+  throw new Error("not implemented");
+}
 ```
 
 **Imports.**
@@ -690,7 +855,9 @@ export type Tier = "T0" | "T1" | "T2";
 
 // K12 — TOTAL over all 6 RoomRecord kinds (switch with no default). `gap` → T1 (a promised notify);
 // `release{reason:"released"}` has its own arm; every arm returns.
-export function classify(record: RoomRecord, viewer: MemberState): Tier;
+export function classify(record: RoomRecord, viewer: MemberState): Tier {
+  throw new Error("not implemented");
+}
 
 export const HELD_CLAIM_WINDOW_MS = 3_600_000;   // §5.1 1 h window [invented value]
 ```
@@ -723,28 +890,51 @@ export interface Caps {
   logMaxRecords: number; logMaxAgeMs: number; maxBodyBytes: number;                       // K19
   compactionCallsPerDay: number;                                                          // K4 — a rate
 }
-export const DEFAULT_CAPS: Caps;
+export const DEFAULT_CAPS: Caps = {
+  maxT1PerTurn: 10, maxT1Tokens: 2048, coalesceCount: 20, coalesceMs: 300_000,
+  postsPerWindow: 1, burstPosts: 10, claimTtlMs: 300_000, claimSweepMs: 5_000,
+  logMaxRecords: 5_000, logMaxAgeMs: 604_800_000, maxBodyBytes: 8192,
+  compactionCallsPerDay: 20_000,
+};   // the §5.2 caps verbatim
 
 export type PostVerdict = "green" | "yellow" | "red";     // §5.2
 
-export function admitPost(store: RoomStore, agentId: string, now: number): PostVerdict;
+export function admitPost(store: RoomStore, agentId: string, now: number): PostVerdict {
+  throw new Error("not implemented");
+}
 export function selectT1(store: RoomStore, viewer: MemberState, pending: readonly RoomRecord[]):
   { injected: RoomRecord[]; summaryLine: string | null };                       // §5.2 K/B caps
-export function coalescePending(store: RoomStore, viewer: MemberState, now: number): string | null;  // §5.2 N/T
-export function isMuted(store: RoomStore, viewer: MemberState, record: RoomRecord): boolean;
-export function muteTopic(store: RoomStore, agentId: string, topic: string): void;
-export function unmuteTopic(store: RoomStore, agentId: string, topic: string): void;
-export function muteRoom(store: RoomStore, agentId: string): void;
-export function unmuteRoom(store: RoomStore, agentId: string): void;
-export function unreadCounts(store: RoomStore, viewer: MemberState): Map<string, number>;
-export function noteGap(store: RoomStore, skipped: number, reason: "retention" | "invalid" | "corrupt"): RoomRecord;  // [invented]
+export function coalescePending(store: RoomStore, viewer: MemberState, now: number): string | null {  // §5.2 N/T
+  throw new Error("not implemented");
+}
+export function isMuted(store: RoomStore, viewer: MemberState, record: RoomRecord): boolean {
+  throw new Error("not implemented");
+}
+export function muteTopic(store: RoomStore, agentId: string, topic: string): void {
+  throw new Error("not implemented");
+}
+export function unmuteTopic(store: RoomStore, agentId: string, topic: string): void {
+  throw new Error("not implemented");
+}
+export function muteRoom(store: RoomStore, agentId: string): void {
+  throw new Error("not implemented");
+}
+export function unmuteRoom(store: RoomStore, agentId: string): void {
+  throw new Error("not implemented");
+}
+export function unreadCounts(store: RoomStore, viewer: MemberState): Map<string, number> {
+  throw new Error("not implemented");
+}
+export function noteGap(store: RoomStore, skipped: number, reason: "retention" | "invalid" | "corrupt"): RoomRecord {  // [invented]
+  throw new Error("not implemented");
+}
 export function truncateOversized(body: string, tokenBudget: number): { head: string; handle: string };  // §5.2 N7
 ```
 
 **Imports.**
 
 ```ts
-import type { RoomStore } from "../store/room-store";   // owns MemberState
+import type { MemberState, RoomStore } from "../store/room-store";   // MemberState is owned here (K11)
 import type { RoomRecord } from "../store/schema";
 ```
 
@@ -764,17 +954,25 @@ export async function deliver(
   target: string,
   record: RoomRecord,
   tier: Tier,
-): Promise<void>;
+): Promise<void> {
+  throw new Error("not implemented");
+}
 
 // K2 — dispatch on record.kind FIRST; never touch a field the kind does not have. The `body` field
 // exists only on msg/note, so `deliver` must derive the body per kind before escaping anything.
-export function roomBodyOf(record: RoomRecord): string;      // [invented]
+export function roomBodyOf(record: RoomRecord): string {      // [invented]
+  throw new Error("not implemented");
+}
 
 // K17 — the model-facing line: tier badge · from · topic|resource · escaped body.
-export function renderLine(record: RoomRecord, safeBody: string, tier: Tier): string;   // [invented]
+export function renderLine(record: RoomRecord, safeBody: string, tier: Tier): string {   // [invented]
+  throw new Error("not implemented");
+}
 
 // §5.3 S1+S2 — the sanitising pair used on every delivery and every rendered line.
-export function escapeForDelivery(body: string): string;     // [invented name]
+export function escapeForDelivery(body: string): string {     // [invented name]
+  throw new Error("not implemented");
+}
 ```
 
 **Imports.**
@@ -799,7 +997,14 @@ import type { Tier } from "./tiers";
 
 ```ts
 export const ROOM_TOOL_NAME = "room";
-export const ROOM_DESCRIPTION: string;      // K16 — §4.0.1 verbatim (routing rule + op docs, §7.6)
+export const ROOM_DESCRIPTION: string = `Post to and read the shared room for this session tree: a
+topic-based claim board plus a bounded chat stream. Use it for coordination artifacts several agents
+must see — claims, releases, shared findings, status — NOT for private redirection (use agent://<id>
+for one recipient; see the room-vs-direct routing rule in your prompt).
+Ops: join (first call; mints your cursor), read (records after your cursor), post (send to a topic),
+claim/release (exclusive ownership of "<topic>/<key>" with a mandatory TTL), board (claims + roster +
+per-agent lag), topics, mute/unmute, tree/zoom (cold-tree views), recall (regex over the raw log).
+Before starting work another agent might also start, claim it. Read the board first.`;   // K16 — §4.0.1 verbatim
 export const ROOM_LOAD_MODE = "essential";  // RISK R3
 
 // SCAFFOLD-DEFINED — derived from the §4.1 zod schema.
@@ -843,7 +1048,9 @@ export const READ_LIMIT_MAX = 200;         // K20 — was 1 000 (~97k tokens)
 export const RECALL_LIMIT_MAX = 100;       // §4.1
 
 
-export function registerRoomTool(pi: ExtensionAPI): void;     // §2.1.1
+export function registerRoomTool(pi: ExtensionAPI): void {     // §2.1.1
+  throw new Error("not implemented");
+}
 ```
 
 **Imports.**
@@ -875,7 +1082,13 @@ pattern to copy.
 
 ```ts
 export const WAIT_FOR_AGENT_NAME = "wait_for_agent";
-export const WAIT_FOR_AGENT_DESCRIPTION: string;  // K16 — §4.0.1 verbatim
+export const WAIT_FOR_AGENT_DESCRIPTION: string = `Block until another AGENT changes status or
+leaves. Use this when you must wait on a peer agent's state (e.g. a worker finishing), NOT for room
+traffic (use wait_for_message) and NOT for a resource (use wait_for_claim). Bounded by timeout
+(default 30 s, max 30 min); returns outcome "event" | "timeout" | "aborted". Enumerate the agents you
+are waiting on explicitly. The native wait tool's "NEVER wait on other agents" guidance applies to
+that tool's own async jobs — this tool is the supported way to block on a peer, and it does not
+poll.`;   // K16 — §4.0.1 verbatim
 export const WAIT_DEFAULT_TIMEOUT_MS = 30_000;   // §4.2
 export const WAIT_MAX_MS = 1_800_000;            // §4.2 = omp WAIT_MAX_MS
 export const WAIT_MIN_MS = 1_000;
@@ -895,7 +1108,9 @@ export interface WaitForAgentDetails {
 }
 export type WaitForAgentResult = AgentToolResult<WaitForAgentDetails>;
 
-export function registerWaitForAgent(pi: ExtensionAPI): void;
+export function registerWaitForAgent(pi: ExtensionAPI): void {
+  throw new Error("not implemented");
+}
 ```
 
 **Imports.**
@@ -917,7 +1132,11 @@ import type { WaitOutcome } from "./wait-for-claim";   // K11 — declared once,
 
 ```ts
 export const WAIT_FOR_MESSAGE_NAME = "wait_for_message";
-export const WAIT_FOR_MESSAGE_DESCRIPTION: string;  // K16 — §4.0.1 verbatim
+export const WAIT_FOR_MESSAGE_DESCRIPTION: string = `Block until a new ROOM MESSAGE arrives that
+matches your filter (from a given agent, or any message that mentions you). Use this when you are
+waiting on room traffic; use wait_for_agent for a peer's status change and wait_for_claim for a
+resource lease. Bounded by timeout (default 30 s, max 30 min); returns outcome "event" | "timeout" |
+"aborted" plus the matched record. Prefer this over repeatedly calling room{op:"read"}.`;   // K16 — §4.0.1 verbatim
 
 export interface WaitForMessageParams {          // SCAFFOLD-DEFINED (derived from §4.3; K13)
   from?: string;
@@ -934,7 +1153,9 @@ export interface WaitForMessageDetails {
 }
 export type WaitForMessageResult = AgentToolResult<WaitForMessageDetails>;
 
-export function registerWaitForMessage(pi: ExtensionAPI): void;
+export function registerWaitForMessage(pi: ExtensionAPI): void {
+  throw new Error("not implemented");
+}
 ```
 
 **Imports.**
@@ -962,7 +1183,11 @@ unsubscribe) — never a raw `listeners.add`, so the waiter cannot leak. The uns
 
 ```ts
 export const WAIT_FOR_CLAIM_NAME = "wait_for_claim";
-export const WAIT_FOR_CLAIM_DESCRIPTION: string;  // K16 — §4.0.1 verbatim
+export const WAIT_FOR_CLAIM_DESCRIPTION: string = `Block until you acquire the CLAIM on
+"<topic>/<key>", or time out. When the holder releases, is reclaimed, or its TTL expires, the oldest
+waiter is resolved AND granted the lease. Use this when a peer holds a resource you need; use
+wait_for_message for chatter and wait_for_agent for peer status. Timeout is a normal outcome
+(acquired:false), not an error. Optional maxWaitMs bounds the wait.`;   // K16 — §4.0.1 verbatim
 export const CLAIM_WAIT_DEFAULT_TIMEOUT_MS = 20_000;   // §4.4 = SQS max long poll
 export const CLAIM_WAIT_MIN_MS = 1_000;
 export const CLAIM_WAIT_MAX_MS = 300_000;
@@ -986,7 +1211,9 @@ export interface WaitForClaimDetails {
 }
 export type WaitForClaimResult = AgentToolResult<WaitForClaimDetails>;
 
-export function registerWaitForClaim(pi: ExtensionAPI): void;
+export function registerWaitForClaim(pi: ExtensionAPI): void {
+  throw new Error("not implemented");
+}
 ```
 
 **Imports.**
@@ -1012,9 +1239,12 @@ export const DIGEST_CLAIMS_CAP = 10;        // §5.4
 
 // §5.4 items 1-6 ONLY. The routing rule is appended separately by the hook (K5), so the budget
 // never truncates it. Every room-authored string entering the digest is escaped (K22).
-export function buildDigest(store: RoomStore, viewer: MemberState, budgetTokens = DIGEST_BUDGET_TOKENS): string;
+export function buildDigest(store: RoomStore, viewer: MemberState, budgetTokens = DIGEST_BUDGET_TOKENS): string {
+  throw new Error("not implemented");
+}
 
-export const DIGEST_TRUNCATION_ORDER: readonly ["cold-tree", "raw-tail", "claims", "roster"];  // §5.4 U8
+export const DIGEST_TRUNCATION_ORDER: readonly ["cold-tree", "raw-tail", "claims", "roster"] =
+  ["cold-tree", "raw-tail", "claims", "roster"];   // §5.4 U8
 ```
 
 **Imports.**
@@ -1072,8 +1302,12 @@ If you have nothing to do but wait for a peer, a claim, or a room message, BLOCK
 **Exports.**
 
 ```ts
-export function registerHooks(pi: ExtensionAPI): void;      // §2.1.1
-export function buildPromptBlock(): string;                 // digest + routing rule  [invented]
+export function registerHooks(pi: ExtensionAPI): void {      // §2.1.1
+  throw new Error("not implemented");
+}
+export function buildPromptBlock(): string {                 // digest + routing rule  [invented]
+  throw new Error("not implemented");
+}
 export const HOOK_CURSOR_ENTRY_TYPE = "chatroom:cursor";    // §3.5
 ```
 
@@ -1115,13 +1349,23 @@ export interface RoomPanelOptions {                       // [invented]
 }
 
 export class RoomPanel implements Component {             // §2.1
-  constructor(options: RoomPanelOptions);
-  render(width: number): readonly string[];               // only required member (§6.2)
-  handleInput(data: string): void;                        // §6.6
-  dispose(): void;                                        // §6.8 — idempotent
+  constructor(options: RoomPanelOptions) {
+    throw new Error("not implemented");
+  }
+  render(width: number): readonly string[] {               // only required member (§6.2)
+    throw new Error("not implemented");
+  }
+  handleInput(data: string): void {                        // §6.6
+    throw new Error("not implemented");
+  }
+  dispose(): void {                                        // §6.8 — idempotent
+    throw new Error("not implemented");
+  }
 }
 
-export function registerPanel(pi: ExtensionAPI): void;    // §2.1.1
+export function registerPanel(pi: ExtensionAPI): void {    // §2.1.1
+  throw new Error("not implemented");
+}
 export const PANEL_SPLIT_AT = 88;                         // §6.2
 export const PANEL_LEFT_RATIO = 0.62;                     // §6.2
 export const PANEL_RIGHT_MIN_WIDTH = 30;                  // §6.2
@@ -1158,11 +1402,17 @@ export function projectChatRows(
   records: readonly RoomRecord[],
   viewer: MemberState,
   cursor: number,
-): ChatRow[];
+): ChatRow[] {
+  throw new Error("not implemented");
+}
 
-export function renderChatRows(rows: readonly ChatRow[], width: number, theme: Theme): string[];
+export function renderChatRows(rows: readonly ChatRow[], width: number, theme: Theme): string[] {
+  throw new Error("not implemented");
+}
 
-export function createChatPane(getRows: () => readonly ChatRow[], height: number): LayoutRenderer;  // §6.2
+export function createChatPane(getRows: () => readonly ChatRow[], height: number): LayoutRenderer {  // §6.2
+  throw new Error("not implemented");
+}
 ```
 
 **Imports.**
@@ -1186,9 +1436,13 @@ import type { Tier } from "../attention/tiers";
 ```ts
 export type BoardRow = ClaimRow & { state: "held" | "expired" | "released" };   // [invented] — §6.4 dimming
 
-export function projectClaims(rows: readonly BoardRow[], width: number, theme: Theme): string[];   // §6.4
-export function createBoardPane(getRows: () => readonly BoardRow[], width: number): LayoutRenderer;
-export const BOARD_COLUMNS: readonly TableColumn[];       // §6.4
+export function projectClaims(rows: readonly BoardRow[], width: number, theme: Theme): string[] {   // §6.4
+  throw new Error("not implemented");
+}
+export function createBoardPane(getRows: () => readonly BoardRow[], width: number): LayoutRenderer {
+  throw new Error("not implemented");
+}
+export const BOARD_COLUMNS: readonly TableColumn[] = undefined as never;  // [placeholder] // §6.4
 ```
 
 **Imports.**
@@ -1209,8 +1463,12 @@ import type { ClaimRow } from "../store/schema";
 ```ts
 export interface StatusCounts { running: number; idle: number; parked: number; aborted: number }  // [invented]
 
-export function statusCounts(refs: readonly AgentRef[]): StatusCounts;
-export function renderRosterStrip(refs: readonly AgentRef[], theme: Theme): string;
+export function statusCounts(refs: readonly AgentRef[]): StatusCounts {
+  throw new Error("not implemented");
+}
+export function renderRosterStrip(refs: readonly AgentRef[], theme: Theme): string {
+  throw new Error("not implemented");
+}
 ```
 
 **Imports.**
@@ -1230,12 +1488,22 @@ import type { Theme } from "@oh-my-pi/pi-tui";
 **Exports.**
 
 ```ts
-export function frameTopRow(width: number, title: string, chatWidth: number): string;      // [invented]
-export function frameDividerRow(width: number, chatWidth: number): string;                 // [invented]
-export function frameBottomRow(width: number): string;                                     // [invented]
-export function frameHintRow(width: number, hints: readonly string[], theme: Theme): string;  // [invented]
+export function frameTopRow(width: number, title: string, chatWidth: number): string {      // [invented]
+  throw new Error("not implemented");
+}
+export function frameDividerRow(width: number, chatWidth: number): string {                 // [invented]
+  throw new Error("not implemented");
+}
+export function frameBottomRow(width: number): string {                                     // [invented]
+  throw new Error("not implemented");
+}
+export function frameHintRow(width: number, hints: readonly string[], theme: Theme): string {  // [invented]
+  throw new Error("not implemented");
+}
 export function frameRows(width: number, title: string, chatWidth: number,
-                          hints: readonly string[], theme: Theme): string[];               // [invented]
+                          hints: readonly string[], theme: Theme): string[] {               // [invented]
+  throw new Error("not implemented");
+}
 ```
 
 **Imports.**
@@ -1259,7 +1527,11 @@ export type PanelAction =                                  // §6.6 — verbatim
   | "detail" | "focus-agent" | "release-claim" | "compose" | "filter"
   | "focus-chat" | "focus-board";
 
-export const PANEL_KEY_MAP: Readonly<Record<string, PanelAction>>;   // [invented]
+export const PANEL_KEY_MAP: Readonly<Record<string, PanelAction>> = {
+  "escape": "close", "tab": "toggle-narrow", "j": "down", "down": "down", "k": "up", "up": "up",
+  "g": "top", "G": "bottom", "enter": "detail", "o": "focus-agent", "r": "release-claim",
+  "p": "compose", "/": "filter", "1": "focus-chat", "2": "focus-board",
+};   // [invented] — the §6.6 key table, as data
 
 export function actionFor(
   data: string,
@@ -1280,7 +1552,9 @@ export function actionFor(
 ```ts
 export interface BodyLinesOptions { indent: string; collapsedLines: number }   // §7.4
 
-export function bodyLines(body: string, expanded: boolean, theme: Theme, opts: BodyLinesOptions): string[];
+export function bodyLines(body: string, expanded: boolean, theme: Theme, opts: BodyLinesOptions): string[] {
+  throw new Error("not implemented");
+}
 
 export const COLLAPSED_QUOTE_LINES = 3;     // §7.4 (3 collapsed / 12 expanded)
 export const EXPANDED_BODY_LINES = 12;      // §7.4
@@ -1305,16 +1579,29 @@ import { sanitizeText } from "@oh-my-pi/pi-utils";
 
 ```ts
 export type CardType = "room:message" | "room:mention" | "room:claim" | "room:board-delta";   // §7.3
-export const CARD_TYPES: readonly CardType[];
+export const CARD_TYPES: readonly CardType[] =
+  ["room:message", "room:mention", "room:claim", "room:board-delta"];   // §7.3
 
-export function cardTypeFor(record: RoomRecord): CardType;      // §5.3 uses this
-export function registerMessageRenderers(pi: ExtensionAPI): void;  // §2.1.1
+export function cardTypeFor(record: RoomRecord): CardType {      // §5.3 uses this
+  throw new Error("not implemented");
+}
+export function registerMessageRenderers(pi: ExtensionAPI): void {  // §2.1.1
+  throw new Error("not implemented");
+}
 
 // §11.3 "Card tests" — exported so each card is testable without the renderer registry.
-export function renderMessageCard(message: CustomMessage, options: MessageRenderOptions, theme: Theme): Component;
-export function renderMentionCard(message: CustomMessage, options: MessageRenderOptions, theme: Theme): Component;
-export function renderClaimCard(message: CustomMessage, options: MessageRenderOptions, theme: Theme): Component;
-export function renderBoardDeltaCard(message: CustomMessage, options: MessageRenderOptions, theme: Theme): Component;
+export function renderMessageCard(message: CustomMessage, options: MessageRenderOptions, theme: Theme): Component {
+  throw new Error("not implemented");
+}
+export function renderMentionCard(message: CustomMessage, options: MessageRenderOptions, theme: Theme): Component {
+  throw new Error("not implemented");
+}
+export function renderClaimCard(message: CustomMessage, options: MessageRenderOptions, theme: Theme): Component {
+  throw new Error("not implemented");
+}
+export function renderBoardDeltaCard(message: CustomMessage, options: MessageRenderOptions, theme: Theme): Component {
+  throw new Error("not implemented");
+}
 ```
 
 **Imports.**
@@ -1342,26 +1629,42 @@ shows `collapsedLines: 3` inline; the scaffold hoists the number so it has one h
 **Exports.**
 
 ```ts
-export function renderRoomCall(args: RoomParams, options: ToolRenderResultOptions, theme: Theme): Component;
+export function renderRoomCall(args: RoomParams, options: ToolRenderResultOptions, theme: Theme): Component {
+  throw new Error("not implemented");
+}
 export function renderRoomResult(result: AgentToolResult<RoomToolDetails>,
                                  options: ToolRenderResultOptions, theme: Theme,
-                                 args?: RoomParams): Component;
-export function describeRoomCall(args: RoomParams, options: ToolRenderResultOptions): NativeToolView | undefined;
+                                 args?: RoomParams): Component {
+  throw new Error("not implemented");
+}
+export function describeRoomCall(args: RoomParams, options: ToolRenderResultOptions): NativeToolView | undefined {
+  throw new Error("not implemented");
+}
 export function describeRoomResult(result: AgentToolResult<RoomToolDetails>,
                                    options: ToolRenderResultOptions,
-                                   args?: RoomParams): NativeToolView | undefined;
+                                   args?: RoomParams): NativeToolView | undefined {
+  throw new Error("not implemented");
+}
 
 // The three wait tools share one card pair; names are scaffold-invented.
 // K13 — typed, not `unknown`: the union of the three `details` payloads.
 export type WaitDetails = WaitForAgentDetails | WaitForMessageDetails | WaitForClaimDetails;   // [invented]
-export function renderWaitCall(args: Record<string, unknown>, options: ToolRenderResultOptions, theme: Theme): Component;
+export function renderWaitCall(args: Record<string, unknown>, options: ToolRenderResultOptions, theme: Theme): Component {
+  throw new Error("not implemented");
+}
 export function renderWaitResult(result: AgentToolResult<WaitDetails>,
                                  options: ToolRenderResultOptions, theme: Theme,
-                                 args?: Record<string, unknown>): Component;
-export function describeWaitCall(args: Record<string, unknown>, options: ToolRenderResultOptions): NativeToolView | undefined;
+                                 args?: Record<string, unknown>): Component {
+  throw new Error("not implemented");
+}
+export function describeWaitCall(args: Record<string, unknown>, options: ToolRenderResultOptions): NativeToolView | undefined {
+  throw new Error("not implemented");
+}
 export function describeWaitResult(result: AgentToolResult<WaitDetails>,
                                    options: ToolRenderResultOptions,
-                                   args?: Record<string, unknown>): NativeToolView | undefined;
+                                   args?: Record<string, unknown>): NativeToolView | undefined {
+  throw new Error("not implemented");
+}
 ```
 
 **Imports.**
@@ -1391,9 +1694,12 @@ runtime; this file imports only **types** back. Type-only, erased at runtime —
 
 ```ts
 export const ROOM_COMMAND_NAME = "room";
-export const ROOM_SUBCOMMANDS: readonly ["board", "join", "leave", "mute", "unmute", "config"];  // [invented]
+export const ROOM_SUBCOMMANDS: readonly ["board", "join", "leave", "mute", "unmute", "config"] =
+  ["board", "join", "leave", "mute", "unmute", "config"];   // [invented] — `config` is the R6 addition
 
-export function registerRoomCommand(pi: ExtensionAPI): void;   // §2.1.1
+export function registerRoomCommand(pi: ExtensionAPI): void {   // §2.1.1
+  throw new Error("not implemented");
+}
 ```
 
 **Imports.**
@@ -1462,8 +1768,10 @@ import { bumpCursor, cursorFor, initCursor, lagFor } from "../src/store/cursors"
 
 const OPTS = { getArtifactsDir: () => "/tmp/room-test", getSessionId: () => "20261006-abc123" };
 // K14 — the test computes the filename with the SAME helper the store uses. Never a hardcoded name.
-const ROOM_ID = roomIdFor(OPTS.getSessionId());
-const LOG_PATH = logPathFor(resolveLocalRoot(OPTS), ROOM_ID);
+// X1 — the room id is ROOT-STABLE: it comes from the resolved root, never from a session id.
+const ROOT = resolveLocalRoot(OPTS);
+const ROOM_ID = roomIdFor(ROOT);
+const LOG_PATH = logPathFor(ROOT, ROOM_ID);
 
 test("3 interleaved writers × 200 lines produce 600 parseable lines, zero torn", () => {
   throw new Error("not implemented");
@@ -1485,7 +1793,7 @@ test("logPathFor(root, roomId) is the path the store actually writes", () => {
   throw new Error("not implemented");
 });
 
-test("roomIdFor(sessionId) never returns the root's last segment ('local')", () => {
+test("roomIdFor(root) is stable across two different session ids and never returns 'local'", () => {
   throw new Error("not implemented");
 });
 
@@ -1619,8 +1927,10 @@ import { logPathFor, roomIdFor } from "../src/ids";
 import roomExtension, { __roomTest } from "../src/index";
 
 // K14 — the harness derives the path from the same helpers the store uses.
-const ROOM_ID = roomIdFor("AgentA");
-const logPath = (root: string): string => logPathFor(root, ROOM_ID);
+// X1 — ROOT-STABLE: the id comes from the resolved root (shared by the parent and every subagent),
+// never from a session id (`task/executor.ts:4181,4186`).
+const ROOM_ID = (root: string): string => roomIdFor(root);
+const logPath = (root: string): string => logPathFor(root, ROOM_ID(root));
 
 async function newSession(bus: EventBus, registry: AgentRegistry, root: string, id: string) {
   throw new Error("not implemented");
@@ -1691,6 +2001,95 @@ test("a deliberately throwing renderer falls back to the default card", () => {
   throw new Error("not implemented");
 });
 ```
+
+---
+
+## 44. `src/version.ts` — `// [invented]` (drift pin; D3/R34 require it)
+
+**Purpose.** Declare the host-version pin as a value and the assertion that checks it. Round 4's D3
+found the plan had **zero drift detection** — R2/R22/R23 each said "pin the version; add a smoke
+test", and none implemented it. This file is the pin; `tests/drift.test.ts` (§45) is the smoke test.
+Both the plan (`PLAN-build.md` §9 P0, §10 R34) and this scaffold's §1 `peerDependencies` reference it.
+
+**Exports.**
+
+```ts
+// X6 — the installed host is 18.7.0 (verified in @oh-my-pi/pi-coding-agent/package.json).
+// The pin mirrors package.json `peerDependencies`; tests/drift.test.ts asserts the two agree.
+export const HOST_VERSION_PIN = "18.7.0";
+
+// Every deep specifier the plugin imports (`[deep]` in the host map). The drift test imports each
+// and asserts it resolves non-undefined. Four have an explicit barrel (`pi-coding-agent/internal-urls`,
+// `pi-tui/chrome`, `pi-tui/render`, `pi-tui/tools`); the two highest-risk without one are
+// `pi-tui/overlays/agent-hub-renderer` and `pi-coding-agent/session/harness-tags`.
+export const DEEP_SPECIFIERS: readonly string[] = [
+  "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol",
+  "@oh-my-pi/pi-coding-agent/registry/agent-registry",
+  "@oh-my-pi/pi-coding-agent/session/harness-tags",
+  "@oh-my-pi/pi-coding-agent/utils/event-bus",
+  "@oh-my-pi/pi-tui/chat/messages",
+  "@oh-my-pi/pi-tui/chrome/overlay-box",
+  "@oh-my-pi/pi-tui/overlays/agent-hub-renderer",
+  "@oh-my-pi/pi-tui/render/render-utils",
+  "@oh-my-pi/pi-tui/render/status-line",
+  "@oh-my-pi/pi-tui/tools/renderer",
+];
+
+// Throws when `installed !== HOST_VERSION_PIN`; the drift test calls it and asserts it does not throw.
+export function assertHostVersion(installed: string): void {
+  throw new Error("not implemented");
+}
+```
+
+**Imports.** none.
+
+---
+
+## 45. `tests/drift.test.ts` — `// [invented]` (D3/R34; P0 requires it)
+
+**Purpose.** Host-version + deep-specifier smoke test (D3/R34). Imports **every** deep specifier the
+plugin uses, so a host upgrade that moves a wildcard path fails the build rather than silently
+breaking a renderer at runtime.
+
+```ts
+import { test, expect } from "bun:test";
+import { createRequire } from "node:module";
+import { HOST_VERSION_PIN, assertHostVersion, DEEP_SPECIFIERS } from "../src/version";
+import { resolveLocalRoot, resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
+import type { AgentStatus } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { escapeHarnessTags } from "@oh-my-pi/pi-coding-agent/session/harness-tags";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import type { CustomMessage } from "@oh-my-pi/pi-tui/chat/messages";
+import { bottomBorder, dividerSplit, topBorderSplit } from "@oh-my-pi/pi-tui/chrome/overlay-box";
+import { statusDot, statusGlyph, statusText } from "@oh-my-pi/pi-tui/overlays/agent-hub-renderer";
+import { createCachedComponent } from "@oh-my-pi/pi-tui/render/render-utils";
+import { renderStatusLine } from "@oh-my-pi/pi-tui/render/status-line";
+import type { NativeToolView } from "@oh-my-pi/pi-tui/tools/renderer";
+
+const require = createRequire(import.meta.url);
+
+test("the installed host version equals HOST_VERSION_PIN (X6/R34)", () => {
+  throw new Error("not implemented");
+});
+
+test("assertHostVersion throws on a mismatch and returns on a match", () => {
+  throw new Error("not implemented");
+});
+
+test("every deep specifier in DEEP_SPECIFIERS resolves (D3)", () => {
+  throw new Error("not implemented");
+});
+
+test("each deep specifier's named exports are non-undefined", () => {
+  throw new Error("not implemented");
+});
+```
+
+**Note (D3).** The four specifiers with an explicit barrel can be switched to it with a one-line
+import change if the deep path ever breaks: `pi-coding-agent/internal-urls`, `pi-tui/chrome`,
+`pi-tui/render`, `pi-tui/tools`. The two highest-risk that **cannot** are
+`pi-tui/overlays/agent-hub-renderer` (the whole `overlays/` tree is wildcard-only) and
+stay on the wildcard and are the reason this test exists.
 
 ---
 
@@ -1792,9 +2191,9 @@ Every entry below is marked `// [invented]`, `// SCAFFOLD-DEFINED`, or both in p
 | `src/store/config.ts` (§14) | §10 R6 (`local://room/config.json` + `/room config` + `registerFlag`) | §2.1 lists no config module; R6 mandates one |
 | `src/cards/body-lines.ts` (§32) | §7.4 RISK R21 | §2.1's `cards/` block omits the one file §7.4 says must ship |
 | `tests/tree.test.ts` (§39) | §9 P1b, §11.3 | P1b's acceptance command names it; §2.1's `tests/` block listed only three files |
+| `src/version.ts` (§44) | §10 R34, §9 P0 (`engines`/`peerDependencies` pin + drift test) | the plan pins the version in `package.json` but assigns the constant + assertion to no file |
+| `tests/drift.test.ts` (§45) | §9 P0, §10 R34 (D3) | P0's acceptance command names it; §2.1's `tests/` block listed only three files |
 | `.gitignore` (§3) | task requirement | not in §2.1 |
-
-### 42.2 Types the plan uses but never defines
 
 | Type | Used at | Placed in (once) |
 |---|---|---|
