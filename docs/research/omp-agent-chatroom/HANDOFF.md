@@ -26,7 +26,7 @@ picked up on the next session (no hot reload — restart omp).
 | Gate | Result |
 |---|---|
 | `bunx --bun tsc --noEmit -p tsconfig.json` | **0 errors** |
-| `bun test tests/` | **151 pass / 0 fail**, 1442 assertions, 10 files |
+| `bun test tests/` | **186 pass / 0 fail**, 1530 assertions, 11 files |
 | `bunx --bun @biomejs/biome check src tests` | **0 errors, 0 warnings** |
 | Remaining `not implemented` stubs | **0** |
 | Plugin loads in a real session | **0 extension errors**, all 4 tools + `/room` registered |
@@ -34,6 +34,8 @@ picked up on the next session (no hot reload — restart omp).
 | Governor pull path | **verified live** — a parked agent's 60 pending mentions batch into ONE steer |
 | Mutation testing (store) | 8/12 caught; 5 load-bearing tests non-vacuous |
 | Mutation testing (tree) | **12/12 caught** |
+| Panel keys | **wired via `ctx.ui.onTerminalInput`** — the host never focuses an overlay component |
+| Room root | **`<project cwd>/.omp-room`** — one room per project, shared by subagents |
 
 ## What it does
 
