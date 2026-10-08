@@ -14,7 +14,7 @@ import {
   UNTRUSTED_CLOSE,
   UNTRUSTED_OPEN,
 } from "../src/onboarding/digest";
-import { buildPromptBlock, registerHooks } from "../src/onboarding/hook";
+import { DIGEST_MESSAGE_TYPE, registerHooks } from "../src/onboarding/hook";
 import rule from "../src/onboarding/routing-rule.md" with { type: "text" };
 import {
   type MemberState,
@@ -155,28 +155,28 @@ test("a poisoned roomId from config cannot inject into the digest header", () =>
 });
 
 // ---------------------------------------------------------------------------------------------
-// 4. The routing rule is appended AFTER the digest and is never budgeted.
+// 4. The routing rule lives in the system prompt, independent of the digest.
 // ---------------------------------------------------------------------------------------------
 
-test("the routing rule is present in full regardless of digest size", () => {
+test("the routing rule is present in full in the system prompt regardless of digest size", async () => {
   const bulk = "Z".repeat(600);
   for (let i = 0; i < 50; i++) post(i, `record-${i}-${bulk}`);
 
-  const roomy = buildPromptBlock(buildDigest(store, viewer("AgentA")));
-  const squeezed = buildPromptBlock(buildDigest(store, viewer("AgentA"), 700));
+  const { pi, fire } = fakePi();
+  registerHooks(pi);
+  const result = (await fire(
+    "before_agent_start",
+    { type: "before_agent_start", prompt: "hi", systemPrompt: ["BASE"] },
+    fakeCtx("AgentA"),
+  )) as { systemPrompt?: string[] } | undefined;
+  const systemPrompt = (result?.systemPrompt ?? []).join("\n");
 
-  for (const block of [roomy, squeezed]) {
-    expect(block).toContain(rule);
-    expect(block).toContain("When in doubt, use the room.");
-    expect(block).toContain("BLOCK — do not poll");
-    // Order: digest first, rule after.
-    expect(block.indexOf("Your cursor:")).toBeGreaterThan(-1);
-    expect(block.indexOf("Your cursor:")).toBeLessThan(block.indexOf("## Room vs direct message"));
-  }
-  // The two budgets produced different digests but an identical rule block.
-  expect(squeezed.slice(squeezed.indexOf("## Room vs direct message"))).toBe(
-    roomy.slice(roomy.indexOf("## Room vs direct message")),
-  );
+  expect(systemPrompt).toContain(rule);
+  expect(systemPrompt).toContain("When in doubt, use the room.");
+  expect(systemPrompt).toContain("BLOCK — do not poll");
+  // The rule is a block of its own: the digest's budget never touches it, and the digest is not
+  // in the system prompt at all (F10).
+  expect(systemPrompt).not.toContain("Your cursor:");
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -238,19 +238,19 @@ test("the hook is idempotent: two before_agent_start firings for one agent do no
   )) as { systemPrompt?: string[] } | undefined;
   expect(first?.systemPrompt).toBeDefined();
   const firstPrompt = (first?.systemPrompt ?? []).join("\n");
-  expect(occurrences(firstPrompt, "Your cursor:")).toBe(1);
-  expect(firstPrompt).toContain("## Room vs direct message");
+  // The system prompt holds the static rule exactly once, and nothing volatile (F10).
+  expect(occurrences(firstPrompt, "## Room vs direct message")).toBe(1);
+  expect(occurrences(firstPrompt, "Your cursor:")).toBe(0);
   expect(firstPrompt.startsWith("BASE")).toBe(true);
 
   // The host chains the previous result into the next preparation, so the second firing sees the
-  // injected block — the duplicate is only prevented if the hook REPLACES it, not appends.
+  // injected rule — the duplicate is only prevented if the hook REPLACES it, not appends.
   const second = (await fire(
     "before_agent_start",
     { type: "before_agent_start", prompt: "again", systemPrompt: first?.systemPrompt ?? [] },
     ctx,
   )) as { systemPrompt?: string[] } | undefined;
   const secondPrompt = (second?.systemPrompt ?? []).join("\n");
-  expect(occurrences(secondPrompt, "Your cursor:")).toBe(1);
   expect(occurrences(secondPrompt, "## Room vs direct message")).toBe(1);
   expect(second?.systemPrompt?.length).toBe(first?.systemPrompt?.length);
 });
@@ -322,4 +322,65 @@ test("session_shutdown disposes this session's store ref exactly once", async ()
   const log = fs.readFileSync(path.join(root, "room", `${roomIdFor(root)}.jsonl`), "utf8");
   expect(log).toContain("still alive");
   expect(log).toContain("after-shutdown");
+});
+
+// ---------------------------------------------------------------------------------------------
+// 7. F10 — the volatile digest left the system prompt (spec §3.3 / §6).
+// ---------------------------------------------------------------------------------------------
+
+test("the digest carries no wall-clock uptime (F10)", () => {
+  post(0, "hello");
+  const digest = buildDigest(store, viewer("AgentA"));
+  // `uptime` changes every second — pure noise that invalidated the system-prompt prefix.
+  expect(digest).not.toContain("uptime");
+  expect(digest).toContain("Room ");
+  expect(digest).toContain("record(s)");
+});
+
+test("the routing rule stays in the system prompt exactly once; the digest is not there (F10)", async () => {
+  post(0, "a room message");
+  const { pi, fire } = fakePi();
+  registerHooks(pi);
+  const ctx = fakeCtx("AgentA");
+  const first = (await fire(
+    "before_agent_start",
+    { type: "before_agent_start", prompt: "hi", systemPrompt: ["BASE"] },
+    ctx,
+  )) as { systemPrompt?: string[] } | undefined;
+  const firstPrompt = (first?.systemPrompt ?? []).join("\n");
+  // The static rule is the cacheable part: present in full, exactly once.
+  expect(occurrences(firstPrompt, "## Room vs direct message")).toBe(1);
+  expect(firstPrompt).toContain(rule);
+  expect(firstPrompt.startsWith("BASE")).toBe(true);
+  // The volatile digest is no longer in the system prompt.
+  expect(firstPrompt).not.toContain("Your cursor:");
+  expect(firstPrompt).not.toContain("Caps:");
+
+  const second = (await fire(
+    "before_agent_start",
+    { type: "before_agent_start", prompt: "again", systemPrompt: first?.systemPrompt ?? [] },
+    ctx,
+  )) as { systemPrompt?: string[] } | undefined;
+  const secondPrompt = (second?.systemPrompt ?? []).join("\n");
+  expect(occurrences(secondPrompt, "## Room vs direct message")).toBe(1);
+  expect(second?.systemPrompt?.length).toBe(first?.systemPrompt?.length);
+});
+
+test("the digest still reaches the agent, as the before_agent_start message (F10)", async () => {
+  post(0, "a room message");
+  const { pi, fire } = fakePi();
+  registerHooks(pi);
+  const ctx = fakeCtx("AgentA");
+  const result = (await fire(
+    "before_agent_start",
+    { type: "before_agent_start", prompt: "hi", systemPrompt: ["BASE"] },
+    ctx,
+  )) as { message?: { customType?: string; content?: string } } | undefined;
+
+  expect(result?.message?.customType).toBe(DIGEST_MESSAGE_TYPE);
+  const content = String(result?.message?.content ?? "");
+  expect(content).toContain("Your cursor:");
+  expect(content).toContain("Caps:");
+  expect(content).toContain("Room ");
+  expect(content).toContain(UNTRUSTED_OPEN);
 });

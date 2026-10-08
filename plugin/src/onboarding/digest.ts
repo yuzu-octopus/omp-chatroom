@@ -59,13 +59,14 @@ export function buildDigest(
   const cursor = cursorFor(store, viewer.agentId);
   const lag = lagFor(store, viewer.agentId);
 
-  const first = store.records[0];
-  const uptimeSec = first === undefined ? 0 : Math.max(0, Math.round((now - first.ts) / 1000));
+  // F10 — no uptime: it is wall-clock state that changes every second, pure noise that made the
+  // digest different on every turn for no informational gain. (The digest no longer reaches the
+  // system prompt at all, but the field was worthless wherever it lived.)
   // `store.roomId` comes from `local://room/config.json` — a file any agent can write — so it is
   // room-authored data and must be escaped like everything else. It previously reached the system
   // prompt raw, outside the untrusted region.
   const header = [
-    `Room ${room(store.roomId)} — ${store.members.size} member(s) · ${store.records.length} record(s) · uptime ${uptimeSec}s`,
+    `Room ${room(store.roomId)} — ${store.members.size} member(s) · ${store.records.length} record(s)`,
   ];
   // Never truncated (§5.4 U8): the viewer's cursor + lag, and the active caps.
   const footer = [

@@ -33,6 +33,11 @@ export function appendLine(fd: number, line: string): void {
     if (w === 0) throw new Error("Short write");
     off += w;
   }
+  // §1 "flush each write" — O_APPEND makes the write atomic, but only fsync makes it durable: a
+  // crash (process or machine) can drop a page-cached write, and I5 claims each append survives
+  // one. This is the expensive part of an append, deliberately kept here (and synchronous) so
+  // every writer funnels through the one durable path.
+  fs.fsyncSync(fd);
 }
 
 // Sync whole-file read; a partial trailing line is returned as-is and rejected by JSON.parse.

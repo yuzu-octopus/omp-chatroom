@@ -1,4 +1,4 @@
-import { afterAll, expect, test } from "bun:test";
+import { afterAll, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -697,4 +697,22 @@ test("post truncates an oversized body and appends the read handle", async () =>
   expect(body.length).toBeLessThan(bigBody.length);
   expect(body).toContain("…");
   expect(body).toContain('room{op:"read"}');
+});
+
+// --- F12: appendLine flushes each write (spec §1 "flush each write") -------
+
+test("appendLine fsyncs the fd, so a crash cannot lose the last write", () => {
+  const root = tempRoot();
+  const roomId = roomIdFor(root);
+  const fd = roomLogFd(root, roomId);
+  const spy = spyOn(fs, "fsyncSync");
+  try {
+    appendLine(fd, `${JSON.stringify(msg(1))}\n`);
+    // I5 says appends are synchronous AND durable; fsync is what makes durability true.
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0]?.[0]).toBe(fd);
+  } finally {
+    spy.mockRestore();
+    closeRoomLog(root, roomId);
+  }
 });

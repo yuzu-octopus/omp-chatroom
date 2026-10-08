@@ -20,15 +20,15 @@ import {
 import { buildDigest } from "./digest";
 import rule from "./routing-rule.md" with { type: "text" };
 
-// The block is appended to the system prompt every turn, so a prior injection is detected by the
-// routing rule's heading — a stable string owned by this file, never by room content.
+// The static block is appended to the system prompt every turn, so a prior injection is detected by
+// the routing rule's heading — a stable string owned by this file, never by room content.
 const RULE_HEADING = "## Room vs direct message — routing rule";
 
-// K5 — digest first, routing rule AFTER it. The rule is a separate block, so the digest budget
-// (which buildDigest already enforced) never counts it.
-export function buildPromptBlock(digest: string): string {
-  return `${digest}\n\n${rule}`;
-}
+// F10 — the digest's custom-message type. The digest is volatile (roster/lag/claims change every
+// turn), so it MUST NOT live in the system prompt: spec §3.3 caches tools + system prompt across
+// every call, and §6 puts per-turn state after the view. `before_agent_start`'s `message` field is
+// the host's non-system-prompt injection point; the static routing rule stays in the system prompt.
+export const DIGEST_MESSAGE_TYPE = "room:digest";
 
 export function registerHooks(pi: ExtensionAPI): void {
   // §2.1.1
@@ -49,16 +49,25 @@ export function registerHooks(pi: ExtensionAPI): void {
       threadRoots: new Set<string>(),
       heldTopics: new Set<string>(),
     };
-    const block = buildPromptBlock(buildDigest(store, viewer));
 
-    // Idempotent per agent: a prior injection is REPLACED, never appended twice.
+    // §3.3 — the SYSTEM PROMPT holds only the static routing rule, so it is byte-identical every
+    // turn and stays in the prompt cache. Idempotent per agent: a prior injection is REPLACED,
+    // never appended twice.
     const systemPrompt = event.systemPrompt.slice();
     const injected = systemPrompt.findIndex((part) => part.includes(RULE_HEADING));
-    if (injected >= 0) systemPrompt[injected] = block;
-    else systemPrompt.push(block);
+    if (injected >= 0) systemPrompt[injected] = rule;
+    else systemPrompt.push(rule);
+
+    // §6 — the volatile digest is per-turn state: it rides the turn's message, after the cached
+    // prefix, never the system prompt.
+    const message = {
+      customType: DIGEST_MESSAGE_TYPE,
+      content: buildDigest(store, viewer),
+      display: false,
+    };
 
     persistOwnCursor(pi, store.roomId, cursorFor(store, agentId));
-    return { systemPrompt };
+    return { systemPrompt, message };
   });
 
   // I1/I5/R12 — mutations are synchronous, so shutdown only unsubscribes and drops this session's
