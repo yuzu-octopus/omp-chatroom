@@ -92,15 +92,23 @@ export function resolveRoomId(root: string): string {
   return roomId;
 }
 
-// Option A ships no panel and no cold tree, so there is no runtime flag to register: a flag that
-// toggles nothing is worse than no flag, because it reads as a working switch. `registerRoomFlags`
-// is kept as the single registration site so a future Option B phase has one obvious place to add
-// them back.
+// K6 — the two runtime flags. `room-panel-key` is the optional shortcut that opens the panel
+// (R4: default "" disables it); `room-cold-tree` toggles the cold-tree view. Both are read by
+// the panel at registration time.
 //
 // Configuration lives in `local://room/config.json` (see `loadRoomConfig`) and is editable via
 // `/room config`.
-export function registerRoomFlags(_pi: ExtensionAPI): void {
-  // No Option A runtime flags.
+export function registerRoomFlags(pi: ExtensionAPI): void {
+  pi.registerFlag("room-panel-key", {
+    description: "Keyboard shortcut that opens the agent chatroom panel (empty = disabled)",
+    type: "string",
+    default: "",
+  });
+  pi.registerFlag("room-cold-tree", {
+    description: "Enable the cold-tree view in the chatroom panel",
+    type: "boolean",
+    default: true,
+  });
 }
 
 export function resolveRoomConfig(_pi: ExtensionAPI, root: string): RoomConfig {

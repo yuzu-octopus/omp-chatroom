@@ -284,13 +284,13 @@ value, because `getFlag` always returns a value):
   a real difference from the cursor and worth knowing before you rely on a mute surviving a restart.
 - **Deep host imports.** The plugin source imports wildcard-only subpaths
   (`session/harness-tags`, `internal-urls/local-protocol`); the test suite adds more
-  (`registry/agent-registry`, `utils/event-bus`). They are pinned to host `18.7.0` in
+  (`registry/agent-registry`, `utils/event-bus`). They are pinned to host `18.8.0` in
   `peerDependencies`, and `tests/drift.test.ts` fails the build when the installed host drifts.
 
 ## Development
 
 ```sh
-bun test tests/                                 # 151 tests
+bun test tests/                                 # the whole suite
 bunx --bun tsc --noEmit -p tsconfig.json        # typecheck only; Bun executes the TS
 bunx --bun @biomejs/biome check src tests       # lint + format check
 bunx --bun @biomejs/biome check src tests --write   # apply fixes
