@@ -25,6 +25,7 @@ import {
   roomStoreFor,
   storeFor,
 } from "../src/store/room-store";
+import { viewPath } from "../src/store/tree-store";
 import { registerRoomTool } from "../src/tools/room";
 
 // §3.1 — a real store over a real temp root; the real JSONL log is written (§3.3).
@@ -877,4 +878,63 @@ test("recall: a catastrophic regex is bounded by the scan deadline, not a hang",
   } finally {
     clearTimeout(timer);
   }
+});
+
+// --- F3/F5: the room tree op serves the persisted, no-whole-message view ---
+
+test("tree: the view is persisted beside the tree and carries no whole-message block", async () => {
+  const { store, ctx } = newTestStore();
+  for (let i = 0; i < 10; i++) {
+    store.append({ kind: "msg", from: "AgentA", topic: "t", body: `msg ${i}` });
+  }
+
+  const result = await invokeRoom(ctx, { op: "tree" });
+  const blocks = result.details?.blocks as Array<{ lo: number; hi: number; size: number }>;
+  expect(blocks.length).toBeGreaterThan(0);
+  // F5 — no block covers exactly one message (not even the newest).
+  for (const b of blocks) expect(b.size).toBeGreaterThanOrEqual(2);
+  expect(blocks[blocks.length - 1].size).toBe(2);
+
+  // F3 — the view landed beside the tree, and a second call serves the SAME tiling.
+  expect(fs.existsSync(viewPath(store.treePath))).toBe(true);
+  const second = await invokeRoom(ctx, { op: "tree" });
+  const secondBlocks = second.details?.blocks as Array<{ lo: number; hi: number }>;
+  expect(secondBlocks.map((b) => [b.lo, b.hi])).toEqual(blocks.map((b) => [b.lo, b.hi]));
+});
+
+test("tree: a corrupt view file falls back to recomputing, never throws", async () => {
+  const { store, ctx } = newTestStore();
+  for (let i = 0; i < 6; i++) {
+    store.append({ kind: "msg", from: "AgentA", topic: "t", body: `m${i}` });
+  }
+  fs.mkdirSync(path.dirname(viewPath(store.treePath)), { recursive: true });
+  fs.writeFileSync(viewPath(store.treePath), "\u0000 not json at all");
+
+  const result = await invokeRoom(ctx, { op: "tree" });
+  expect(result.details).toMatchObject({ ok: true, op: "tree" });
+  const blocks = result.details?.blocks as Array<{ size: number }>;
+  expect(blocks.length).toBeGreaterThan(0);
+  for (const b of blocks) expect(b.size).toBeGreaterThanOrEqual(2);
+});
+
+// --- F5: zoom still reaches a single whole message -------------------------
+
+test("zoom: a pair of messages opens to two raw singletons (zoom reaches one message)", async () => {
+  const { store, ctx } = newTestStore();
+  for (let i = 0; i < 4; i++) {
+    store.append({ kind: "msg", from: "AgentA", topic: "t", body: `body-${i}` });
+  }
+  const result = await invokeRoom(ctx, { op: "zoom", lo: 0, hi: 2 });
+  const children = result.details?.children as Array<{
+    lo: number;
+    hi: number;
+    size: number;
+    raw: boolean;
+    text: string;
+  }>;
+  expect(children).toHaveLength(2);
+  expect(children[0]).toMatchObject({ lo: 0, hi: 1, size: 1, raw: true });
+  expect(children[0].text).toContain("body-0");
+  expect(children[1]).toMatchObject({ lo: 1, hi: 2, size: 1, raw: true });
+  expect(children[1].text).toContain("body-1");
 });

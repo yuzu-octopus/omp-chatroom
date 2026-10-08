@@ -24,7 +24,19 @@ import {
   roomStoreFor,
 } from "../src/store/room-store";
 import type { RoomRecord } from "../src/store/schema";
-import { openTreeStore, RAW_MAX, TREE_REC, validateZoomRange, zoom } from "../src/store/tree-store";
+import {
+  COVER_BUDGET_LINES,
+  loadView,
+  openTreeStore,
+  RAW_MAX,
+  readView,
+  saveView,
+  TREE_REC,
+  validateZoomRange,
+  viewPath,
+  viewTiling,
+  zoom,
+} from "../src/store/tree-store";
 
 // --- fixtures -------------------------------------------------------------
 
@@ -627,4 +639,112 @@ test("TREE_REC is 512 and a node record round-trips at that width", () => {
   expect(tree.putNode(2, 4, "b".repeat(TREE_REC))).toBe(true);
   expect(tree.getNode(2, 4)).toBe("b".repeat(TREE_REC - 1));
   expect(fs.statSync(level).size).toBe(TREE_REC * 2);
+});
+
+// --- 11. F13 — the ready queue (never scan the tree for work) ---------------
+
+test("F13: ready() enqueues a built node's parent and never returns an unbuildable block", () => {
+  const tree = openTreeStore(tmpTreePath(), 8);
+
+  // Fresh: only the level-2 head can be written — the dense prefix allows nothing else.
+  expect(tree.ready()).toEqual([[0, 2]]);
+  expect(tree.putNode(0, 2, "a")).toBe(true);
+  expect(tree.ready()).toEqual([[2, 4]]);
+  expect(tree.putNode(2, 4, "b")).toBe(true);
+  // Both halves are built, so the parent [0,4) is enqueued — beside the next level-2 head.
+  expect(tree.ready()).toEqual([
+    [4, 6],
+    [0, 4],
+  ]);
+  expect(tree.putNode(4, 6, "c")).toBe(true);
+  expect(tree.putNode(0, 4, "ab")).toBe(true);
+  // [0,4) and [4,6) are built; the level-4 head now needs its right half [6,8).
+  expect(tree.ready()).toEqual([[6, 8]]);
+  expect(tree.putNode(6, 8, "d")).toBe(true);
+  // [6,8) built → the level-4 head [4,8) is ready; the level-8 head needs [0,8) built.
+  expect(tree.ready()).toEqual([[4, 8]]);
+
+  // Every block the queue offers is actually writable (no wasted compaction calls).
+  for (const [lo, hi] of tree.ready()) expect(tree.putNode(lo, hi, "x")).toBe(true);
+});
+
+test("F13: building through ready() produces the same full tree as the pending() scan", async () => {
+  const { treePath } = tmpRootTree();
+  const N = 40;
+  const store = fakeStore(
+    treePath,
+    Array.from({ length: N }, (_, i) => msg(i)),
+  );
+  const { ctx } = fakeCtx("main");
+
+  __compactTest.resetSpend();
+  // The compactor's path: consume ready(), one node per step. Same nodes, no scan.
+  for (let guard = 0; guard < 10_000; guard++) {
+    const next = openTreeStore(treePath, N).ready(1);
+    if (next.length === 0) break;
+    if (!(await compactOnce(store, ctx, next[0]))) {
+      throw new Error(`compaction stalled on [${next[0][0]},${next[0][1]})`);
+    }
+  }
+  // The whole tree is built — the identical work set the old pending()-driven buildAll reached.
+  expect(openTreeStore(treePath, N).pending()).toEqual([]);
+  __compactTest.resetSpend();
+});
+
+// --- 12. F3 — the persisted view -------------------------------------------
+
+test("F3: the view is written on first use, then loaded instead of recomputed", () => {
+  const { treePath } = tmpRootTree();
+  const T = 100;
+
+  const first = loadView(treePath, T, COVER_BUDGET_LINES);
+  expect(first.length).toBeGreaterThan(0);
+  expect(fs.existsSync(viewPath(treePath))).toBe(true);
+
+  // A hand-written view with a DIFFERENT but valid tiling. If loadView recomputed, it would return
+  // its own tiling; returning this one proves it loaded the file (§3.2 "never rebuild it").
+  const custom: Array<[number, number]> = [
+    [0, 64],
+    [64, 96],
+    [96, 98],
+    [98, 100],
+  ];
+  saveView(treePath, T, custom);
+  expect(loadView(treePath, T, COVER_BUDGET_LINES)).toEqual(custom);
+
+  // A corrupt file falls back to recomputing and never throws.
+  fs.writeFileSync(viewPath(treePath), "{ this is not json");
+  expect(readView(treePath, T)).toBeNull();
+  expect(loadView(treePath, T, COVER_BUDGET_LINES)).toEqual(viewTiling(T, COVER_BUDGET_LINES));
+
+  // A stale log length is rejected: the view describes T, not T+1.
+  saveView(treePath, T, custom);
+  expect(readView(treePath, T + 1)).toBeNull();
+
+  // A size-1 block is not a valid view entry (F5), so the file is rejected.
+  fs.writeFileSync(viewPath(treePath), JSON.stringify({ v: 1, t: T, nodes: [[0, 0]] }));
+  expect(readView(treePath, T)).toBeNull();
+});
+
+// --- 13. F5 — the view holds no whole message ------------------------------
+
+test("F5: the view never contains a block covering exactly one message", () => {
+  for (const T of [1, 2, 3, 4, 5, 8, 9, 10, 96, 97, 100, 1000, 1001]) {
+    const tiling = viewTiling(T, COVER_BUDGET_LINES);
+    expect(tiling.length, `T=${T} is non-empty`).toBeGreaterThan(0);
+    expect(tiling[0][0], `T=${T} starts at 0`).toBe(0);
+    for (const [lo, hi] of tiling) {
+      const size = hi - lo;
+      expect(size, `T=${T} block ${lo}-${hi} is not a whole message`).toBeGreaterThanOrEqual(2);
+      expect(size & (size - 1), `T=${T} block ${lo}-${hi} is a power of two`).toBe(0);
+      expect(lo % size, `T=${T} block ${lo}-${hi} is aligned`).toBe(0);
+    }
+    for (let i = 1; i < tiling.length; i++) {
+      expect(tiling[i][0], `T=${T} block ${i} is contiguous`).toBe(tiling[i - 1][1]);
+    }
+    // It covers the log; an odd T's last pair overshoots by exactly one message.
+    const last = tiling[tiling.length - 1][1];
+    expect(last).toBeGreaterThanOrEqual(T);
+    expect(last).toBeLessThanOrEqual(T + 1);
+  }
 });

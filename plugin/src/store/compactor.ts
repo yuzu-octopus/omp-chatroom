@@ -224,13 +224,18 @@ export async function compactOnce(
   });
 }
 
-/** One tick: build up to COMPACT_JOBS pending nodes, smallest first. Never throws. */
+/**
+ * One tick: build up to COMPACT_JOBS nodes, smallest first. Never throws.
+ *
+ * F13 — `ready()` returns the nodes that can be built now (at most one per level), so the tick
+ * never scans the tree for work. A snapshot is taken per tick, as before: a node that returns false
+ * (already built, cap, unbuildable, or a failed summary) is skipped and the loop moves on, so one
+ * bad node never pauses the whole tree. Parents that become ready mid-tick are picked up next tick.
+ */
 async function runJobs(store: RoomStore, ctx: ExtensionContext): Promise<void> {
   const tree = openTreeStore(store.treePath, store.records.length);
-  for (const block of tree.pending(COMPACT_JOBS)) {
+  for (const block of tree.ready(COMPACT_JOBS)) {
     if (atCap()) return;
-    // A false return (already built, cap, unbuildable, or a failed summary) skips this node; the
-    // loop moves on to the next pending block, so one bad node never pauses the whole tree.
     await compactOnce(store, ctx, block);
   }
 }

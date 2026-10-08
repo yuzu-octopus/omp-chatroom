@@ -31,6 +31,7 @@ import { type MemberState, type RoomStore, roomStoreFor } from "../store/room-st
 import type { BoardResult, Performative, RoomRecord, TopicRow } from "../store/schema";
 import {
   COVER_BUDGET_LINES,
+  loadView,
   openTreeStore,
   RAW_MAX,
   validateZoomRange,
@@ -688,8 +689,11 @@ export function registerRoomTool(pi: ExtensionAPI): void {
         }
 
         case "tree": {
-          const tree = openTreeStore(store.treePath, store.records.length);
-          const tiling = tree.cover(store.records.length, COVER_BUDGET_LINES);
+          const n = store.records.length;
+          const tree = openTreeStore(store.treePath, n);
+          // F3 — the persisted view, loaded (and saved on first use), never rebuilt from the log.
+          // F5 — `loadView` tiles with a minimum block of 2, so no block covers a single message.
+          const tiling = loadView(store.treePath, n, COVER_BUDGET_LINES);
           const blocks = tiling.map(([lo, hi]) => {
             const size = hi - lo;
             const raw = size <= RAW_MAX;
