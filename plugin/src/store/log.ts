@@ -49,26 +49,6 @@ function readAllLines(fd: number): string[] {
   return buf.toString("utf-8", 0, read).split("\n");
 }
 
-export function readSince(fd: number, seq: number, limit: number): RoomRecord[] {
-  const out: RoomRecord[] = [];
-  const cap = limit > 0 ? limit : Number.MAX_SAFE_INTEGER;
-  for (const line of readAllLines(fd)) {
-    if (line.length === 0) continue;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    const record = validateRecord(parsed);
-    if (record !== null && record.seq > seq) {
-      out.push(record);
-      if (out.length >= cap) break;
-    }
-  }
-  return out;
-}
-
 // §3.3 — skip malformed lines and CONTINUE (C1). A torn line must never drop later records.
 // A skipped line emits one `gap` record; its `seq` is the preceding record's seq so it never
 // consumes a number and cannot shift later cursors (M-2).

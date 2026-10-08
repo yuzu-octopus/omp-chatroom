@@ -6,7 +6,6 @@ import * as path from "node:path";
 export interface TreeStore {
   getNode(lo: number, hi: number): string | null;
   putNode(lo: number, hi: number, summary: string): boolean;
-  forget(lo: number, hi: number): void;
   pending(limit?: number): Array<[number, number]>;
   cover(T: number, budget: number): Array<[number, number]>;
   /** [invented] the log length the tiling is computed against; refresh it as the log grows. */
@@ -65,15 +64,6 @@ function repair(p: string): void {
   }
 }
 
-function truncateTo(p: string, bytes: number): void {
-  const fd = fs.openSync(p, "r+");
-  try {
-    fs.ftruncateSync(fd, bytes);
-  } finally {
-    fs.closeSync(fd);
-  }
-}
-
 /**
  * Cut `text` to `maxBytes` UTF-8 bytes without splitting a code point. OptMem `die()`s on an
  * over-long summary (`memo:296-299`); the plan (T3) requires graceful truncation instead — the
@@ -118,20 +108,6 @@ function decodeRecord(buf: Buffer): string | null {
 export function openTreeStore(treePath: string, logLength = 0): TreeStore {
   const levelPath = (size: number): string => path.join(treePath, String(size));
 
-  /** Existing level files, ascending — used by `forget` so it needs no log length. */
-  const levels = (): number[] => {
-    let names: string[];
-    try {
-      names = fs.readdirSync(treePath);
-    } catch {
-      return [];
-    }
-    return names
-      .map(Number)
-      .filter((n) => Number.isInteger(n) && n >= MIN_LEVEL)
-      .sort((a, b) => a - b);
-  };
-
   const store: TreeStore = {
     logLength,
 
@@ -166,19 +142,6 @@ export function openTreeStore(treePath: string, logLength = 0): TreeStore {
       if (count(p) !== lo / size) return false;
       fs.appendFileSync(p, encodeRecord(summary));
       return true;
-    },
-
-    forget(lo: number, hi: number): void {
-      if (!isBlock(lo, hi)) return;
-      const size0 = hi - lo;
-      // §3.6 invalidation — truncate every level from `lo//size` upward, dropping the target and
-      // all ancestors. Later blocks at those levels go too and are rebuilt; the log is untouched.
-      for (const size of levels()) {
-        if (size < size0) continue;
-        const p = levelPath(size);
-        const k = Math.floor(lo / size);
-        if (count(p) > k) truncateTo(p, k * TREE_REC);
-      }
     },
 
     pending(limit?: number): Array<[number, number]> {

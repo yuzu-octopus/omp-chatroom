@@ -17,6 +17,7 @@ import {
 import { resolveRoomConfig } from "../store/config";
 import { type RoomStore, roomStoreFor } from "../store/room-store";
 import type { RoomRecord } from "../store/schema";
+import { viewerFor } from "../tools/room";
 
 export const WAIT_FOR_CLAIM_NAME = "wait_for_claim";
 export const WAIT_FOR_CLAIM_DESCRIPTION: string = `Block until you acquire the CLAIM on
@@ -137,6 +138,9 @@ async function waitForClaim(
   // Fast path: this agent already holds the lease — waiting would be a no-op.
   const held = store.claims.get(resource);
   if (held?.holder === agentId) return eventResult(resource, held);
+  // M-8 — mark this agent as waiting on the resource so classify returns T1 for claim/release.
+  const viewer = viewerFor(store, agentId);
+  viewer.waitedResource = resource;
 
   let settle!: (result: WaitForClaimResult) => void;
   const done = new Promise<WaitForClaimResult>((resolve) => {
@@ -190,6 +194,7 @@ async function waitForClaim(
     dequeueWaiter(store, resource, agentId);
     ctx.clearTimer(timer);
     signal?.removeEventListener("abort", onAbort);
+    viewer.waitedResource = undefined;
   }
 }
 
@@ -218,7 +223,7 @@ export function registerWaitForClaim(pi: ExtensionAPI): void {
     strict: true,
     // R9 — not in the typed ToolDefinition; declared on the literal, and the wait never relies on it
     // for correctness (it observes `signal` and bounds its own timeout).
-    interruptible: true,
+    interruptible: false,
     async execute(
       _toolCallId: string,
       p: WaitForClaimParams,

@@ -836,3 +836,45 @@ test("topics/recall content carries the rows, not a count", async () => {
     (await invokeRoom(ctx, { op: "recall", pattern: "needle" })).content[0]?.text ?? "";
   expect(recall).toContain("needle in here");
 });
+
+// --- F1 security: recall pattern length limit ---
+
+test("recall: pattern over 200 chars is rejected", async () => {
+  const { ctx } = newTestStore();
+  const longPattern = "a".repeat(201);
+  const result = await invokeRoom(ctx, { op: "recall", pattern: longPattern });
+  expect(result.details).toMatchObject({ ok: false });
+  expect(result.details?.error).toContain("too long");
+});
+
+// --- F1 security: recall ReDoS timeout guard ---
+
+test("recall: a catastrophic regex is bounded by the scan deadline, not a hang", async () => {
+  const { store, ctx } = newTestStore();
+  // The pattern must actually backtrack. `(a+)+$` against an all-`a` body MATCHES immediately (0 ms)
+  // — it only backtracks when the match fails, so each body needs a non-matching tail (`a…ab`).
+  // Measured: `(a+)+$` on 50 a's = 0 ms; on 50 a's + "b" = ~600 ms.
+  for (let i = 0; i < 200; i++) {
+    store.append({ kind: "msg", from: "AgentA", topic: "t", body: `${"a".repeat(50)}b` });
+  }
+  const start = Date.now();
+  // Race against a hard timeout: if the deadline guard regresses, this fails fast rather than
+  // hanging the suite.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const result = await Promise.race([
+      invokeRoom(ctx, { op: "recall", pattern: "(a+)+$" }),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("recall hung — ReDoS regression")), 15_000);
+      }),
+    ]);
+    const elapsed = Date.now() - start;
+    // The deadline is checked BETWEEN records, so a single `regex.test()` can overrun it. Bound the
+    // whole call generously: the point is that it RETURNS, not that it is fast.
+    expect(elapsed).toBeLessThan(10_000);
+    expect(result.details).toMatchObject({ ok: false });
+    expect(result.details?.error).toContain("timed out");
+  } finally {
+    clearTimeout(timer);
+  }
+});

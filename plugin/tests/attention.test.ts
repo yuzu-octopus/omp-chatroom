@@ -24,7 +24,7 @@ import {
   truncateOversized,
   unreadCounts,
 } from "../src/attention/governor";
-import { classify, HELD_CLAIM_WINDOW_MS, type Tier } from "../src/attention/tiers";
+import { classify, type Tier } from "../src/attention/tiers";
 import { enqueueWaiter } from "../src/store/claims";
 import {
   type MemberState,
@@ -296,9 +296,6 @@ test("eviction notice: T0 for prevHolder, T2 for the releaser/new claimant (M11 
   const voluntary = release(2, { reason: "released", from: "A", prevHolder: "A" });
   expect(classify(voluntary, viewer({ agentId: "A" }))).toBe("T0");
   expect(classify(voluntary, viewer({ agentId: "B" }))).toBe("T2");
-
-  // The 1 h window is exported for the caller that prunes `heldTopics` (M-1).
-  expect(HELD_CLAIM_WINDOW_MS).toBe(3_600_000);
 });
 
 // --- 3. the injection cap (K/B) -------------------------------------------
@@ -797,4 +794,13 @@ test("T2 digest: it rides a T1 aside too, not only a T0 steer", async () => {
   expect(bCalls.length).toBe(1);
   expect(bCalls[0]!.options).toMatchObject({ deliverAs: "aside" });
   expect(String(bCalls[0]!.payload.content)).toContain("20 new message");
+});
+
+test("selectT1 with explicit caps injects at most maxT1PerTurn records", () => {
+  const pending = Array.from({ length: 11 }, (_, i) => msg(i + 1, { topic: "build" }));
+  const store = miniStore(pending, { A: 0 });
+  const v = viewer({ topics: new Set(["build"]) });
+
+  const { injected } = selectT1(store, v, pending, { caps: { maxT1PerTurn: 2 } });
+  expect(injected.length).toBe(2);
 });

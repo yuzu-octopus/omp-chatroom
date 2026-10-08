@@ -67,7 +67,12 @@ interface Buckets {
 }
 const BUCKETS: WeakMap<RoomStore, Map<string, Buckets>> = new WeakMap();
 
-function bucketsFor(store: RoomStore, agentId: string, now: number): Buckets {
+function bucketsFor(
+  store: RoomStore,
+  agentId: string,
+  now: number,
+  caps: Caps = DEFAULT_CAPS,
+): Buckets {
   let perStore = BUCKETS.get(store);
   if (perStore === undefined) {
     perStore = new Map();
@@ -76,25 +81,30 @@ function bucketsFor(store: RoomStore, agentId: string, now: number): Buckets {
   let bucket = perStore.get(agentId);
   if (bucket === undefined) {
     bucket = {
-      committed: DEFAULT_CAPS.burstPosts,
-      excess: DEFAULT_CAPS.burstPosts,
+      committed: caps.burstPosts,
+      excess: caps.burstPosts,
       updatedAt: now,
     };
     perStore.set(agentId, bucket);
     return bucket;
   }
-  const refill = ((now - bucket.updatedAt) * DEFAULT_CAPS.postsPerWindow) / POST_WINDOW_MS;
+  const refill = ((now - bucket.updatedAt) * caps.postsPerWindow) / POST_WINDOW_MS;
   if (refill > 0) {
-    bucket.committed = Math.min(DEFAULT_CAPS.burstPosts, bucket.committed + refill);
-    bucket.excess = Math.min(DEFAULT_CAPS.burstPosts, bucket.excess + refill);
+    bucket.committed = Math.min(caps.burstPosts, bucket.committed + refill);
+    bucket.excess = Math.min(caps.burstPosts, bucket.excess + refill);
     bucket.updatedAt = now;
   }
   return bucket;
 }
 
 /** Room posts only; T0 DMs are exempt (§5.2). `red` means coalesce the post, never drop it. */
-export function admitPost(store: RoomStore, agentId: string, now: number): PostVerdict {
-  const bucket = bucketsFor(store, agentId, now);
+export function admitPost(
+  store: RoomStore,
+  agentId: string,
+  now: number,
+  caps: Caps = DEFAULT_CAPS,
+): PostVerdict {
+  const bucket = bucketsFor(store, agentId, now, caps);
   if (bucket.committed >= 1) {
     bucket.committed -= 1;
     return "green";
@@ -151,14 +161,15 @@ export function selectT1(
   store: RoomStore,
   viewer: MemberState,
   pending: readonly RoomRecord[],
-  options: { spend?: boolean; limit?: number } = {},
+  options: { spend?: boolean; limit?: number; caps?: Partial<Caps> } = {},
 ): { injected: RoomRecord[]; summaryLine: string | null } {
+  const caps = { ...DEFAULT_CAPS, ...options.caps };
   const budget = options.spend === true ? budgetFor(store, viewer.agentId) : undefined;
   const maxRecords = Math.min(
-    DEFAULT_CAPS.maxT1PerTurn - (budget?.records ?? 0),
+    caps.maxT1PerTurn - (budget?.records ?? 0),
     options.limit ?? Number.POSITIVE_INFINITY,
   );
-  const maxTokens = DEFAULT_CAPS.maxT1Tokens - (budget?.tokens ?? 0);
+  const maxTokens = caps.maxT1Tokens - (budget?.tokens ?? 0);
   const injected: RoomRecord[] = [];
   let tokens = 0;
   if (maxRecords > 0) {
@@ -191,14 +202,19 @@ export function selectT1(
 // --- T2 coalescing (N pending or T lag) -----------------------------------
 
 /** §5.2 — one digest line once N T2 records are pending OR the oldest has lagged T; else null. */
-export function coalescePending(store: RoomStore, viewer: MemberState, now: number): string | null {
+export function coalescePending(
+  store: RoomStore,
+  viewer: MemberState,
+  now: number,
+  caps: Caps = DEFAULT_CAPS,
+): string | null {
   const cursor = store.cursors.get(viewer.agentId) ?? 0;
   const t2 = store.records.filter(
     (r) => r.seq > cursor && classify(r, viewer) === "T2" && !isMuted(store, viewer, r),
   );
   if (t2.length === 0) return null;
   const lagMs = now - t2[0]!.ts;
-  if (t2.length < DEFAULT_CAPS.coalesceCount && lagMs < DEFAULT_CAPS.coalesceMs) return null;
+  if (t2.length < caps.coalesceCount && lagMs < caps.coalesceMs) return null;
   const topics = new Set<string>();
   for (const r of t2) if (r.kind === "msg" || r.kind === "note") topics.add(r.topic);
   const where = topics.size > 0 ? ` in ${[...topics].slice(0, 3).join(", ")}` : "";

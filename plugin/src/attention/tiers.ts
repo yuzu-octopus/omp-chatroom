@@ -3,8 +3,6 @@ import type { RoomRecord } from "../store/schema";
 // K11 — Tier is declared ONCE, here; imported by delivery.ts, tools/room.ts, panel/chat-pane.ts.
 export type Tier = "T0" | "T1" | "T2";
 
-export const HELD_CLAIM_WINDOW_MS = 3_600_000; // §5.1 1 h window [invented value]
-
 /** `"<topic>/<key>"` → `"<topic>"` (resourceKey's inverse, §2.1.2). */
 function topicOf(resource: string): string {
   const at = resource.indexOf("/");

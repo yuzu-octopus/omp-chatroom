@@ -1,10 +1,11 @@
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 
+import { noteGap } from "../attention/governor";
 import { globalMap } from "../globals";
 import { logPathFor, newMessageId } from "../ids";
 import { type ClaimState, expireStale, hydrateClaims } from "./claims";
 import { startCompactor, stopCompactor } from "./compactor";
-import { resolveRoomId } from "./config";
+import { loadRoomConfig, type RoomConfig, resolveRoomId } from "./config";
 import { appendLine, closeRoomLog, openRoomLog, replay } from "./log";
 import type { RoomRecord, RoomRecordDraft } from "./schema";
 
@@ -28,6 +29,8 @@ export interface RoomStore {
   logPath: string; // logPathFor(root, roomId) — §2.1.2 (K14)
   treePath: string; // <root>/room/tree/ (§3.6)
   records: RoomRecord[];
+  /** The highest seq written or replayed. The next append mints `seq + 1`. */
+  seq: number;
   byId: Map<string, RoomRecord>;
   claims: Map<string, ClaimState>;
   cursors: Map<string, number>;
@@ -35,7 +38,7 @@ export interface RoomStore {
   // [invented] §4.4 — the in-store condition variable for wait_for_claim: resource → FIFO waiter ids.
   waiters: Map<string, string[]>;
   listeners: Set<(r: RoomRecord) => void>;
-  seq: number;
+  config: RoomConfig;
 
   // K15 — the ONLY write path: mint seq/ts/v/id, append the line, project, notify listeners.
   // Without it every writer module would import this module at runtime and close a cycle.
@@ -100,12 +103,14 @@ function project(store: RoomStore, record: RoomRecord): void {
 }
 
 function createStore(root: string, roomId: string): RoomStore {
+  const config = loadRoomConfig(root);
   const logPath = logPathFor(root, roomId);
   const opened = openRoomLog(root, roomId);
   if (!opened.ok) throw new Error(opened.error);
   const fd = opened.fd;
 
   const store: RoomStore = {
+    config,
     root,
     roomId,
     logPath,
@@ -254,15 +259,13 @@ export function resetRoomStores(): void {
 }
 
 // §3.6 S5 pruning job — in-memory records array ONLY; the JSONL file is never truncated (K19).
-export const LOG_MAX_RECORDS = 5_000;
-export const LOG_MAX_AGE_MS = 604_800_000;
 export const PRUNE_INTERVAL_MS = 60_000; // [invented]
 export function enforceRetention(store: RoomStore, now: number): RoomRecord | null {
-  const cutoff = now - LOG_MAX_AGE_MS;
+  const cutoff = now - store.config.logMaxAgeMs;
   let dropped = 0;
   while (
     store.records.length > 0 &&
-    (store.records.length > LOG_MAX_RECORDS || store.records[0].ts < cutoff)
+    (store.records.length > store.config.logMaxRecords || store.records[0].ts < cutoff)
   ) {
     const record = store.records.shift()!;
     store.byId.delete(record.id);
@@ -270,13 +273,11 @@ export function enforceRetention(store: RoomStore, now: number): RoomRecord | nu
   }
   if (dropped === 0) return null;
   // The drop is itself a record — the file is never truncated, only the projection (K19).
-  return store.append({ kind: "gap", from: "system", skipped: dropped, reason: "retention" });
+  return noteGap(store, dropped, "retention");
 }
 
 // K3 — the third refcounted ctx.setInterval job: expireStale → release{reason:"expired"} →
 // promote the oldest waiter → T0 notice. The ONLY producer of release{reason:"expired"}.
-export const CLAIM_SWEEP_INTERVAL_MS = 5_000; // [invented] [calibrate]
-
 // [invented] — the refcounted timer registry (I4/R11/R28). One entry per root; the tick runs in the
 // main session only and is cleared when the last live session disposes.
 export interface RoomTimerRegistry {
@@ -296,7 +297,7 @@ export const roomTimers: RoomTimerRegistry = {
       }, PRUNE_INTERVAL_MS),
       ctx.setInterval(() => {
         expireStale(store, Date.now());
-      }, CLAIM_SWEEP_INTERVAL_MS),
+      }, store.config.claimSweepMs),
     ]);
   },
   stop(root: string): void {

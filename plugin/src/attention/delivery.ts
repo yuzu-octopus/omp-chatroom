@@ -1,7 +1,6 @@
 import { AgentRegistry, type ExtensionAPI, type ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { escapeHarnessTags } from "@oh-my-pi/pi-coding-agent/session/harness-tags";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { cardTypeFor } from "../cards/message-cards";
+import { safeRoomText } from "../onboarding/escape";
 import { bumpCursor } from "../store/cursors";
 import { roomStoreFor } from "../store/room-store";
 import type { RoomRecord } from "../store/schema";
@@ -97,9 +96,7 @@ export function renderLine(record: RoomRecord, safeBody: string, tier: Tier): st
   return `[${tier}] room ⟵ ${record.from} · ${where} · ${safeBody}`;
 }
 
-// §5.3 S1+S2 — the sanitising pair used on every delivery and every rendered line. Folds in the
-// `room-authored` marker, which `escapeHarnessTags` alone does not cover (onboarding/escape.ts).
-const ROOM_MARKER_RE = /<(?=\/?room-authored)/gi;
+// §5.3 S1+S2 — delegates to the shared escaper so every room-facing surface is marker-safe.
 export function escapeForDelivery(body: string): string {
-  return escapeHarnessTags(sanitizeText(body)).replace(ROOM_MARKER_RE, "&lt;");
+  return safeRoomText(body);
 }

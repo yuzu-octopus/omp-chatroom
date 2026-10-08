@@ -10,15 +10,22 @@ import {
   muteTopic,
   selectT0,
   selectT1,
+  truncateOversized,
   unmuteRoom,
   unmuteTopic,
   unreadCounts,
 } from "../attention/governor";
 import { classify, type Tier } from "../attention/tiers";
+import {
+  describeRoomCall,
+  describeRoomResult,
+  renderRoomCall,
+  renderRoomResult,
+} from "../cards/tool-cards";
 import { buildDigest, DIGEST_CLAIMS_CAP, ROSTER_CAP } from "../onboarding/digest";
 import { safeRoomText } from "../onboarding/escape";
 import { contended, grant, reclaimIfStale, release } from "../store/claims";
-import { resolveRoomConfig } from "../store/config";
+import { type RoomConfig, resolveRoomConfig } from "../store/config";
 import { bumpCursor, cursorFor, initCursor, lagFor } from "../store/cursors";
 import { type MemberState, type RoomStore, roomStoreFor } from "../store/room-store";
 import type { BoardResult, Performative, RoomRecord, TopicRow } from "../store/schema";
@@ -36,8 +43,9 @@ must see — claims, releases, shared findings, status — NOT for private redir
 for one recipient; see the room-vs-direct routing rule in your prompt).
 Ops: join (first call; mints your cursor), read (records after your cursor), post (send to a topic),
 claim/release (exclusive ownership of "<topic>/<key>" with a mandatory TTL), board (claims + roster +
-per-agent lag).
-Before starting work another agent might also start, claim it. Read the board first.`; // K16 — §4.0.1, trimmed to the Option A op set (§1.4)
+per-agent lag), topics (list with unread counts), mute/unmute (per-agent topic or room),
+tree/zoom (cold summary tiling), recall (regex search over the raw log).
+Before starting work another agent might also start, claim it. Read the board first.`;
 export const ROOM_LOAD_MODE = "essential"; // RISK R3
 
 // §4.1 — all 11 ops: join/read/post/claim/release/board/topics/mute/unmute/tree/zoom/recall
@@ -125,7 +133,7 @@ function fail(error: string, holder?: string, expiresAt?: number): RoomToolResul
   };
 }
 
-function viewerFor(store: RoomStore, agentId: string): MemberState {
+export function viewerFor(store: RoomStore, agentId: string): MemberState {
   const existing = store.members.get(agentId);
   if (existing) return existing;
   const fresh: MemberState = {
@@ -136,6 +144,7 @@ function viewerFor(store: RoomStore, agentId: string): MemberState {
     threadRoots: new Set(),
     heldTopics: new Set(),
   };
+  store.members.set(agentId, fresh);
   return fresh;
 }
 
@@ -255,12 +264,19 @@ function recipients(store: RoomStore, actorId: string): string[] {
  * up to K and B; a record past the cap is left to the digest instead of pushed. T0/T2 are not
  * bounded here (T0 is never dropped; T2 never injects).
  */
-function t1Admitted(store: RoomStore, viewer: MemberState, record: RoomRecord): boolean {
+function t1Admitted(
+  store: RoomStore,
+  viewer: MemberState,
+  record: RoomRecord,
+  config: RoomConfig,
+): boolean {
   const cursor = store.cursors.get(viewer.agentId) ?? 0;
   const pending = store.records.filter(
     (r) => r.seq > cursor && classify(r, viewer) === "T1" && !isMuted(store, viewer, r),
   );
-  return selectT1(store, viewer, pending).injected.some((r) => r.seq === record.seq);
+  return selectT1(store, viewer, pending, { caps: config }).injected.some(
+    (r) => r.seq === record.seq,
+  );
 }
 
 /** A board-delta card, the same shell `deliver` uses, for the T0 batch and the T2 digest. */
@@ -299,6 +315,7 @@ async function notifyRecipients(
   records: readonly RoomRecord[],
   actorId: string,
 ): Promise<string | undefined> {
+  const config = resolveRoomConfig(pi, store.root);
   let failure: string | undefined;
   const note = (error: unknown): void => {
     failure ??= error instanceof Error ? error.message : "delivery failed";
@@ -306,7 +323,8 @@ async function notifyRecipients(
   try {
     // §5.2 — the producer's bucket, consumed once per appended post (claim/release are not posts).
     const coalesced =
-      records.some((r) => r.kind === "msg") && admitPost(store, actorId, Date.now()) === "red";
+      records.some((r) => r.kind === "msg") &&
+      admitPost(store, actorId, Date.now(), config) === "red";
     for (const target of recipients(store, actorId)) {
       try {
         const viewer = viewerFor(store, target);
@@ -322,12 +340,12 @@ async function notifyRecipients(
         for (const record of records) {
           if (isMuted(store, viewer, record)) continue;
           if (classify(record, viewer) !== "T1") continue;
-          if (!coalesced && t1Admitted(store, viewer, record)) admitted.push(record);
+          if (!coalesced && t1Admitted(store, viewer, record, config)) admitted.push(record);
         }
         // N/T — the T2 backlog rides the next T0/T1 for this recipient as ONE line.
         const digest =
           admitted.length > 0 || t0.summaryLine !== null
-            ? coalescePending(store, viewer, Date.now())
+            ? coalescePending(store, viewer, Date.now(), config)
             : null;
         let extra = digest !== null ? [digest] : [];
         for (const record of admitted) {
@@ -412,6 +430,10 @@ export function registerRoomTool(pi: ExtensionAPI): void {
     loadMode: ROOM_LOAD_MODE,
     approval: "read",
     strict: true,
+    renderCall: renderRoomCall,
+    renderResult: renderRoomResult,
+    describeCall: describeRoomCall,
+    describeResult: describeRoomResult,
     async execute(_toolCallId, p, _signal, _onUpdate, ctx): Promise<RoomToolResult> {
       // U6 — a missing/unwritable/corrupt room file returns a normal result, never a throw.
       let store: RoomStore;
@@ -424,12 +446,13 @@ export function registerRoomTool(pi: ExtensionAPI): void {
       const config = resolveRoomConfig(pi, store.root);
       switch (p.op) {
         case "join": {
-          const viewer = viewerFor(store, agentId);
           // §4.1 join idempotency — a second join is a no-op: no second member record.
-          // Gate on MEMBERSHIP, not on the cursor: the onboarding hook pre-mints every agent's
-          // cursor at `before_agent_start`, so a cursor-existence test is always false here and no
-          // `member{join}` record would ever be appended (the roster would stay empty forever).
-          if (!store.members.has(agentId)) {
+          // The membership check MUST run BEFORE `viewerFor`, which registers a fresh member as a
+          // side effect. Checking after it is always false, so no `member{join}` record would ever be
+          // appended and the roster would stay empty forever.
+          const isNewMember = !store.members.has(agentId);
+          const viewer = viewerFor(store, agentId);
+          if (isNewMember) {
             store.append({ kind: "member", from: agentId, action: "join" });
           }
           initCursor(store, agentId);
@@ -448,7 +471,11 @@ export function registerRoomTool(pi: ExtensionAPI): void {
           const limit = clamp(p.limit ?? READ_LIMIT_DEFAULT, 1, READ_LIMIT_MAX);
           const pending = store.records.filter((r) => r.seq > since);
           // K20 — `read` is routed through the same per-turn K/B budget as the injection path.
-          const { injected } = selectT1(store, viewer, pending, { spend: true, limit });
+          const { injected } = selectT1(store, viewer, pending, {
+            spend: true,
+            limit,
+            caps: config,
+          });
           const next = injected.length > 0 ? injected[injected.length - 1]!.seq : since;
           bumpCursor(store, agentId, next);
           const body = injected.map(recordLine).join("\n");
@@ -487,12 +514,15 @@ export function registerRoomTool(pi: ExtensionAPI): void {
           if (bytes > config.maxBodyBytes) {
             return fail(`body exceeds maxBodyBytes (${config.maxBodyBytes})`);
           }
+          // N7 — a body over the T1 token budget is truncated to a head + a read handle.
+          const { head, handle } = truncateOversized(body, config.maxT1Tokens);
+          const storedBody = handle !== "" ? `${head}${handle}` : head;
           const viewer = viewerFor(store, agentId);
           const record = store.append({
             kind: "msg",
             from: agentId, // S4 — `from` is always the authenticated caller id
             topic,
-            body,
+            body: storedBody,
             ...(p.mention ? { mention: p.mention } : {}),
             ...(p.replyTo ? { replyTo: p.replyTo } : {}),
             ...(p.performative ? { performative: p.performative } : {}),
@@ -518,7 +548,7 @@ export function registerRoomTool(pi: ExtensionAPI): void {
           const key = p.key;
           if (!topic || !key) return fail("claim requires topic and key");
           const resource = `${topic}/${key}`;
-          viewerFor(store, agentId);
+          const viewer = viewerFor(store, agentId);
           const ttlMs = clamp(p.ttl ?? config.claimTtlMs, CLAIM_TTL_MIN_MS, CLAIM_TTL_MAX_MS);
           const before = store.seq;
           const result = grant(store, resource, agentId, ttlMs);
@@ -529,6 +559,7 @@ export function registerRoomTool(pi: ExtensionAPI): void {
               result.expiresAt,
             );
           }
+          viewer.heldTopics.add(topic);
           const failure = await notifyRecipients(
             pi,
             ctx,
@@ -704,14 +735,17 @@ export function registerRoomTool(pi: ExtensionAPI): void {
         case "recall": {
           const pattern = p.pattern;
           if (pattern === undefined) return fail("recall requires a pattern");
+          if (pattern.length > 200) return fail("pattern too long (max 200 chars)");
           let regex: RegExp;
           try {
             regex = new RegExp(pattern);
           } catch {
             return fail("invalid regex pattern");
           }
+          const deadline = Date.now() + 1000;
           const matches: Array<{ seq: number; record: RoomRecord }> = [];
           for (let i = store.records.length - 1; i >= 0; i--) {
+            if (Date.now() > deadline) return fail("recall timed out");
             const record = store.records[i]!;
             const text = recordLine(record);
             if (regex.test(text)) {

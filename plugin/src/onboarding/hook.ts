@@ -4,7 +4,13 @@ import type {
   ExtensionAPI,
 } from "@oh-my-pi/pi-coding-agent";
 import { resetTurnBudget } from "../attention/governor";
-import { cursorFor, initCursor, persistOwnCursor } from "../store/cursors";
+import {
+  bumpCursor,
+  cursorFor,
+  initCursor,
+  persistOwnCursor,
+  restoreOwnCursor,
+} from "../store/cursors";
 import {
   disposeRoomSession,
   type MemberState,
@@ -13,7 +19,6 @@ import {
 } from "../store/room-store";
 import { buildDigest } from "./digest";
 import rule from "./routing-rule.md" with { type: "text" };
-export const HOOK_CURSOR_ENTRY_TYPE = "chatroom:cursor"; // §3.5
 
 // The block is appended to the system prompt every turn, so a prior injection is detected by the
 // routing rule's heading — a stable string owned by this file, never by room content.
@@ -31,6 +36,11 @@ export function registerHooks(pi: ExtensionAPI): void {
     const store: RoomStore = roomStoreFor(ctx);
     const agentId = ctx.agent.id;
     initCursor(store, agentId);
+    // §3.5 — resume from the persisted cursor when it is higher than the fresh init.
+    const persisted = restoreOwnCursor(ctx, store.roomId);
+    if (persisted !== null && persisted > cursorFor(store, agentId)) {
+      bumpCursor(store, agentId, persisted);
+    }
     const viewer: MemberState = store.members.get(agentId) ?? {
       agentId,
       joinedAtSeq: store.seq,

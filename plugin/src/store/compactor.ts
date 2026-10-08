@@ -186,7 +186,14 @@ async function runJobs(store: RoomStore, ctx: ExtensionContext): Promise<void> {
 }
 
 interface CompactorEntry {
-  ctx: ExtensionContext;
+  /**
+   * The `clearTimer` captured at start, NOT the ctx itself. Holding the ctx and calling
+   * `ctx.clearTimer` later is unsafe: `stopCompactor` runs from `resetRoomStores`/`dispose`, which
+   * can fire after the owning session is gone, and a host ctx whose timer API has been torn down
+   * (or a test double that never had one) throws `clearTimer is not a function`. The captured
+   * function is bound to the session that created the timer, which is the one that must clear it.
+   */
+  clearTimer: (handle: Timer) => void;
   handle: Timer;
 }
 
@@ -201,16 +208,19 @@ const COMPACTORS = globalMap<string, CompactorEntry>("__roomCompactors");
 export function startCompactor(store: RoomStore, ctx: ExtensionContext): void {
   if (ctx.agent.kind !== "main") return;
   if (COMPACTORS.has(store.root)) return;
+  // Capture the bound clearer up front; `ctx` may be unusable by the time we stop.
+  const clearTimer = ctx.clearTimer?.bind(ctx);
+  if (clearTimer === undefined) return; // no timer API → no job (never a raw timer; I4)
   const handle = ctx.setInterval(() => {
     void runJobs(store, ctx);
   }, COMPACT_INTERVAL_MS);
-  COMPACTORS.set(store.root, { ctx, handle });
+  COMPACTORS.set(store.root, { clearTimer, handle });
 }
 
 export function stopCompactor(root: string): void {
   // [invented]
   const entry = COMPACTORS.get(root);
   if (entry === undefined) return;
-  entry.ctx.clearTimer(entry.handle);
-  COMPACTORS.delete(root);
+  COMPACTORS.delete(root); // delete FIRST: a throwing clearer must not strand the entry
+  entry.clearTimer(entry.handle);
 }

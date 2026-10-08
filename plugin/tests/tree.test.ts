@@ -6,7 +6,6 @@ import type { Api, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import { createAssistantMessageEventStream, registerCustomApi } from "@oh-my-pi/pi-ai";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { resolveLocalRoot } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
-import { logPathFor, roomIdFor } from "../src/ids";
 import {
   __compactTest,
   COMPACT_MAX_CALLS_PER_DAY,
@@ -17,7 +16,6 @@ import {
   stopCompactor,
   withWriteMutex,
 } from "../src/store/compactor";
-import { appendLine, closeRoomLog, roomLogFd } from "../src/store/log";
 import {
   disposeRoomSession,
   type RoomStore,
@@ -229,40 +227,6 @@ test("cover(T, budget) tiles [0,T) with aligned power-of-two blocks, finest near
   expect(t[0][1] - t[0][0]).toBeGreaterThan(1);
 });
 
-// --- 3. forget() -----------------------------------------------------------
-
-test("forget(lo, hi) drops the node and every ancestor; the log is untouched", () => {
-  const { root, treePath } = tmpRootTree();
-  const roomId = roomIdFor(root);
-  const logPath = logPathFor(root, roomId);
-  const fd = roomLogFd(root, roomId);
-  appendLine(fd, `${JSON.stringify(msg(0))}\n`);
-  appendLine(fd, `${JSON.stringify(msg(1))}\n`);
-  const logBefore = fs.readFileSync(logPath);
-
-  const tree = openTreeStore(treePath, 16);
-  expect(tree.putNode(0, 2, "l2a")).toBe(true);
-  expect(tree.putNode(2, 4, "l2b")).toBe(true);
-  expect(tree.putNode(4, 6, "l2c")).toBe(true);
-  expect(tree.putNode(6, 8, "l2d")).toBe(true);
-  expect(tree.putNode(0, 4, "l4a")).toBe(true);
-  expect(tree.putNode(4, 8, "l4b")).toBe(true);
-  expect(tree.putNode(0, 8, "l8")).toBe(true);
-
-  tree.forget(0, 4);
-
-  expect(tree.getNode(0, 4)).toBeNull(); // the target
-  expect(tree.getNode(0, 8)).toBeNull(); // its ancestor
-  expect(tree.getNode(4, 8)).toBeNull(); // a later block at the truncated level goes too
-  expect(tree.getNode(0, 2)).toBe("l2a"); // descendants are untouched
-  expect(tree.getNode(2, 4)).toBe("l2b");
-  expect(tree.getNode(4, 6)).toBe("l2c");
-
-  // T2 — the raw log is authoritative and `forget` never writes it.
-  expect(fs.readFileSync(logPath).equals(logBefore)).toBe(true);
-  closeRoomLog(root, roomId);
-});
-
 // --- 4. TREE_REC overflow --------------------------------------------------
 
 test("a summary exceeding TREE_REC bytes is truncated, not fatal", () => {
@@ -367,7 +331,7 @@ test("a summarizer that fails every attempt skips the node without pausing the t
 
 // --- 7. rebuildability -----------------------------------------------------
 
-test("the tree is rebuildable: forget + rebuild from the log produces the same tiling", async () => {
+test("the tree is rebuildable: a second build from the log produces the same tiling", async () => {
   const { treePath } = tmpRootTree();
   const N = 40;
   const store = fakeStore(
@@ -399,13 +363,9 @@ test("the tree is rebuildable: forget + rebuild from the log produces the same t
   const before = view();
   expect(before.some((line) => !line.endsWith("∅"))).toBe(true);
 
-  // `forget(0, 2)` drops the smallest node and therefore every ancestor — the whole tree.
-  openTreeStore(treePath, N).forget(0, 2);
-  const forgotten = view();
-  expect(forgotten.every((line) => line.endsWith("∅"))).toBe(true);
-  expect(openTreeStore(treePath, N).pending().length).toBeGreaterThan(0);
-
-  // T1 — rebuild from the log alone (the log was never touched).
+  // Rebuild from the log alone — the tree is a cache, not the source of truth.
+  __compactTest.resetSpend();
+  prompts.length = 0;
   await buildAll(store, ctx);
   expect(view()).toEqual(before);
   expect(openTreeStore(treePath, N).pending()).toEqual([]);

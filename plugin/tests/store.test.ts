@@ -4,7 +4,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { resolveLocalRoot } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
+import { classify } from "../src/attention/tiers";
 import { logPathFor, newMessageId, resourceKey, roomIdFor } from "../src/ids";
+import { registerHooks } from "../src/onboarding/hook";
 import {
   configPath,
   DEFAULT_ROOM_CONFIG,
@@ -27,13 +29,13 @@ import {
   appendLine,
   closeRoomLog,
   openRoomLog,
-  readSince,
   replay,
   roomLogFd,
   validateRecord,
 } from "../src/store/log";
-import type { RoomStore } from "../src/store/room-store";
+import { enforceRetention, type RoomStore, roomStoreFor } from "../src/store/room-store";
 import type { RoomRecord } from "../src/store/schema";
+import { registerRoomTool } from "../src/tools/room";
 
 // --- fixtures -------------------------------------------------------------
 
@@ -223,22 +225,6 @@ test("resourceKey is '<topic>/<key>' and newMessageId is a unique UUID v4", () =
   expect(a).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
 });
 
-// --- log: appendLine / readSince / validateRecord / openRoomLog / close ---
-
-test("appendLine terminates the line with '\\n' and readSince returns exactly the records after seq", () => {
-  const root = tempRoot();
-  const roomId = roomIdFor(root);
-  const fd = roomLogFd(root, roomId);
-
-  for (let i = 1; i <= 10; i++) appendLine(fd, JSON.stringify(msg(i))); // no trailing \n on purpose
-  expect(readLines(logPathFor(root, roomId)).length).toBe(10);
-
-  expect(readSince(fd, 5, 100).map((r) => r.seq)).toEqual([6, 7, 8, 9, 10]);
-  expect(readSince(fd, 0, 3).map((r) => r.seq)).toEqual([1, 2, 3]);
-  expect(readSince(fd, 10, 100)).toEqual([]);
-  closeRoomLog(root, roomId);
-});
-
 test("validateRecord accepts every kind and rejects missing or wrong-typed fields", () => {
   expect(validateRecord(msg(1))).not.toBeNull();
   expect(
@@ -365,21 +351,350 @@ test("config: defaults when absent, save/load round-trip, and resolveRoomId pers
   expect(resolveRoomId(root)).toBe("custom-room");
 });
 
-test("Option A registers no runtime flags, and config comes from the file alone", () => {
-  // Option A ships no panel and no cold tree, so there is nothing to toggle. A flag that toggles
-  // nothing reads as a working switch and misleads the user; the config file is the only source.
-  const flags = new Map<string, unknown>();
+test("registerRoomFlags registers room-panel-key (string) and room-cold-tree (boolean)", () => {
+  const flags = new Map<string, { type: string; default?: unknown }>();
   const pi = {
-    registerFlag: (name: string, options: unknown) => {
+    registerFlag: (
+      name: string,
+      options: { type: "boolean" | "string"; default?: boolean | string },
+    ) => {
       flags.set(name, options);
     },
     getFlag: () => undefined,
   } as unknown as ExtensionAPI;
 
   registerRoomFlags(pi);
-  expect([...flags.keys()]).toEqual([]);
+  expect([...flags.keys()].sort()).toEqual(["room-cold-tree", "room-panel-key"]);
+  expect(flags.get("room-panel-key")?.type).toBe("string");
+  expect(flags.get("room-panel-key")?.default).toBe("");
+  expect(flags.get("room-cold-tree")?.type).toBe("boolean");
+  expect(flags.get("room-cold-tree")?.default).toBe(true);
 
   const root = tempRoot();
   saveRoomConfig(root, { ...DEFAULT_ROOM_CONFIG, claimTtlMs: 120_000 });
   expect(resolveRoomConfig(pi, root).claimTtlMs).toBe(120_000);
+});
+
+test("enforceRetention prunes to the config's logMaxRecords, not the default 5000", () => {
+  const root = tempRoot();
+  const storeRoot = path.join(root, ".omp-room");
+  saveRoomConfig(storeRoot, { ...DEFAULT_ROOM_CONFIG, logMaxRecords: 5 });
+  const ctx = {
+    cwd: root,
+    agent: { id: "A", kind: "main" },
+    localProtocolOptions: { root: storeRoot },
+    setInterval: () => 0,
+    clearInterval: () => {},
+  } as unknown as ExtensionContext;
+  const store = roomStoreFor(ctx);
+
+  for (let i = 0; i < 10; i++) {
+    store.append({ kind: "msg", from: "A", topic: "t", body: "b" });
+  }
+  expect(store.records.length).toBe(10);
+
+  enforceRetention(store, Date.now());
+  // 5 remaining + 1 gap record appended by enforceRetention
+  expect(store.records.filter((r) => r.kind !== "gap").length).toBe(5);
+});
+
+// --- F1: room tool registers card renderers ---
+
+test("room tool registers renderCall/renderResult/describeCall/describeResult", () => {
+  let tool: Record<string, unknown> | undefined;
+  const pi = {
+    zod: {
+      object: (shape: Record<string, unknown>) => shape,
+      enum: (values: string[]) => ({
+        values,
+        optional: function () {
+          return this;
+        },
+      }),
+      string: () => ({
+        optional: function () {
+          return this;
+        },
+      }),
+      number: () => ({
+        optional: function () {
+          return this;
+        },
+      }),
+      array: (t: unknown) => ({
+        t,
+        optional: function () {
+          return this;
+        },
+      }),
+      optional: (t: unknown) => ({ t }),
+    },
+    registerTool: (def: Record<string, unknown>) => {
+      if (def.name === "room") tool = def;
+    },
+  } as unknown as ExtensionAPI;
+  registerRoomTool(pi);
+  expect(tool).toBeDefined();
+  expect(tool!.renderCall).toBeDefined();
+  expect(tool!.renderResult).toBeDefined();
+  expect(tool!.describeCall).toBeDefined();
+  expect(tool!.describeResult).toBeDefined();
+});
+
+// --- F3: restoreOwnCursor is called by before_agent_start ---
+
+test("before_agent_start restores a persisted cursor when it is higher", async () => {
+  const root = tempRoot();
+  const storeRoot = path.join(root, ".omp-room");
+  const roomId = roomIdFor(storeRoot);
+
+  const entries: Array<{ type: string; customType: string; data?: unknown }> = [
+    { type: "custom", customType: "chatroom:cursor", data: { roomId, seq: 80 } },
+  ];
+
+  const ctx = {
+    cwd: root,
+    agent: { id: "A", kind: "main" },
+    localProtocolOptions: { root: storeRoot },
+    sessionManager: { getEntries: () => entries },
+    setInterval: () => 0 as unknown as Timer,
+    clearTimer: () => {},
+  } as unknown as ExtensionContext;
+
+  const store = roomStoreFor(ctx);
+  for (let i = 0; i < 100; i++) {
+    store.append({ kind: "msg", from: "A", topic: "t", body: "b" });
+  }
+
+  initCursor(store, "A");
+  expect(cursorFor(store, "A")).toBe(50);
+
+  const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
+  const pi = {
+    on(event: string, handler: (event: unknown, ctx: unknown) => unknown) {
+      const list = handlers.get(event) ?? [];
+      list.push(handler);
+      handlers.set(event, list);
+    },
+    appendEntry() {},
+    getFlag() {
+      return undefined;
+    },
+    registerFlag() {},
+  } as unknown as ExtensionAPI;
+
+  registerHooks(pi);
+
+  let result: unknown;
+  for (const handler of handlers.get("before_agent_start") ?? []) {
+    result = await handler(
+      { type: "before_agent_start", prompt: "hi", systemPrompt: ["BASE"] },
+      ctx,
+    );
+  }
+
+  expect((result as { systemPrompt?: string[] })?.systemPrompt).toBeDefined();
+  expect(cursorFor(store, "A")).toBe(80);
+});
+
+// --- F4: enforceRetention appends the gap via noteGap ---
+
+test("enforceRetention appends a gap record via noteGap", () => {
+  const root = tempRoot();
+  const storeRoot = path.join(root, ".omp-room");
+  saveRoomConfig(storeRoot, { ...DEFAULT_ROOM_CONFIG, logMaxRecords: 5 });
+  const ctx = {
+    cwd: root,
+    agent: { id: "A", kind: "main" },
+    localProtocolOptions: { root: storeRoot },
+    setInterval: () => 0 as unknown as Timer,
+    clearTimer: () => {},
+  } as unknown as ExtensionContext;
+  const store = roomStoreFor(ctx);
+
+  for (let i = 0; i < 10; i++) {
+    store.append({ kind: "msg", from: "A", topic: "t", body: "b" });
+  }
+  expect(store.records.length).toBe(10);
+
+  const gap = enforceRetention(store, Date.now());
+  expect(gap).not.toBeNull();
+  expect(gap!.kind).toBe("gap");
+  if (gap!.kind !== "gap") throw new Error("expected gap record");
+  expect(gap!.skipped).toBe(5);
+  expect(gap!.reason).toBe("retention");
+  expect(store.records.length).toBe(6); // 5 remaining + 1 gap
+});
+
+// --- F5: claim adds topic to heldTopics; classify returns T1 ---
+
+test("claim adds topic to heldTopics and classify returns T1 for that topic", async () => {
+  const root = tempRoot();
+  const storeRoot = path.join(root, ".omp-room");
+  const ctx = {
+    cwd: root,
+    agent: { id: "A", kind: "main" },
+    localProtocolOptions: { root: storeRoot },
+    setInterval: () => 0 as unknown as Timer,
+    clearTimer: () => {},
+  } as unknown as ExtensionContext;
+  const store = roomStoreFor(ctx);
+
+  let tool:
+    | {
+        execute: (
+          id: string,
+          params: Record<string, unknown>,
+          signal: AbortSignal,
+          onUpdate: (u: unknown) => void,
+          ctx: ExtensionContext,
+        ) => Promise<{
+          content: Array<{ type: string; text?: string }>;
+          details?: Record<string, unknown>;
+        }>;
+      }
+    | undefined;
+  const pi = {
+    zod: {
+      object: (shape: Record<string, unknown>) => shape,
+      enum: (values: string[]) => ({
+        values,
+        optional: function () {
+          return this;
+        },
+      }),
+      string: () => ({
+        optional: function () {
+          return this;
+        },
+      }),
+      number: () => ({
+        optional: function () {
+          return this;
+        },
+      }),
+      array: (t: unknown) => ({
+        t,
+        optional: function () {
+          return this;
+        },
+      }),
+      optional: (t: unknown) => ({ t }),
+    },
+    registerTool: (def: {
+      name: string;
+      execute: typeof tool extends infer T ? (T extends { execute: infer E } ? E : never) : never;
+    }) => {
+      if (def.name === "room") tool = def as typeof tool;
+    },
+  } as unknown as ExtensionAPI;
+  registerRoomTool(pi);
+
+  const result = await tool!.execute(
+    "test-call",
+    { op: "claim", topic: "build", key: "api", ttl: 5000 },
+    new AbortController().signal,
+    () => {},
+    ctx,
+  );
+  expect(result.details).toMatchObject({ ok: true, op: "claim" });
+
+  const viewer = store.members.get("A")!;
+  expect(viewer.heldTopics.has("build")).toBe(true);
+
+  const msg = {
+    v: 1,
+    seq: 999,
+    ts: 1000,
+    kind: "msg",
+    id: "x",
+    from: "B",
+    topic: "build",
+    body: "b",
+  } as RoomRecord;
+  expect(classify(msg, viewer)).toBe("T1");
+});
+
+// --- F6: post truncates oversized body with read handle ---
+
+test("post truncates an oversized body and appends the read handle", async () => {
+  const root = tempRoot();
+  const storeRoot = path.join(root, ".omp-room");
+  saveRoomConfig(storeRoot, { ...DEFAULT_ROOM_CONFIG, maxBodyBytes: 100_000 });
+  const ctx = {
+    cwd: root,
+    agent: { id: "A", kind: "main" },
+    localProtocolOptions: { root: storeRoot },
+    setInterval: () => 0 as unknown as Timer,
+    clearTimer: () => {},
+  } as unknown as ExtensionContext;
+  const store = roomStoreFor(ctx);
+
+  let tool:
+    | {
+        execute: (
+          id: string,
+          params: Record<string, unknown>,
+          signal: AbortSignal,
+          onUpdate: (u: unknown) => void,
+          ctx: ExtensionContext,
+        ) => Promise<{
+          content: Array<{ type: string; text?: string }>;
+          details?: Record<string, unknown>;
+        }>;
+      }
+    | undefined;
+  const pi = {
+    zod: {
+      object: (shape: Record<string, unknown>) => shape,
+      enum: (values: string[]) => ({
+        values,
+        optional: function () {
+          return this;
+        },
+      }),
+      string: () => ({
+        optional: function () {
+          return this;
+        },
+      }),
+      number: () => ({
+        optional: function () {
+          return this;
+        },
+      }),
+      array: (t: unknown) => ({
+        t,
+        optional: function () {
+          return this;
+        },
+      }),
+      optional: (t: unknown) => ({ t }),
+    },
+    registerTool: (def: {
+      name: string;
+      execute: typeof tool extends infer T ? (T extends { execute: infer E } ? E : never) : never;
+    }) => {
+      if (def.name === "room") tool = def as typeof tool;
+    },
+  } as unknown as ExtensionAPI;
+  registerRoomTool(pi);
+
+  // 9000 chars = 2250 tokens > 2048 token budget
+  const bigBody = "x".repeat(9000);
+  const result = await tool!.execute(
+    "test-call",
+    { op: "post", topic: "t", body: bigBody },
+    new AbortController().signal,
+    () => {},
+    ctx,
+  );
+  expect(result.details).toMatchObject({ ok: true, op: "post" });
+
+  const record = store.records[store.records.length - 1]!;
+  expect(record.kind).toBe("msg");
+  const body = (record as { body: string }).body;
+  expect(body.length).toBeLessThan(bigBody.length);
+  expect(body).toContain("…");
+  expect(body).toContain('room{op:"read"}');
 });
