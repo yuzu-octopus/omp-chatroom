@@ -90,6 +90,7 @@ function makePanel(
     onReleaseClaim: () => {},
     onFocusAgent: () => {},
     selfId: "Main",
+    theme,
     registry: registryStub(),
     ...overrides,
   });
@@ -227,6 +228,41 @@ test("dispose() is idempotent: unsubscribes once and never double-clears", () =>
   expect(cleared).toBe(1);
 });
 
+test("a throw in the first refresh releases the age timer and both listeners", () => {
+  // The real failure: the panel read the pi-tui `theme` module singleton, which is `export var
+  // theme: Theme` and undefined until initTheme() runs, so refresh() threw "undefined is not an
+  // object (evaluating 'theme.fg')" — AFTER the timer and listeners were live. The factory never
+  // got a panel to dispose, so the 5 s timer fired forever into a half-built panel.
+  const store = fixtureStore();
+  let cleared = 0;
+  let registryUnsubs = 0;
+  const hostile = {
+    ...registryStub(),
+    list: () => {
+      throw new Error("undefined is not an object (evaluating 'theme.fg')");
+    },
+  };
+  expect(() =>
+    makePanel(store, 30, {
+      registry: {
+        ...hostile,
+        onChange: () => () => {
+          registryUnsubs += 1;
+        },
+      },
+      setInterval: () => "timer-1",
+      clearTimer: () => {
+        cleared += 1;
+      },
+    }),
+  ).toThrow(/theme\.fg/);
+
+  // Everything the failed constructor acquired is released.
+  expect(store.listeners.size).toBe(0);
+  expect(registryUnsubs).toBe(1);
+  expect(cleared).toBe(1);
+});
+
 // --- 6. key map -----------------------------------------------------------
 
 test("key map resolves every documented key and an unknown key is a no-op", () => {
@@ -348,6 +384,7 @@ test("/room with no arguments opens the panel, and degrades without a TUI", asyn
     hasUI: true,
     mode: "tui",
     agent: { id: "Main", kind: "main", name: "main", depth: 0 },
+    cwd: root,
     localProtocolOptions: { getArtifactsDir: () => root, getSessionId: () => "sess-panel" },
     // The real ExtensionContext schedules the store's background jobs (I4); the stub must too.
     setInterval: () => "t",

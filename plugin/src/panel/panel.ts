@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent";
-import { type Component, SplitPane, Stack, type TUI, theme } from "@oh-my-pi/pi-tui";
+import { type Component, SplitPane, Stack, type Theme, type TUI } from "@oh-my-pi/pi-tui";
 import { contended } from "../store/claims";
 import { cursorFor } from "../store/cursors";
 import { type MemberState, type RoomStore, roomStoreFor } from "../store/room-store";
@@ -21,6 +21,13 @@ export interface RoomPanelOptions {
   onFocusAgent: (agentId: string) => void; // §6.6 `o`
   /** The session that owns the panel; its cursor drives unread marks (I3). */
   selfId: string;
+  /**
+   * The theme the host hands the `ctx.ui.custom` factory. The pi-tui `theme` module export is
+   * `export var theme: Theme` — undefined until `initTheme()` runs — so reading the singleton at
+   * panel-render time throws `undefined is not an object (evaluating 'theme.fg')`. Always use the
+   * injected instance.
+   */
+  theme: Theme;
   /** Injected in tests; production reads `AgentRegistry.global()` (assumption 9). */
   registry?: Pick<AgentRegistry, "list" | "onChange">;
   /** Injected in tests; production uses `ctx.setInterval`/`ctx.clearTimer` (I4). */
@@ -79,8 +86,8 @@ export class RoomPanel implements Component {
     const store = options.store;
 
     this.#split = new SplitPane({
-      left: createChatPane(() => this.#rows, 0, theme),
-      right: createBoardPane(() => this.#board, 0, theme),
+      left: createChatPane(() => this.#rows, 0, this.#options.theme),
+      right: createBoardPane(() => this.#board, 0, this.#options.theme),
       leftSize: { ratio: PANEL_LEFT_RATIO, min: 40 },
       rightMinWidth: PANEL_RIGHT_MIN_WIDTH,
       splitAt: PANEL_SPLIT_AT,
@@ -109,7 +116,15 @@ export class RoomPanel implements Component {
     this.#ageTimer = (options.setInterval ?? (() => undefined))(() => {
       if (!this.#disposed) this.refresh();
     }, PANEL_AGE_INTERVAL_MS);
-    this.refresh();
+    // A throw in the first refresh must not leave the timer and both listeners live: the factory
+    // never receives a panel to dispose, so nothing would ever release them and the age timer would
+    // keep firing into a half-built panel ("Extension \"<timer>\" error" every 5 s).
+    try {
+      this.refresh();
+    } catch (error) {
+      this.dispose();
+      throw error;
+    }
   }
 
   /** Re-project store + registry into rows, then ask the TUI for a repaint (§6.8). */
@@ -122,7 +137,7 @@ export class RoomPanel implements Component {
       cursorFor(store, this.#options.selfId),
     );
     this.#board = this.#projectBoard(store);
-    this.#roster = renderRosterStrip(this.#registry.list(), theme);
+    this.#roster = renderRosterStrip(this.#registry.list(), this.#options.theme);
     this.#clampSelection();
     this.#options.tui?.requestRender?.();
   }
@@ -137,7 +152,7 @@ export class RoomPanel implements Component {
     const narrow = geometry.mode !== "split";
     this.#split.setNarrowPane(this.#narrowOpen && narrow ? "right" : "left");
     const chatWidth = narrow ? 0 : (geometry.left?.width ?? 0);
-    this.#frame = frameRows(width, this.#titleFor(narrow), chatWidth, HINTS, theme);
+    this.#frame = frameRows(width, this.#titleFor(narrow), chatWidth, HINTS, this.#options.theme);
     const height = Math.max(4, this.#options.tui?.terminal?.rows || 30);
     this.#stack.setHeight(height);
     this.#lastRender = fitBlock(this.#stack.render(width), height, width);
@@ -291,7 +306,7 @@ export async function openRoomPanel(pi: ExtensionAPI, ctx: ExtensionContext): Pr
 
   try {
     await ctx.ui.custom<void>(
-      (tui, _theme, _keybindings, done) => {
+      (tui, theme, _keybindings, done) => {
         ACTIVE_PANEL.set(pi, done);
         const panel = new RoomPanel({
           roomId: store.roomId,
@@ -299,6 +314,7 @@ export async function openRoomPanel(pi: ExtensionAPI, ctx: ExtensionContext): Pr
           tui,
           done,
           selfId: ctx.agent.id,
+          theme,
           onReleaseClaim: (resource: string) => {
             const held = store.claims.get(resource);
             if (held !== undefined) {
