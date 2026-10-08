@@ -239,8 +239,14 @@ from extension code. The plugin therefore owns a real config file, and `/room co
 surface:
 
 ```
-<local:// root>/room/config.json
+<project cwd>/.omp-room/room/config.json
 ```
+
+The room is keyed by the **project directory** (`ctx.cwd`), not the `local://` root. That matters:
+`ctx.localProtocolOptions` is per-*session* — a subagent's artifacts dir is its own session file
+minus `.jsonl` — so keying the room there gave every agent a private room and the board coordinated
+nobody. `ctx.cwd` is inherited by subagents, so main and its children share one room. One omp
+process per project directory; two processes in the same project still collide (see the limits).
 
 Load order, highest first: **registered flags → config file → built-in defaults**. Unknown keys are
 ignored and wrong-typed values fall back to their defaults; the file is on-disk input.
@@ -255,10 +261,11 @@ value, because `getFlag` always returns a value):
 
 ## Known limits
 
-- **In-process only.** The room log lives under the shared `local://` root, but only one omp process
-  may write it. Atomicity rests on single-threaded JS and synchronous `O_APPEND` writes; a second
-  process writing the same file would tear lines. There is no cross-process locking, and the room is
-  not a system of record — bulk artifacts belong on `local://` / `artifact://`.
+- **One omp process per project directory.** The room log lives at `<project cwd>/.omp-room/room/`,
+  so every agent in one project tree shares it — but only one omp process may write it. Atomicity
+  rests on single-threaded JS and synchronous `O_APPEND` writes; a second process in the same
+  project would tear lines. There is no cross-process locking, and the room is not a system of
+  record — bulk artifacts belong on `local://` / `artifact://`.
 - **Restricted and plan-mode children get no extension tools.** This is a host rule, not a plugin
   setting: extension tools are never admitted to a session with `restrictToolNames`. Such an agent
   is simply "not a member" of the room. Normal `task` subagents are unrestricted and do get it.

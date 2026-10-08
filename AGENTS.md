@@ -33,7 +33,7 @@ adds one coordination layer beside it.
 ```mermaid
 flowchart TD
   T["Tools: room / wait_for_agent / wait_for_message / wait_for_claim"]
-  S["RoomStore (module singleton, keyed by local:// root)<br/>append-only JSONL + in-memory projection"]
+  S["RoomStore (module singleton, keyed by project cwd)<br/>append-only JSONL + in-memory projection"]
   G["Attention Governor<br/>classify T0 / T1 / T2"]
   D["Delivery Adapter"]
   P["TUI panel (/room overlay)"]

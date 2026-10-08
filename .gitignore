@@ -13,3 +13,6 @@ Thumbs.db
 coverage/
 .idea/
 .vscode/
+
+# Room runtime state — the log is per-project working data, not source.
+.omp-room/
