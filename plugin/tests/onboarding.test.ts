@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AgentRegistry, type ExtensionAPI, type ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { resolveLocalRoot } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
+
 import { roomIdFor } from "../src/ids";
 import {
   buildDigest,
@@ -59,7 +59,9 @@ beforeEach(() => {
   AgentRegistry.resetGlobalForTests();
   resetRoomStores();
   artifactsDir = fs.mkdtempSync(path.join(os.tmpdir(), "room-onboarding-"));
-  root = resolveLocalRoot({ getArtifactsDir: () => artifactsDir, getSessionId: () => "sess-1" });
+  // The room root is `ctx.cwd`, so the fixture's store must sit on the same key the fake ctx
+  // reports — otherwise `roomStoreFor(ctx)` and this `store` are two different stores.
+  root = `${artifactsDir}/.omp-room`;
   store = storeFor(root, roomIdFor(root));
 });
 
@@ -211,6 +213,7 @@ function fakePi(): {
 function fakeCtx(agentId: string): ExtensionContext {
   return {
     agent: { kind: "main", id: agentId, name: "main", depth: 0 },
+    cwd: artifactsDir,
     localProtocolOptions: {
       getArtifactsDir: () => artifactsDir,
       getSessionId: () => "sess-1",

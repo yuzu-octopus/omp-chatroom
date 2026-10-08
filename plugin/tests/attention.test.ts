@@ -451,6 +451,7 @@ function fakePi(): { pi: ExtensionAPI; sends: Send[] } {
 function fakeCtx(root: string, id: string): ExtensionContext {
   return {
     agent: { id, kind: "sub", name: "sub", depth: 0 },
+    cwd: root,
     localProtocolOptions: { getArtifactsDir: () => root, getSessionId: () => id },
   } as unknown as ExtensionContext;
 }

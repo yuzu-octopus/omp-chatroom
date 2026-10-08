@@ -22,20 +22,22 @@ interface ToolCall {
   execute(toolCallId: string, params: Record<string, unknown>): Promise<ToolResultEnvelope>;
 }
 
-// X1 — ROOT-STABLE: the id comes from the resolved root (shared by the parent and every subagent),
-// never from a session id (`task/executor.ts:4181,4186`). `resolveLocalRoot` appends "local".
-const LOCAL_ROOT = (root: string): string =>
-  resolveLocalRoot({ getArtifactsDir: () => root, getSessionId: () => "harness" });
-const ROOM_ID = (root: string): string => roomIdFor(LOCAL_ROOT(root));
-const logPath = (root: string): string => logPathFor(LOCAL_ROOT(root), ROOM_ID(root));
+// The room root is the PROJECT cwd (`ctx.cwd`), not the `local://` root: `localProtocolOptions` is
+// per-session, so keying the room there gave every subagent its own private room (verified live:
+// main resolved `<session>/local`, its subagent resolved `<session>/Task1/local`).
+const ROOM_ROOT = (root: string): string => `${root}/.omp-room`;
+const ROOM_ID = (root: string): string => roomIdFor(ROOM_ROOT(root));
+const logPath = (root: string): string => logPathFor(ROOM_ROOT(root), ROOM_ID(root));
 async function newSession(bus: EventBus, registry: AgentRegistry, root: string, id: string) {
   const { session } = await createAgentSession({
     eventBus: bus,
+    // `ctx.cwd` — the room root — comes from the SessionManager, not the `cwd` option (verified:
+    // the option drives discovery only).
+    sessionManager: SessionManager.inMemory(root),
     localProtocolOptions: { getArtifactsDir: () => root, getSessionId: () => id },
     extensions: [roomExtension],
     agentRegistry: registry,
     agentId: id,
-    sessionManager: SessionManager.inMemory(),
     disableExtensionDiscovery: true,
     enableMCP: false,
     enableLsp: false,
@@ -327,7 +329,7 @@ test("a non-last session's dispose leaves the fd open; the last one closes it (K
   }
 });
 
-test("the same file read from B's root options is identical (subagents share the parent root)", async () => {
+test("a second session with its own artifacts dir still reads the parent's room", async () => {
   const root = freshRoot();
   const bus = new EventBus();
   const registry = new AgentRegistry();
@@ -340,14 +342,14 @@ test("the same file read from B's root options is identical (subagents share the
       key: "res",
       ttl: 300_000,
     });
-    // B resolves the same file through its own root options.
+    // B has its own artifacts dir; the room root is the shared project cwd, so it sees A's claim.
     const boardB = await toolOf(b, "room").execute("c-board", { op: "board" });
     expect(boardB.details?.ok).toBe(true);
     const board = boardB.details?.board as { claims: Array<{ resource: string; holder: string }> };
     expect(board.claims.find((c) => c.resource === "shared/res")).toMatchObject({
       holder: "AgentA",
     });
-    expect(logPath(root)).toBe(logPathFor(LOCAL_ROOT(root), resolveRoomId(LOCAL_ROOT(root))));
+    expect(logPath(root)).toBe(logPathFor(ROOM_ROOT(root), resolveRoomId(ROOM_ROOT(root))));
   } finally {
     await a.dispose();
     await b.dispose();

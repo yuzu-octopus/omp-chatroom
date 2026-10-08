@@ -493,6 +493,7 @@ function sessionCtx(artifactsDir: string, kind: "main" | "sub", id: string): Ses
   const opts = { getArtifactsDir: () => artifactsDir, getSessionId: () => id };
   const ctx = {
     agent: { kind, id, name: kind, depth: 0 },
+    cwd: artifactsDir,
     localProtocolOptions: opts,
     sessionManager: { ...opts, getEntries: () => [] },
     setInterval: (cb: () => void) => {

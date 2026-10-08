@@ -41,11 +41,14 @@ async function newSession(
 ): Promise<Session> {
   const { session } = await createAgentSession({
     eventBus: bus,
+    // The room root is `ctx.cwd`, which comes from the SessionManager. `createAgentSession`'s own
+    // `cwd` option drives discovery only — it does NOT populate `ctx.cwd` (verified), so the root
+    // must go to the manager.
+    sessionManager: SessionManager.inMemory(root),
     localProtocolOptions: { getArtifactsDir: () => root, getSessionId: () => id },
     extensions: [roomExtension],
     agentRegistry: registry,
     agentId: id,
-    sessionManager: SessionManager.inMemory(),
     disableExtensionDiscovery: true,
     enableMCP: false,
     enableLsp: false,

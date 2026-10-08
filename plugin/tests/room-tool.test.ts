@@ -326,6 +326,10 @@ function fakeCtx(
   const opts = { getArtifactsDir: () => root, getSessionId: () => agentId };
   return {
     agent: { kind, id: agentId, name: kind, depth: 0 },
+    // The room root is derived from `ctx.cwd` (one room per project, shared with subagents), so a
+    // test's isolated root must be its cwd — `localProtocolOptions` is per-session and no longer
+    // keys the room.
+    cwd: root,
     localProtocolOptions: opts,
     sessionManager: { ...opts, getEntries: () => [] },
     setInterval: () => {
@@ -350,6 +354,44 @@ test("roomStoreFor refs once per session; disposeRoomSession evicts on the last"
 
   disposeRoomSession(fakeCtx(root, "AgentB")); // last session → fd closed, root evicted
   expect(roomStoreFor(fakeCtx(root, "AgentC"))).not.toBe(a);
+});
+
+test("main and a subagent share ONE room even with different artifacts dirs (the real layout)", () => {
+  // The bug this pins: the room root used to come from `ctx.localProtocolOptions`, which is
+  // PER-SESSION — a subagent's artifacts dir is its own session file minus `.jsonl`
+  // (`artifactsDirectoryFor`), so main resolved `<session>/local` and its subagent resolved
+  // `<session>/Task1/local`. Every agent got a private room and the claim board coordinated
+  // nobody. Nothing caught it because every fixture handed each session the SAME root, a shape
+  // that cannot occur in production.
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "room-shared-"));
+  const mainArtifacts = path.join(project, "sess-main");
+  const subArtifacts = path.join(project, "sess-main", "Task1");
+
+  const main = {
+    ...fakeCtx(project, "Main"),
+    localProtocolOptions: {
+      getArtifactsDir: () => mainArtifacts,
+      getSessionId: () => "Main",
+    },
+  } as ExtensionContext;
+  const sub = {
+    ...fakeCtx(project, "Task1", "sub"),
+    localProtocolOptions: {
+      getArtifactsDir: () => subArtifacts,
+      getSessionId: () => "Task1",
+    },
+  } as ExtensionContext;
+
+  expect(subArtifacts).not.toBe(mainArtifacts); // the layout that broke it
+  const a = roomStoreFor(main);
+  const b = roomStoreFor(sub);
+  expect(b).toBe(a); // one store, one board
+
+  const granted = a.append({ kind: "claim", from: "Main", resource: "build/step", ttlMs: 60_000 });
+  expect(a.claims.get("build/step")?.holder).toBe("Main");
+  // The subagent sees the claim its parent took — the entire point of the room.
+  expect(b.claims.get("build/step")?.holder).toBe("Main");
+  expect(granted.seq).toBeGreaterThan(0);
 });
 
 test("background jobs start from the main session only (R11/R28)", () => {

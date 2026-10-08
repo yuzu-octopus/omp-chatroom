@@ -1,8 +1,5 @@
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import {
-  type LocalProtocolOptions,
-  resolveLocalRoot,
-} from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
+
 import { globalMap } from "../globals";
 import { logPathFor, newMessageId } from "../ids";
 import { type ClaimState, expireStale, hydrateClaims } from "./claims";
@@ -202,11 +199,16 @@ export function storeFor(root: string, roomId: string): RoomStore {
 }
 
 function rootOf(ctx: ExtensionContext): string {
-  const opts: LocalProtocolOptions = ctx.localProtocolOptions ?? {
-    getArtifactsDir: () => ctx.sessionManager.getArtifactsDir(),
-    getSessionId: () => ctx.sessionManager.getSessionId(),
-  };
-  return resolveLocalRoot(opts);
+  // The room MUST be one per project, shared by the main session and every subagent it spawns.
+  //
+  // `ctx.localProtocolOptions` is per-SESSION: a subagent's artifacts dir is its own session file
+  // minus `.jsonl` (`artifactsDirectoryFor`), so deriving the room from it gave every agent a
+  // private room — the claim board coordinated nobody. Verified live: main resolved
+  // `<session>/local` while its subagent resolved `<session>/Task1/local`.
+  //
+  // `ctx.cwd` is the project directory and is inherited by subagents, so it is the only stable
+  // per-tree key. The `local://` protocol root is deliberately NOT used for the room.
+  return `${ctx.cwd}/.omp-room`;
 }
 
 export function roomStoreFor(ctx: ExtensionContext): RoomStore {
