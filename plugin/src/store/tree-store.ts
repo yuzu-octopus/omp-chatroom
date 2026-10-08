@@ -12,7 +12,7 @@ export interface TreeStore {
   logLength: number;
 }
 
-export const TREE_REC = 288; // §5.2
+export const TREE_REC = 512; // §2 — a dense paragraph; 128 was too short, 288 was untested
 export const RAW_MAX = 16; // §3.6 merge shape
 export const COVER_BUDGET_LINES = 96; // §5.2 (OptMem WAKE_LINES)
 
@@ -69,7 +69,7 @@ function repair(p: string): void {
  * over-long summary (`memo:296-299`); the plan (T3) requires graceful truncation instead — the
  * tail is lost, the node stays usable.
  */
-function truncateBytes(text: string, maxBytes: number): string {
+export function truncateBytes(text: string, maxBytes: number): string {
   if (Buffer.byteLength(text, "utf-8") <= maxBytes) return text;
   let bytes = 0;
   let out = "";
