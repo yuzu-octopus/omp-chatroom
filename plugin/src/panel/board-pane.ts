@@ -5,6 +5,7 @@ import {
   type TableColumn,
   type Theme,
 } from "@oh-my-pi/pi-tui";
+import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { ClaimRow } from "../store/schema";
 import { fitWidth } from "./chrome";
 
@@ -65,9 +66,12 @@ export function projectClaims(
     const dim = row.state !== "held";
     const ttl = ttlCell(row, now);
     const cells: TableCell[] = [
-      { text: row.resource, style: dim ? (text) => theme.fg("muted", text) : undefined },
       {
-        text: holderText(row),
+        text: sanitizeText(row.resource),
+        style: dim ? (text) => theme.fg("muted", text) : undefined,
+      },
+      {
+        text: sanitizeText(holderText(row)),
         style: (text) => theme.fg(row.contended > 0 ? "warning" : dim ? "muted" : "text", text),
       },
       { text: ttl.text, style: (text) => theme.fg(ttl.tone, text) },

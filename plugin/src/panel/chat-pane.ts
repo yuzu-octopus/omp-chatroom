@@ -98,14 +98,14 @@ export function renderChatRows(rows: readonly ChatRow[], width: number, theme: T
     const badge = theme.fg(TIER_TONE[row.tier], row.tier);
     const time = theme.fg("dim", new Date(row.ts).toISOString().slice(11, 19));
     const author = row.mention
-      ? theme.bold(theme.fg("accent", row.author))
-      : theme.bold(row.author);
+      ? theme.bold(theme.fg("accent", sanitizeText(row.author)))
+      : theme.bold(sanitizeText(row.author));
     const indent =
       row.threadDepth > 0 ? theme.tree.vertical.repeat(row.threadDepth) + theme.tree.branch : "";
     const body = truncateToWidth(row.body.replace(/[\r\n]+/g, " "), Math.max(1, width - 32));
     const head =
       `${unread}${badge} ${time} ${indent}${author} ${theme.fg("dim", "›")} ` +
-      `${theme.fg("muted", row.topic)} ${theme.sep.dot} ${body}`;
+      `${theme.fg("muted", sanitizeText(row.topic))} ${theme.sep.dot} ${body}`;
     return padOrTrim(head, width);
   });
 }

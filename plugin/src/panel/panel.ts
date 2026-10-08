@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent";
 import { type Component, SplitPane, Stack, type Theme, type TUI } from "@oh-my-pi/pi-tui";
+import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { contended } from "../store/claims";
 import { cursorFor } from "../store/cursors";
 import { type MemberState, type RoomStore, roomStoreFor } from "../store/room-store";
@@ -159,18 +160,19 @@ export class RoomPanel implements Component {
     return this.#lastRender;
   }
 
-  handleInput(data: string): void {
-    if (this.#disposed) return;
+  handleInput(data: string): boolean {
+    if (this.#disposed) return false;
+    // editorEmpty: true — the overlay owns the keyboard; the editor is not visible.
     const action = actionFor(data, {
       splitMode: this.#split.measure(this.#width).mode,
       editorEmpty: true,
       filterOpen: false,
     });
-    if (action === null) return;
+    if (action === null) return false;
     switch (action) {
       case "close":
         this.#options.done();
-        return;
+        return true;
       case "toggle-narrow":
         this.#narrowOpen = !this.#narrowOpen;
         break;
@@ -209,6 +211,7 @@ export class RoomPanel implements Component {
     }
     this.#clampSelection();
     this.refresh();
+    return true;
   }
 
   /**
@@ -272,7 +275,7 @@ export class RoomPanel implements Component {
 
   #titleFor(narrow: boolean): string {
     const pane = narrow ? (this.#narrowOpen ? "board" : "chat") : "chat|board";
-    return `Room #${this.#options.roomId} · ${pane} · ${this.#roster}`;
+    return `Room #${sanitizeText(this.#options.roomId)} · ${pane} · ${this.#roster}`;
   }
 }
 
@@ -307,12 +310,22 @@ export async function openRoomPanel(pi: ExtensionAPI, ctx: ExtensionContext): Pr
   try {
     await ctx.ui.custom<void>(
       (tui, theme, _keybindings, done) => {
-        ACTIVE_PANEL.set(pi, done);
+        let unsubscribe: () => void = () => {};
+        let closed = false;
+        // Idempotent: `handleInput` may fire `done` more than once (a second `esc`, a key arriving
+        // during teardown), and the host's overlay teardown calls it again. Without the guard the
+        // unsubscribe and `done` run twice, which double-releases the terminal-input listener.
+        const close = () => {
+          if (closed) return;
+          closed = true;
+          unsubscribe();
+          done();
+        };
         const panel = new RoomPanel({
           roomId: store.roomId,
           store,
           tui,
-          done,
+          done: close,
           selfId: ctx.agent.id,
           theme,
           onReleaseClaim: (resource: string) => {
@@ -337,6 +350,13 @@ export async function openRoomPanel(pi: ExtensionAPI, ctx: ExtensionContext): Pr
           clearTimer: (timer: unknown) =>
             ctx.clearTimer(timer as Parameters<typeof ctx.clearTimer>[0]),
         });
+        unsubscribe = ctx.ui.onTerminalInput((data) => {
+          if (panel.handleInput(data)) {
+            return { consume: true };
+          }
+          return undefined;
+        });
+        ACTIVE_PANEL.set(pi, close);
         return panel;
       },
       {

@@ -4,11 +4,23 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentRef, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { resolveLocalRoot } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
-import { ensureThemeSync, type TUI, theme, visibleWidth } from "@oh-my-pi/pi-tui";
+import {
+  type Component,
+  ensureThemeSync,
+  type Theme,
+  type TUI,
+  theme,
+  visibleWidth,
+} from "@oh-my-pi/pi-tui";
 import { registerRoomCommand } from "../src/commands/room-command";
 import { roomIdFor } from "../src/ids";
 import { type BoardRow, projectClaims } from "../src/panel/board-pane";
-import { createChatPane, projectChatRows } from "../src/panel/chat-pane";
+import {
+  type ChatRow,
+  createChatPane,
+  projectChatRows,
+  renderChatRows,
+} from "../src/panel/chat-pane";
 import { frameBottomRow, frameDividerRow, frameHintRow, frameTopRow } from "../src/panel/chrome";
 import { actionFor, PANEL_KEY_MAP, type PanelAction } from "../src/panel/keys";
 import {
@@ -409,4 +421,183 @@ test("/room with no arguments opens the panel, and degrades without a TUI", asyn
   } as unknown as ExtensionContext;
   await handler("", headless);
   expect(notified.length).toBeGreaterThan(0);
+});
+
+// --- F2 security: ANSI injection in board pane ---
+
+test("board pane strips ANSI escape from resource and holder", () => {
+  setSystemTime(new Date("2026-10-07T00:00:00Z"));
+  try {
+    const now = Date.now();
+    const rows: BoardRow[] = [
+      {
+        resource: "x\x1b[2Jy",
+        holder: "Agent\x1b[31mA",
+        ttlMs: 60_000,
+        expiresAt: now + 12_000,
+        acquiredAt: now - 48_000,
+        contended: 0,
+        state: "held",
+      },
+    ];
+    const lines = projectClaims(rows, 80, theme);
+    const text = lines.join("\n");
+    const stripped = text.replace(ANSI, "");
+    expect(stripped).not.toContain("\x1b");
+    expect(text).toContain("xy");
+    expect(text).toContain("AgentA");
+  } finally {
+    setSystemTime();
+  }
+});
+
+// --- F2 security: ANSI injection in chat pane ---
+
+test("chat pane strips ANSI escape from author and topic", () => {
+  const rows: ChatRow[] = [
+    {
+      seq: 1,
+      ts: 1_000_000,
+      tier: "T1",
+      author: "a\x1b[31mb",
+      topic: "build\x1b[2J",
+      body: "hello",
+      mention: false,
+      unread: false,
+      threadDepth: 0,
+    },
+  ];
+  const lines = renderChatRows(rows, 80, theme);
+  const text = lines.join("\n");
+  const stripped = text.replace(ANSI, "");
+  expect(stripped).not.toContain("\x1b");
+  expect(text).toContain("ab");
+  expect(text).toContain("build");
+});
+
+// --- 7. handleInput returns boolean ----------------------------------------
+
+test("handleInput returns true for a mapped key and false for an unmapped one", () => {
+  const store = fixtureStore();
+  const panel = makePanel(store);
+  expect(panel.handleInput("j")).toBe(true);
+  expect(panel.handleInput("z")).toBe(false);
+});
+
+// --- 8. onTerminalInput registration ---------------------------------------
+
+/** A fake ctx that captures the onTerminalInput handler and the done callback. */
+function captureTerminalInput(): {
+  handler: (data: string) => { consume: true } | undefined;
+  done: () => void;
+  unsubscribe: () => void;
+  unsubscribeCalls: number;
+  tuiCtx: ExtensionContext;
+} {
+  // `openRoomPanel` hands the host theme to the panel; the module-level `theme` export is
+  // `export var theme` and stays undefined until `initTheme()` runs, so a test that renders before
+  // `beforeAll` has no theme. Ensure it here rather than depend on suite ordering.
+  ensureThemeSync();
+  let handler: ((data: string) => { consume: true } | undefined) | undefined;
+  const done: () => void = () => {};
+  let unsubscribeCalls = 0;
+  const unsubscribe = () => {
+    unsubscribeCalls += 1;
+  };
+  const root = tempRoot();
+  const tuiCtx = {
+    hasUI: true,
+    mode: "tui",
+    agent: { id: "Main", kind: "main", name: "main", depth: 0 },
+    cwd: root,
+    localProtocolOptions: { getArtifactsDir: () => root, getSessionId: () => "sess-panel" },
+    setInterval: () => "t",
+    clearTimer: () => {},
+    ui: {
+      notify: () => {},
+      custom: async (
+        factory: (
+          tui: TUI,
+          hostTheme: Theme,
+          keybindings: unknown,
+          closeOverlay: () => void,
+        ) => Component,
+      ) => {
+        // The factory's 4th arg is the host's close callback. Capture it so the test can drive the
+        // close path (`done`), and pass the imported theme as arg 2 — the panel must use the
+        // injected theme, since the pi-tui `theme` module export is undefined until initTheme runs.
+        const panel = factory(tuiStub(30), theme, {}, () => {
+          done();
+        });
+        void panel;
+        return undefined as never;
+      },
+      onTerminalInput: (h: typeof handler) => {
+        handler = h;
+        return unsubscribe;
+      },
+    },
+  } as unknown as ExtensionContext;
+  return {
+    get handler() {
+      if (!handler) throw new Error("onTerminalInput was not called");
+      return handler;
+    },
+    get done() {
+      return done;
+    },
+    unsubscribe,
+    get unsubscribeCalls() {
+      return unsubscribeCalls;
+    },
+    tuiCtx,
+  };
+}
+test("openRoomPanel registers an onTerminalInput handler", async () => {
+  const pi = { on: () => {} } as unknown as ExtensionAPI;
+  const { tuiCtx } = captureTerminalInput();
+  await openRoomPanel(pi, tuiCtx);
+  // If we got here without throwing, the handler was registered.
+  // The captureTerminalInput helper throws if onTerminalInput was not called.
+});
+
+test("the registered handler forwards a key to the panel and returns { consume: true }", async () => {
+  const pi = { on: () => {} } as unknown as ExtensionAPI;
+  // Bind the helper first: destructuring evaluates a getter immediately, and `handler` throws while
+  // it is still unset — before openRoomPanel has run.
+  const capture = captureTerminalInput();
+  await openRoomPanel(pi, capture.tuiCtx);
+  const result = capture.handler("j");
+  expect(result).toEqual({ consume: true });
+});
+
+test("closing the panel unsubscribes exactly once", async () => {
+  const pi = { on: () => {} } as unknown as ExtensionAPI;
+  const capture = captureTerminalInput();
+  await openRoomPanel(pi, capture.tuiCtx);
+  // `esc` is the panel's close key: handleInput -> done() -> close() -> unsubscribe(). Driving the
+  // key is the real path; calling the host's close callback directly would bypass the panel.
+  expect(capture.handler("\x1b")).toEqual({ consume: true });
+  expect(capture.unsubscribeCalls).toBe(1);
+  // A second close is a no-op (dispose is idempotent).
+  capture.handler("\x1b");
+  expect(capture.unsubscribeCalls).toBe(1);
+});
+test("an unmapped key is not consumed", async () => {
+  const pi = { on: () => {} } as unknown as ExtensionAPI;
+  const capture = captureTerminalInput();
+  await openRoomPanel(pi, capture.tuiCtx);
+  const result = capture.handler("z");
+  expect(result).toBeUndefined();
+});
+
+// --- F2 security: ANSI injection in roomId ---------------------------------
+
+test("roomId with ANSI escape is sanitized in the title", () => {
+  const store = fixtureStore();
+  const panel = makePanel(store, 30, { roomId: "x\x1b[2Jy" });
+  const rows = panel.render(80);
+  const text = rows.join("\n").replace(ANSI, "");
+  expect(text).not.toContain("\x1b");
+  expect(text).toContain("xy");
 });
