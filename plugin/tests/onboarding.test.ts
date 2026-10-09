@@ -384,3 +384,67 @@ test("the digest still reaches the agent, as the before_agent_start message (F10
   expect(content).toContain("Room ");
   expect(content).toContain(UNTRUSTED_OPEN);
 });
+
+// ---------------------------------------------------------------------------------------------
+// 8. The digest header counts the population the roster prints, not only the joined members.
+//    A run that claimed work but never sent member{join} has store.members === 0 while dozens of
+//    agents are live — "0 member(s)" above a full roster is self-contradictory.
+// ---------------------------------------------------------------------------------------------
+
+function registerAgents(n: number, status: "running" | "idle" = "running"): void {
+  for (let i = 0; i < n; i++) {
+    AgentRegistry.global().register({
+      id: `agent-${i}`,
+      displayName: `agent ${i}`,
+      kind: "sub",
+      session: null,
+      status,
+    });
+  }
+}
+
+test("an empty store.members with live agents is not reported as 0 member(s)", () => {
+  registerAgents(3);
+  expect(store.members.size).toBe(0);
+
+  const digest = buildDigest(store, viewer("AgentA"));
+  const header = digest.slice(0, digest.indexOf(UNTRUSTED_OPEN));
+
+  expect(header).not.toContain("0 member(s)");
+  // The header names a count that matches the roster it prints.
+  const rosterLines = digest.split("\n").filter((line) => line.includes("· cursor=")).length;
+  expect(rosterLines).toBe(3);
+  expect(header).toContain(`${rosterLines} live`);
+});
+
+test("the two-number header stays one line and inside the token budget", () => {
+  registerAgents(3);
+  for (let i = 0; i < 50; i++) post(i, `record-${i}-${"Z".repeat(600)}`);
+
+  const digest = buildDigest(store, viewer("AgentA"));
+  expect(estimateTokens(digest)).toBeLessThanOrEqual(DIGEST_BUDGET_TOKENS);
+
+  // Truncation runs at a tight budget, and the header survives it intact: one line, both counts.
+  const tight = buildDigest(store, viewer("AgentA"), 900);
+  expect(estimateTokens(tight)).toBeLessThanOrEqual(900);
+  expect(tight).not.toContain("record-0-");
+  expect(headerOf(tight)).toMatch(/^Room .* — \d+ joined · \d+ live · \d+ record\(s\)$/);
+  expect(estimateTokens(headerOf(tight))).toBeLessThan(40); // one short line
+});
+
+test("joined members and live agents are counted distinctly", () => {
+  store.append({ kind: "member", from: "AgentA", action: "join" });
+  store.append({ kind: "member", from: "AgentB", action: "join" });
+  registerAgents(3);
+  expect(store.members.size).toBe(2);
+
+  const header = headerOf(buildDigest(store, viewer("AgentC")));
+
+  expect(header).toContain("2 joined");
+  expect(header).toContain("3 live");
+});
+
+function headerOf(digest: string): string {
+  // The header is the line above the untrusted marker; trim the joining newline off.
+  return digest.slice(0, digest.indexOf(UNTRUSTED_OPEN)).trim();
+}

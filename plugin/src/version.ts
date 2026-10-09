@@ -1,6 +1,6 @@
-// X6 — the installed host is 18.8.0 (verified in @oh-my-pi/pi-coding-agent/package.json).
+// X6 — the installed host is 18.8.6 (verified in @oh-my-pi/pi-coding-agent/package.json).
 // The pin mirrors package.json `peerDependencies`; tests/drift.test.ts asserts the two agree.
-export const HOST_VERSION_PIN = "18.8.0";
+export const HOST_VERSION_PIN = "18.8.6";
 
 // Every deep specifier the plugin imports (`[deep]` in the host map). The drift test imports each
 // and asserts it resolves non-undefined. Four have an explicit barrel (`pi-coding-agent/internal-urls`,

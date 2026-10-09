@@ -62,18 +62,6 @@ export function buildDigest(
   // F10 — no uptime: it is wall-clock state that changes every second, pure noise that made the
   // digest different on every turn for no informational gain. (The digest no longer reaches the
   // system prompt at all, but the field was worthless wherever it lived.)
-  // `store.roomId` comes from `local://room/config.json` — a file any agent can write — so it is
-  // room-authored data and must be escaped like everything else. It previously reached the system
-  // prompt raw, outside the untrusted region.
-  const header = [
-    `Room ${room(store.roomId)} — ${store.members.size} member(s) · ${store.records.length} record(s)`,
-  ];
-  // Never truncated (§5.4 U8): the viewer's cursor + lag, and the active caps.
-  const footer = [
-    `Your cursor: ${cursor} · lag: ${lag}`,
-    `Caps: roster=${ROSTER_CAP} claims=${DIGEST_CLAIMS_CAP} digestBudgetTokens=${budgetTokens}` +
-      ` claimTtlMs=${DEFAULT_ROOM_CONFIG.claimTtlMs} maxBodyBytes=${DEFAULT_ROOM_CONFIG.maxBodyBytes}`,
-  ];
 
   // Non-idle first so the roster truncation drops idle agents first (§5.4 U8).
   const roster = AgentRegistry.global()
@@ -88,6 +76,23 @@ export function buildDigest(
       (ref) =>
         `- ${room(ref.id)} [${ref.status}] · cursor=${cursorFor(store, ref.id)} · lag=${lagFor(store, ref.id)}`,
     );
+
+  // Two counts, named distinctly: `joined` is the room's member set (agents that sent
+  // member{join}); `live` is the registry population the roster below prints (roster-capped).
+  // They are different sets — an agent can be live without having joined — so reporting only one
+  // beside the other's list read as a contradiction ("0 member(s)" above a full roster). Both
+  // Both numbers are derived, not room-authored, so neither needs `room()` escaping.
+  // `store.roomId` comes from `local://room/config.json` — a file any agent can write — so it IS
+  // room-authored data and stays escaped here.
+  const header = [
+    `Room ${room(store.roomId)} — ${store.members.size} joined · ${roster.length} live · ${store.records.length} record(s)`,
+  ];
+  // Never truncated (§5.4 U8): the viewer's cursor + lag, and the active caps.
+  const footer = [
+    `Your cursor: ${cursor} · lag: ${lag}`,
+    `Caps: roster=${ROSTER_CAP} claims=${DIGEST_CLAIMS_CAP} digestBudgetTokens=${budgetTokens}` +
+      ` claimTtlMs=${DEFAULT_ROOM_CONFIG.claimTtlMs} maxBodyBytes=${DEFAULT_ROOM_CONFIG.maxBodyBytes}`,
+  ];
 
   // Highest remaining TTL first so the claims truncation drops the shortest-TTL claim first (§5.4 U8).
   const claims = [...store.claims.values()]
