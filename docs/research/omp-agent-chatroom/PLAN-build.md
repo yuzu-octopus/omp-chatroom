@@ -14,6 +14,52 @@ against 18.7.0 with a consistent +5..+10 drift, so the evidence holds and only t
 > with the usual small drift. This is exactly the R34 failure mode: the pin and the drift test were
 > correct in form but pointed at the wrong host, so the guard passed while the plugin loaded into a
 > host it had never been tested against.
+
+> **Addendum 2026-10-09 — five constants and one formula, deliberately changed after the build.**
+> The body below is a historical build record and its line-number citations were correct when
+> written. Six things have since moved in `plugin/src/**`; each was a deliberate decision with
+> evidence, not drift. A reader who trusts the body over the code on any of these will be wrong.
+>
+> 1. **`TREE_REC` 288 → 512.** `plugin/src/store/tree-store.ts:29` is now `512`. The UniiChat spec
+>    tested 128 and found it useless, and 512 bytes is a dense paragraph; our 288 was inherited
+>    from OptMem **untested**. `docs/research/optmem-2026-10-08/` holds the separate finding (D, E).
+> 2. **`COMPACT_MAX_RETRIES` 3 → 5.** `plugin/src/store/compactor.ts:12` is now `5`, with the retry
+>    loop at `:178` keeping the **shortest** reply seen. The prompt now carries a byte **ruler** — a
+>    run of dashes exactly `TREE_REC` long (`compactor.ts:20`, spec §4) — because models cannot count
+>    bytes; an over-long reply is retried in the **same** conversation with a cut message showing
+>    where the limit fell (`compactor.ts:130-137`).
+> 3. **The compactor no longer sends its own system prompt.** The M9 untrusted framing moved out of
+>    the system prompt and into the **task text** (`UNTRUSTED_TASK_PREFIX`, `compactor.ts:26-28`,
+>    used at `:176`); `callSummarizer` leaves `context.systemPrompt` **undefined**
+>    (`compactor.ts:117-124`) so the compaction shares the turns' prompt-cache prefix (F6). The
+>    sentence is still load-bearing and still first — it just no longer sits in a system prompt.
+> 4. **The room root is `<project cwd>/.omp-room`, not the `local://` root.**
+>    `plugin/src/store/room-store.ts:206-217`: `rootOf(ctx)` returns `${ctx.cwd}/.omp-room` and
+>    deliberately **does not** use `ctx.localProtocolOptions`, which is per-session — a subagent's
+>    artifacts dir is its own, so keying the room on the `local://` root gave every subagent its own
+>    private room. This supersedes §1.3/§2.1.2/X1, where the room id is derived from the shared
+>    `local://` root: the room is now one **per project**, shared by the main session and every
+>    subagent it spawns.
+> 5. **The digest no longer rides the system prompt.** `plugin/src/onboarding/hook.ts:63-72`: the
+>    system prompt carries **only** the static routing rule (byte-identical every turn, so it stays
+>    in the prompt cache), and the volatile digest rides
+>    `BeforeAgentStartEventResult.message` as a custom message
+>    (`DIGEST_MESSAGE_TYPE = "room:digest"`, `hook.ts:28`). The header is now
+>    `"<N> joined · <M> live · <R> record(s)"` (`onboarding/digest.ts:88`).
+> 6. **`merge age` stays `T - lo` — deliberately unchanged.** The UniiChat spec's `first`→`last` fix
+>    was verified and **rejected**: measured on our procedure it matches Taelin's `push` **140/400
+>    vs 8/400**, so applying the spec's fix moves our tiling *away* from `push`. See
+>    `docs/research/optmem-2026-10-08/A-merge-order-verification.md`, which exists precisely so
+>    nobody "fixes" this again on the strength of the spec's `481/20001` claim. The constant stays
+>    byte-identical to OptMem's `_cover` (`plugin/src/store/tree-store.ts:446`).
+>
+> **Corrected in place, not just recorded here:** the §5.2 caps-table row *Tree node size
+> (**TREE_REC**)* now reads **512 bytes**. It is the one spot in this document that presented a
+> superseded constant as *current* state, and a table reads as current even inside a historical
+> document. The other superseded numbers — the §3.6 code comment at :571, the merge-shape sentence
+> at :601, the node-format paragraph at :883, `maxTokens: 288` at :941, and "retry up to 3 times" at
+> :958 — are body prose describing the build as it happened and were left untouched under the
+> historical-record rule.
 Evidence base: `findings/F15..F19` (round 3) + `REPORT-v2-hybrid.md` (round 2) + `REPORT.md` (round 1)
 + `review4/` lens reports D1–D8 (round 4).
 Every non-obvious claim carries a source tag: `[F15]`…`[F19]`, `[R2]`, `[F0]`, `[F1]`…, `[D5]`, `[D6]`,
@@ -1451,7 +1497,7 @@ gave T0 to *every* agent regardless of whether they held the claim.
 | Mailbox cap | native `MAILBOX_CAP = 100`, made **tier-aware** | `[F14 §6]`, `[F0]` |
 | Cold tree raw tail (**R**) | **50 messages** | Matches §3.5 join cursor `[R3 §2]` |
 | Cold tree budget (**B**) | **96 lines** | OptMem `WAKE_LINES=96` `[R3 §2]` |
-| Tree node size (**TREE_REC**) | **288 bytes** | OptMem `TREE_REC=288` `[R3 §1]` |
+| Tree node size (**TREE_REC**) | **512 bytes** — *superseded from 288 by the 2026-10-09 addendum* | was OptMem `TREE_REC=288` `[R3 §1]`, untested; 512 is a dense paragraph (spec tested 128 and found it useless) |
 | Compaction concurrency (**JOBS**) | **8** `[invented]` | F21-W5 saturation analysis — 8 parallel streams saturate LLM throughput `[R3 §3]` |
 | Compaction max spend (**rate**, not total) | **20000 calls/day** `[calibrate]` | K4 — ≈2× the per-window demand (≈2N ≈ 10 000 calls) buys ~2 rebuilds/day against a ~86 windows/day turnover; the tree covers only the oldest retained region (X4, §3.6) `[R3 §3]` |
 | Claim-expiry sweep interval | **5 s** `[calibrate]` | K3 — the only producer of `release{reason:"expired"}`; refcounted, main session |
