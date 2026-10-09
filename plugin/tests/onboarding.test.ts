@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, setSystemTime, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -448,3 +448,196 @@ function headerOf(digest: string): string {
   // The header is the line above the untrusted marker; trim the joining newline off.
   return digest.slice(0, digest.indexOf(UNTRUSTED_OPEN)).trim();
 }
+
+// ---------------------------------------------------------------------------------------------
+// 9. §3.3 — the digest is per-turn state, so it must be APPEND-ONLY: a turn's digest is a prefix
+//    of the next turn's. The digest left the system prompt (F10), but it still rides the turn's
+//    view, so the same prefix rule applies to it.
+//
+//    The two breakers pinned down here:
+//      • the roster sorted idle agents LAST, so one running→idle transition moved that agent to
+//        the end of the list and rewrote every line below it;
+//      • the claims' "Ns left" countdown changed every second, so two consecutive renders of an
+//        unchanged room never matched.
+// ---------------------------------------------------------------------------------------------
+
+/** The roster's agent ids, in rendered order. */
+function rosterIds(digest: string): string[] {
+  return digest
+    .split("\n")
+    .filter((line) => line.includes("· cursor="))
+    .map((line) => line.slice(2).split(" ")[0]!);
+}
+
+/** The raw-tail backlog lines, in rendered order (nothing before/after them in the section). */
+function recentLines(digest: string): string[] {
+  const lines = digest.split("\n");
+  const start = lines.indexOf("Recent:");
+  return start < 0 ? [] : lines.slice(start + 1, lines.indexOf(UNTRUSTED_CLOSE));
+}
+
+test("the digest is append-only: an agent going idle changes exactly one line (§3.3)", () => {
+  registerAgents(8);
+  for (let i = 0; i < 3; i++) post(i, `msg-${i}`);
+  store.claims.set("build/step", {
+    resource: "build/step",
+    holder: "AgentB",
+    ttlMs: 300_000,
+    acquiredAt: Date.now(),
+    seq: store.seq,
+  });
+
+  const first = buildDigest(store, viewer("AgentA"));
+  const firstLines = first.split("\n");
+  // Control: an unchanged room renders byte-identically twice in a row.
+  expect(buildDigest(store, viewer("AgentA"))).toBe(first);
+
+  // The non-structural change: one agent finishes its turn and goes idle.
+  AgentRegistry.global().setStatus("agent-3", "idle");
+  const second = buildDigest(store, viewer("AgentA"));
+  const secondLines = second.split("\n");
+
+  // §3.3 — the view only grows at its end, so the first render is a literal prefix of the second
+  // up to the single line the event genuinely touched.
+  const changed = firstLines.findIndex((line, at) => line !== secondLines[at]);
+  expect(changed).toBe(secondLines.findIndex((line) => line.startsWith("- agent-3 ")));
+  expect(second.startsWith(`${firstLines.slice(0, changed).join("\n")}\n`)).toBe(true);
+  expect(firstLines[changed]).toContain("- agent-3 [running]");
+  expect(secondLines[changed]).toContain("- agent-3 [idle]");
+
+  // Nothing below it moved: the roster was not reshuffled around the transition.
+  expect(secondLines.length).toBe(firstLines.length);
+  expect(secondLines.slice(changed + 1)).toEqual(firstLines.slice(changed + 1));
+});
+
+test("an agent going running→idle does not reorder the other roster lines (§5.4/§3.3)", () => {
+  registerAgents(8);
+
+  const before = rosterIds(buildDigest(store, viewer("AgentA")));
+  expect(before).toEqual([
+    "agent-0",
+    "agent-1",
+    "agent-2",
+    "agent-3",
+    "agent-4",
+    "agent-5",
+    "agent-6",
+    "agent-7",
+  ]);
+
+  AgentRegistry.global().setStatus("agent-2", "idle");
+
+  // Same agents, same order — the idle agent keeps its slot; only its status field changes.
+  expect(rosterIds(buildDigest(store, viewer("AgentA")))).toEqual(before);
+});
+
+test("the roster cap still drops idle agents first without reordering the survivors (§5.4 U8)", () => {
+  // Zero-padded ids: the roster's order key is the id STRING, so `agent-10` sorts before
+  // `agent-2` — the padding keeps the expectation readable as a plain id range.
+  const pad = (n: number) => `agent-${String(n).padStart(2, "0")}`;
+  for (let i = 0; i < ROSTER_CAP + 4; i++) {
+    AgentRegistry.global().register({
+      id: pad(i),
+      displayName: `agent ${i}`,
+      kind: "sub",
+      session: null,
+      status: "running",
+    });
+  }
+  // Two idle agents at opposite ends of the id order: the cap's drop preference (§5.4 U8) must
+  // prefer them over the running agents, yet the survivors stay in id order.
+  AgentRegistry.global().setStatus(pad(0), "idle");
+  AgentRegistry.global().setStatus(pad(ROSTER_CAP + 3), "idle");
+
+  const ids = rosterIds(buildDigest(store, viewer("AgentA")));
+
+  expect(ids.length).toBe(ROSTER_CAP);
+  expect(ids).not.toContain(pad(0));
+  expect(ids).not.toContain(pad(ROSTER_CAP + 3));
+  expect(ids).toEqual([...ids].sort());
+  expect(ids[0]).toBe(pad(1));
+  expect(ids[ids.length - 1]).toBe(pad(ROSTER_CAP));
+});
+
+test("a claim's TTL is bucketed coarsely, so a render one second later is byte-identical (§3.3)", () => {
+  const at = new Date(2026, 9, 9, 12, 0, 0).getTime();
+  const realNow = Date.now();
+  setSystemTime(at);
+  try {
+    post(0, "a message");
+    store.claims.set("build/step", {
+      resource: "build/step",
+      holder: "AgentB",
+      ttlMs: 300_000,
+      acquiredAt: at,
+      seq: store.seq,
+    });
+
+    const first = buildDigest(store, viewer("AgentA"));
+
+    // The absolute expiry is a fixed point in time, so it renders identically every turn — that
+    // is what the per-second countdown cost, and the remaining time is only a coarse bucket.
+    expect(first).toContain("- build/step held by AgentB · 5m left (expires 12:05)");
+
+    setSystemTime(at + 1_000);
+    expect(buildDigest(store, viewer("AgentA"))).toBe(first);
+  } finally {
+    setSystemTime(realNow);
+  }
+});
+
+test("the backlog only grows at its end (§3.3)", () => {
+  for (let i = 0; i < 5; i++) post(i, `msg-${i}`);
+
+  const first = recentLines(buildDigest(store, viewer("AgentA")));
+  expect(first.length).toBe(5);
+
+  for (let i = 5; i < 9; i++) post(i, `msg-${i}`);
+  const second = recentLines(buildDigest(store, viewer("AgentA")));
+
+  // Every record the first render printed survives byte-identical, in the same order, and the
+  // section ends with the new records — a pure tail append (the only rewriters are the R=50 cap
+  // boundary and retention/`gap` events, which §5.4 §3.6 own).
+  expect(second.length).toBe(first.length + 4);
+  expect(second.slice(0, first.length)).toEqual(first);
+  expect(second[second.length - 1]).toContain("msg-8");
+});
+
+test("the digest still fits its token budget and the routing rule is still not counted (K5)", async () => {
+  registerAgents(ROSTER_CAP + 4);
+  for (let i = 0; i < 50; i++) post(i, `record-${i}-${"Z".repeat(600)}`);
+  store.claims.set("build/step", {
+    resource: "build/step",
+    holder: "AgentB",
+    ttlMs: 300_000,
+    acquiredAt: Date.now(),
+    seq: store.seq,
+  });
+
+  const digest = buildDigest(store, viewer("AgentA"));
+  expect(estimateTokens(digest)).toBeLessThanOrEqual(DIGEST_BUDGET_TOKENS);
+  // The bound is real: this content overflows it, so truncation ran.
+  expect(estimateTokens(digest)).toBeGreaterThan(500);
+  expect(occurrences(digest, "· cursor=")).toBeLessThanOrEqual(ROSTER_CAP);
+  expect(occurrences(digest, "held by")).toBeLessThanOrEqual(DIGEST_CLAIMS_CAP);
+  // The rule is not part of the digest...
+  expect(digest).not.toContain(rule);
+  // ...and the digest spent the whole budget on itself, leaving no room the rule could have
+  // occupied — so the rule surviving whole proves it is measured separately.
+  expect(estimateTokens(digest)).toBeGreaterThan(DIGEST_BUDGET_TOKENS - estimateTokens(rule));
+
+  const { pi, fire } = fakePi();
+  registerHooks(pi);
+  const result = (await fire(
+    "before_agent_start",
+    { type: "before_agent_start", prompt: "hi", systemPrompt: ["BASE"] },
+    fakeCtx("AgentA"),
+  )) as { systemPrompt?: string[]; message?: { content?: string } } | undefined;
+
+  const systemPrompt = (result?.systemPrompt ?? []).join("\n");
+  expect(systemPrompt).toContain(rule);
+  expect(systemPrompt).not.toContain("Your cursor:");
+  expect(estimateTokens(String(result?.message?.content ?? ""))).toBeLessThanOrEqual(
+    DIGEST_BUDGET_TOKENS,
+  );
+});

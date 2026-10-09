@@ -10,6 +10,12 @@ export const DIGEST_CLAIMS_CAP = 10; // §5.4
 export const RAW_TAIL_R = 50; // §5.4/§3.5 — Option A's only backlog item is the raw tail
 const BACKLOG_BODY_CHARS = 240; // [invented] — one record must never eat the whole budget
 
+// §3.3 — the claim TTL is rendered as a coarse bucket, never a per-second countdown: a countdown
+// made every render of an unchanged room differ, so no turn's digest was a prefix of the next.
+// The spec fixes no width; a whole minute is the coarsest bucket that still orders the truncation
+// (§5.4 U8 drops the shortest remaining TTL first).
+const TTL_BUCKET_MS = 60_000; // [invented]
+
 // §5.4 — the untrusted-region marker every agent-derived digest string is rendered inside (K22).
 export const UNTRUSTED_OPEN = '<room-authored untrusted="true">';
 export const UNTRUSTED_CLOSE = "</room-authored>";
@@ -63,7 +69,15 @@ export function buildDigest(
   // digest different on every turn for no informational gain. (The digest no longer reaches the
   // system prompt at all, but the field was worthless wherever it lived.)
 
-  // Non-idle first so the roster truncation drops idle agents first (§5.4 U8).
+  // §3.3 — the digest is per-turn state, so it must render APPEND-ONLY: a turn's digest is a prefix
+  // of the next turn's. The roster's render order is therefore keyed on the agent id alone, the one
+  // thing that cannot change under an agent. Sorting idle agents last (as this did) put a status
+  // in the order key, so a single running→idle transition moved that agent to the end of the list
+  // and rewrote every line below it.
+  //
+  // §5.4 U8 survives: idle agents are still the first to be cut when ROSTER_CAP bites — but that is
+  // a SELECTION pass, resolved before the render, so it decides who is dropped without reordering
+  // who stays. (`list()` returns a fresh array, so both sorts are on a private copy.)
   const roster = AgentRegistry.global()
     .list()
     .sort(
@@ -72,6 +86,7 @@ export function buildDigest(
         (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
     )
     .slice(0, ROSTER_CAP)
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
     .map(
       (ref) =>
         `- ${room(ref.id)} [${ref.status}] · cursor=${cursorFor(store, ref.id)} · lag=${lagFor(store, ref.id)}`,
@@ -94,16 +109,33 @@ export function buildDigest(
       ` claimTtlMs=${DEFAULT_ROOM_CONFIG.claimTtlMs} maxBodyBytes=${DEFAULT_ROOM_CONFIG.maxBodyBytes}`,
   ];
 
-  // Highest remaining TTL first so the claims truncation drops the shortest-TTL claim first (§5.4 U8).
+  // Highest expiry first, so the claims truncation drops the shortest-TTL claim first (§5.4 U8).
+  // The key is `acquiredAt + ttlMs` — a fixed value per claim — so the order never moves as the
+  // clock advances (unlike a remaining-TTL countdown, which changes every second).
+  //
+  // §3.3 — what the line RENDERS is coarse: the remaining time is a whole-minute bucket, so it only
+  // changes when it crosses a minute boundary, and the claim's absolute expiry (a fixed timestamp,
+  // so it is byte-identical on every render) carries the rest. A per-second "Ns left" countdown
+  // made every render of an unchanged room differ, so no turn's digest was a prefix of the next.
   const claims = [...store.claims.values()]
     .sort((a, b) => b.acquiredAt + b.ttlMs - (a.acquiredAt + a.ttlMs))
     .slice(0, DIGEST_CLAIMS_CAP)
     .map((claim) => {
-      const left = Math.max(0, Math.round((claim.acquiredAt + claim.ttlMs - now) / 1000));
-      return `- ${room(claim.resource)} held by ${room(claim.holder)} · ${left}s left`;
+      const expiresAt = claim.acquiredAt + claim.ttlMs;
+      const remainingMs = expiresAt - now;
+      const left = remainingMs <= 0 ? "expired" : `${Math.ceil(remainingMs / TTL_BUCKET_MS)}m left`;
+      const at = new Date(expiresAt);
+      const clock = `${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}`;
+      return `- ${room(claim.resource)} held by ${room(claim.holder)} · ${left} (expires ${clock})`;
     });
 
   // Option A (§1.4): the raw tail is the whole backlog — there is no cold-tree item.
+  //
+  // §3.3 — this section is the digest's tail, so it must be append-only: each line is derived from
+  // its own record alone, so a record that is still inside the window renders byte-identically on
+  // every later turn, and new records only ever append at the end. Only log events can remove a
+  // line from its front: the log outgrowing the R=50 window, and retention pruning the head (§3.6,
+  // which appends its own `gap` record). Nothing here re-derives or re-orders a surviving line.
   const backlog = store.records.slice(-RAW_TAIL_R).map((r) => `[${r.seq}] ${room(recordLine(r))}`);
 
   const render = (rosterCount: number, claimCount: number, backlogDropped: number): string => {
