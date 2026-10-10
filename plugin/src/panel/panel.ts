@@ -3,15 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent";
-import {
-  type Component,
-  ensureThemeSync,
-  SplitPane,
-  Stack,
-  type Theme,
-  type TUI,
-  theme,
-} from "@oh-my-pi/pi-tui";
+import { type Component, SplitPane, Stack, type Theme, type TUI } from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { contended } from "../store/claims";
 import { cursorFor } from "../store/cursors";
@@ -20,6 +12,7 @@ import type { ClaimRow } from "../store/schema";
 import { type BoardRow, createBoardPane } from "./board-pane";
 import { type ChatRow, createChatPane, projectChatRows } from "./chat-pane";
 import { fitBlock, frameRows } from "./chrome";
+import { adoptHostTheme } from "./host-theme";
 import { actionFor } from "./keys";
 import { renderRosterStrip } from "./roster-strip";
 
@@ -316,24 +309,20 @@ const ACTIVE_PANEL = new WeakMap<ExtensionAPI, () => void>();
 /** A theme with a working `fg` — the only member any panel code actually calls. */
 type UsableTheme = Theme & { fg: (tone: string, text: string) => string };
 function resolveTheme(injected: Theme | undefined): Theme {
-  // ALWAYS initialise the host singleton, even when the injected theme is fine. The roster strip
-  // renders through the host's own `statusGlyph`/`statusText` (agent-hub-renderer), which read the
-  // pi-tui module-level `theme` directly rather than the theme we were handed. Without this, a host
-  // that passes a usable injected theme but has not initialised its own singleton kills the panel
-  // inside `renderRosterStrip`.
-  ensureThemeSync();
+  // ALWAYS publish whatever theme we are given to the host modules. The panel's frame rows come
+  // from `pi-tui/chrome/overlay-box` and its roster strip from `agent-hub-renderer`, and BOTH read
+  // the host `theme` singleton rather than the theme the factory handed us — under the plugin that
+  // singleton is uninitialised, so every one of them throws
+  // `undefined is not an object (evaluating 'theme.boxRound')` and takes the panel with it.
+  // `ensureThemeSync()` does not help (it only fills the singleton when it is wholly undefined, and
+  // the host's export is a different binding entirely). Publishing is the only version that holds.
+  adoptHostTheme(injected);
   const usable = (t: Theme | undefined): t is UsableTheme =>
     t !== undefined && t !== null && typeof t === "object" && typeof t.fg === "function";
   if (usable(injected)) return injected;
   trace(
     `resolveTheme: injected theme unusable (fg=${typeof (injected as { fg?: unknown } | undefined)?.fg})`,
   );
-  // The singleton is now ensured, so this read is the populated object the host itself uses.
-  const singleton: Theme | undefined = theme;
-  if (usable(singleton)) {
-    trace("resolveTheme: fell back to the pi-tui singleton");
-    return singleton;
-  }
   trace("resolveTheme: falling back to an uncoloured shim");
   // Every member here must match the host Theme's OWN TYPE, not just exist: `sep`, `nav`, `tree` and
   // `status` are string-valued getters (theme-class.ts:485-510) and consumers interpolate them, so a
@@ -396,7 +385,7 @@ export async function openRoomPanel(pi: ExtensionAPI, ctx: ExtensionContext): Pr
     trace("openRoomPanel: calling ctx.ui.custom");
     await ctx.ui.custom<void>(
       (tui, theme, _keybindings, done) => {
-        const t = theme as Record<string, unknown> | undefined;
+        const t = theme as unknown as Record<string, unknown> | undefined;
         trace(
           `factory: tui=${tui === undefined ? "undefined" : typeof tui}` +
             ` theme=${theme === undefined ? "undefined" : typeof theme}` +
