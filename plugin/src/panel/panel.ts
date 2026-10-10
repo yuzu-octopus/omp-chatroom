@@ -12,7 +12,7 @@ import type { ClaimRow } from "../store/schema";
 import { type BoardRow, createBoardPane } from "./board-pane";
 import { type ChatRow, createChatPane, projectChatRows } from "./chat-pane";
 import { fitBlock, frameRows } from "./chrome";
-import { adoptHostTheme } from "./host-theme";
+import { adoptHostTheme, uncolouredTheme } from "./host-theme";
 import { actionFor } from "./keys";
 import { renderRosterStrip } from "./roster-strip";
 
@@ -309,36 +309,27 @@ const ACTIVE_PANEL = new WeakMap<ExtensionAPI, () => void>();
 /** A theme with a working `fg` — the only member any panel code actually calls. */
 type UsableTheme = Theme & { fg: (tone: string, text: string) => string };
 function resolveTheme(injected: Theme | undefined): Theme {
-  // ALWAYS publish whatever theme we are given to the host modules. The panel's frame rows come
-  // from `pi-tui/chrome/overlay-box` and its roster strip from `agent-hub-renderer`, and BOTH read
-  // the host `theme` singleton rather than the theme the factory handed us — under the plugin that
-  // singleton is uninitialised, so every one of them throws
-  // `undefined is not an object (evaluating 'theme.boxRound')` and takes the panel with it.
-  // `ensureThemeSync()` does not help (it only fills the singleton when it is wholly undefined, and
-  // the host's export is a different binding entirely). Publishing is the only version that holds.
-  adoptHostTheme(injected);
   const usable = (t: Theme | undefined): t is UsableTheme =>
     t !== undefined && t !== null && typeof t === "object" && typeof t.fg === "function";
-  if (usable(injected)) return injected;
+  if (usable(injected)) {
+    // ALWAYS publish whatever usable theme we are given to the host modules, even when the injected
+    // theme is fine. The panel's frame rows come from `pi-tui/chrome/overlay-box` and its roster
+    // strip from `agent-hub-renderer`, and BOTH read the host `theme` singleton rather than the theme
+    // the factory handed us — under the plugin that singleton is uninitialised, so every one of them
+    // throws `undefined is not an object (evaluating 'theme.boxRound')` and takes the panel with it.
+    adoptHostTheme(injected);
+    return injected;
+  }
   trace(
     `resolveTheme: injected theme unusable (fg=${typeof (injected as { fg?: unknown } | undefined)?.fg})`,
   );
-  trace("resolveTheme: falling back to an uncoloured shim");
-  // Every member here must match the host Theme's OWN TYPE, not just exist: `sep`, `nav`, `tree` and
-  // `status` are string-valued getters (theme-class.ts:485-510) and consumers interpolate them, so a
-  // function there renders literally as "(text) => text" into the panel. Only `fg` is a method.
-  // `fg(tone, text)` must return the TEXT unchanged. Returning the identity function itself (the
-  // obvious-looking `fg: () => identity`) yields a function wherever a caller interpolates the
-  // result, which renders as the literal "(text) => text" into the pane.
-  const plain = (_tone: string, text: string): string => text;
-  return {
-    fg: plain,
-    bold: plain,
-    sep: { dot: " · ", space: " " },
-    nav: { cursor: "❯", selected: "➤" },
-    tree: { branch: "├─", vertical: "│" },
-    status: { error: "✘", warning: "⚠", info: "ⓘ", success: "✔", pending: "…" },
-  } as unknown as Theme;
+  // One object for both readers. The panel and the host's chrome helpers are two different readers of
+  // the same theme, so the fallback is published to the singleton AND returned — a theme that only
+  // satisfies the panel is the second half of the boxRound bug, not the fix for it.
+  trace("resolveTheme: publishing an uncoloured theme to the host and the panel");
+  const shim = uncolouredTheme();
+  adoptHostTheme(shim);
+  return shim as unknown as Theme;
 }
 
 /**

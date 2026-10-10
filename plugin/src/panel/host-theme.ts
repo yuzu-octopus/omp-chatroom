@@ -6,20 +6,86 @@
  * `undefined is not an object (evaluating 'theme.boxRound')` (or `theme.fg`, `theme.sep`, …) and
  * takes the panel with it.
  *
- * Fix: install the injected theme on the host module BEFORE any chrome/roster helper runs.
- * `@oh-my-pi/pi-tui` re-exports the theme setter for exactly this, so the panel stays a consumer of
- * the host's own chrome and the frame rows keep their host look.
+ * Fix: install the injected theme on the host module BEFORE any chrome/roster helper runs. The host
+ * exports `setThemeInstance` for exactly this, so the panel stays a consumer of the host's own
+ * chrome and the frame rows keep their host look.
  */
-import { setActiveSymbolTheme } from "@oh-my-pi/pi-tui/theme/active-symbols";
+import { theme as hostTheme, setThemeInstance } from "@oh-my-pi/pi-tui";
 
 /**
- * Make the host chrome/roster helpers see `theme`.
+ * Make the host chrome/roster helpers see `theme`, but ONLY when they cannot see anything.
  *
- * `setActiveSymbolTheme` publishes the symbol set they read and keeps the `theme` export in step
- * (the host's own install path is `initTheme` → `assignTheme` → `setActiveSymbolTheme`). Passing the
- * theme we were handed re-syncs those modules to the one the host actually gave the factory.
+ * Two readers, one theme. The panel draws its frame through the host's `topBorderSplit` /
+ * `divider` / `bottomBorder` and its roster strip through `agent-hub-renderer`; every one of them
+ * reads the `theme` export of `pi-tui/theme`, not the theme the factory handed us. Under the plugin
+ * that binding can be uninitialised, in which case each helper throws
+ * `undefined is not an object (evaluating 'theme.boxRound')` and takes the panel with it.
+ *
+ * `setThemeInstance` is the host's own publish path (`theme = value` + `setActiveSymbolTheme` +
+ * theme-change notify). It is deliberately NOT called when the host already has a live theme: it
+ * also stops the host's theme-file watcher, so overwriting a healthy singleton would silently kill
+ * the user's live theme reload for no gain. Empty host fills, healthy host is left alone.
  */
 export function adoptHostTheme(theme: unknown): void {
-  if (theme === undefined || theme === null || typeof theme !== "object") return;
-  setActiveSymbolTheme(theme as Parameters<typeof setActiveSymbolTheme>[0]);
+  const usable = (t: unknown): t is Parameters<typeof setThemeInstance>[0] =>
+    t !== undefined &&
+    t !== null &&
+    typeof t === "object" &&
+    typeof (t as { fg?: unknown }).fg === "function";
+  if (usable(hostTheme)) return;
+  if (!usable(theme)) return;
+  setThemeInstance(theme);
+}
+
+/** The box characters the host's `topBorderSplit`/`divider`/`bottomBorder` read from `boxRound`. */
+const BOX_ROUND = {
+  topLeft: "╭",
+  topRight: "╮",
+  bottomLeft: "╰",
+  bottomRight: "╯",
+  horizontal: "─",
+  vertical: "│",
+  cross: "┼",
+  teeDown: "┬",
+  teeUp: "┴",
+  teeRight: "├",
+  teeLeft: "┤",
+} as const;
+
+/**
+ * A last-ditch theme that satisfies EVERY member the panel and the host's chrome helpers actually
+ * read. It must be COMPLETE, not merely present: the panel's frame rows are drawn by the host's
+ * `topBorderSplit`/`divider`/`bottomBorder`, which read the *host's* theme singleton rather than
+ * the theme object `resolveTheme` returns. A partial shim here renders the panel fine and still
+ * kills it the moment `chrome.ts` asks the singleton for `boxRound` — which is exactly the second
+ * half of the original bug, reachable whenever the host hands the factory a theme with no `fg`.
+ *
+ * Every member must match the host Theme's OWN TYPE, not just exist: `sep`, `nav`, `tree`, `status`
+ * and `md` are string-valued getters (theme-class.ts:485-510) that consumers interpolate, so a
+ * function there renders literally as "(text) => text" into the pane.
+ */
+export function uncolouredTheme(): Record<string, unknown> {
+  const plain = (_tone: string, text: string): string => text;
+  // `bold` is ONE argument in the host Theme (theme-class.ts), not two like `fg`. A shim written
+  // as `bold: plain` passes the text as the tone and returns `undefined`, which paints the literal
+  // "undefined" into every author cell — the same class of defect as the original shim, in the
+  // member's ARITY rather than its presence.
+  const strong = (text: string): string => text;
+  return {
+    fg: plain,
+    bold: strong,
+    // `styledSymbol(key, tone)` must return the TEXT unchanged, like `fg`. Returning the identity
+    // function itself (the obvious-looking `styledSymbol: plain`) yields a function wherever a
+    // caller interpolates the result, which renders as the literal "(text) => text" into the pane.
+    // Only `tool.irc` is read by the card renderers; anything else falls back to a bullet rather
+    // than throwing, so an unknown key degrades instead of killing the transcript.
+    styledSymbol: (key: string, _tone: string): string => (key === "tool.irc" ? "✉" : "•"),
+    sep: { dot: " · ", space: " " },
+    nav: { cursor: "❯", selected: "➤", back: "⟵" },
+    tree: { branch: "├─", vertical: "│", last: "└─" },
+    status: { error: "✘", warning: "⚠", info: "ⓘ", success: "✔", pending: "…" },
+    md: { quoteBorder: "▏", hrChar: "─", bullet: "•", colorSwatch: "■" },
+    boxRound: BOX_ROUND,
+    boxSharp: BOX_ROUND,
+  };
 }

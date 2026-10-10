@@ -22,6 +22,7 @@ import {
   renderChatRows,
 } from "../src/panel/chat-pane";
 import { frameBottomRow, frameDividerRow, frameHintRow, frameTopRow } from "../src/panel/chrome";
+import { uncolouredTheme } from "../src/panel/host-theme";
 import { actionFor, PANEL_KEY_MAP, type PanelAction } from "../src/panel/keys";
 import {
   openRoomPanel,
@@ -66,6 +67,16 @@ function viewer(agentId = "Viewer"): MemberState {
     threadRoots: new Set<string>(),
     heldTopics: new Set<string>(),
   };
+}
+
+/**
+ * Render a store's chat rows through `renderChatRows` — the theme-sourced path. Unlike the full
+ * panel, whose frame rows read the HOST's theme singleton and so never see a fallback in-process,
+ * this actually reads the theme it is given. That makes it the only in-process check that can fail
+ * on a bad fallback theme.
+ */
+function panelRows(store: RoomStore, theme: Theme, width: number): string[] {
+  return renderChatRows(projectChatRows(store.records, viewer(), 0), width, theme);
 }
 
 /** A store with one chat message and one live claim, on a real temp root. */
@@ -604,37 +615,55 @@ test("roomId with ANSI escape is sanitized in the title", () => {
 
 // --- 9. theme fallback shape (D5) -------------------------------------------
 
-test("a shim-shaped theme renders strings, not function source (D5)", () => {
-  // The panel's last-ditch theme must match the host Theme's OWN TYPES: `sep`, `nav`, `tree` and
-  // `status` are string-valued getters (pi-tui theme-class.ts:485-510) that consumers INTERPOLATE,
-  // and `fg` must return the TEXT. A shim that returns functions renders "(text) => text" into the
-  // pane — which is exactly what the first version of resolveTheme's fallback did.
+test("the fallback theme satisfies every member src/ reads (D5, and the boxRound regression)", () => {
+  // The fallback theme is not decoration: it is the second half of the boxRound bug. The panel's
+  // frame rows are drawn by the HOST's `topBorderSplit`/`divider`/`bottomBorder`, which read the
+  // host `theme` singleton rather than the theme handed to the panel, so a partial fallback renders
+  // the pane and still kills the panel at `chrome.ts`. Four crashes in one bug: `statusGlyph`,
+  // `statusText`, `topBorderSplit`, then the shim itself.
+  const shim = uncolouredTheme();
+  const t = shim as unknown as {
+    fg: unknown;
+    bold: unknown;
+    styledSymbol: unknown;
+    boxRound: { topLeft: string };
+    md: { quoteBorder: string };
+    sep: unknown;
+    nav: unknown;
+    tree: unknown;
+    status: unknown;
+  };
+  // Presence: every one of these is read somewhere in src/ (or by the host chrome).
+  expect(t.boxRound.topLeft).toBeTruthy();
+  expect(t.md.quoteBorder).toBeTruthy();
+  expect(typeof t.styledSymbol).toBe("function");
+  // Arity: `bold` takes ONE argument in the host Theme, not two like `fg`. A fallback written as
+  // `bold(_tone, text) => text` returns `undefined` for every author cell — caught live, not by a
+  // test, because the frame rows read the host singleton and never see the fallback in-process.
+  expect((t.bold as (text: string) => string)("AgentA")).toBe("AgentA");
+  expect((t.fg as (tone: string, text: string) => string)("accent", "AgentA")).toBe("AgentA");
+  expect((t.styledSymbol as (key: string, tone: string) => string)("tool.irc", "accent")).toBe("✉");
+  // Getter-shaped members must stay strings, or consumers interpolate them literally.
+  for (const bucket of [t.sep, t.nav, t.tree, t.status, t.md]) {
+    for (const value of Object.values(bucket as Record<string, string>))
+      expect(typeof value).toBe("string");
+  }
+});
+
+test("the fallback theme renders chat rows with no undefined or function source (D5)", () => {
+  // `renderChatRows` is theme-sourced, so unlike the full panel it ACTUALLY reads the fallback —
+  // which makes it the only in-process check that can fail on a bad one.
+  const shim = uncolouredTheme();
   const root = tempRoot();
   const store = storeFor(root, roomIdFor(root));
-  for (let i = 0; i < 6; i++)
+  for (let i = 0; i < 3; i++)
     store.append({ kind: "msg", from: "AgentA", topic: "t", body: `m${i}` });
 
-  const plain = (_tone: string, text: string): string => text;
-  const shimTheme = {
-    fg: plain,
-    bold: plain,
-    sep: { dot: " · ", space: " " },
-    nav: { cursor: "❯", selected: "➤" },
-    tree: { branch: "├─", vertical: "│" },
-    status: { error: "✘", warning: "⚠", info: "ⓘ", success: "✔", pending: "…" },
-  } as unknown as Theme;
-
-  const panel = makePanel(store, 30, { theme: shimTheme, registry: registryStub() });
-  const text = panel
-    .render(120)
-    .map((r) => String(r).replace(ANSI, ""))
-    .join("\n");
-
+  const rows = panelRows(store, shim as unknown as Theme, 80);
+  const text = rows.join("\n");
+  expect(text).not.toContain("undefined");
   expect(text).not.toContain("=> text");
-  expect(text).not.toContain("identity");
-  // The separator the shim supplies must actually appear, proving it is a string and interpolated.
-  expect(text).toContain(" · ");
-  panel.dispose();
+  expect(text).toContain("AgentA");
 });
 
 // --- 10. chat row glyph and spacing defects (D1/D2/D3/D7) ------------------
