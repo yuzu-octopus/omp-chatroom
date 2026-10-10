@@ -1,34 +1,21 @@
 # Repository Guidelines
 
-## Project Overview
+Research and design record for **`omp-agent-chatroom`** — an in-process coordination room for
+[omp](https://omp.sh) that adds what native agent messaging lacks: **exclusive ownership of a named
+resource with a lease**.
 
-This repository is the research and design record for **`omp-agent-chatroom`**, an
-[omp](https://omp.sh) plugin that adds a collaborative room to a single omp process: a shared
-chat log, a structured claim/status board, blocking wait tools, a TUI panel, and inline
-transcript cards.
+State: the plugin is **built**. `docs/research/omp-agent-chatroom/HANDOFF.md` is the current-state
+entry point (gates, verified-live evidence, known limits); `PLAN-build.md` is the normative design
+document. This file is the practical guide for working in the repo.
 
-The motivation: omp's native peer messaging (`write agent://<id>`, `agent://all`, IRC cards)
-works but is point-to-point and hierarchical — it is easy to talk *up* to a parent and awkward
-to collaborate *across* peers. The plugin is designed to make collaboration the path of least
-resistance without replacing the native path.
-
-**Current state: documentation only.** There is no `src/`, no `tests/`, no `package.json`, and
-no build. `docs/research/omp-agent-chatroom/PLAN-build.md` is the build-ready plan; everything
-else is evidence behind it.
-
-### Verdict history
-
-| Round | Artifact | Outcome |
-|---|---|---|
-| R1 | `REPORT.md` | Gap is **semantics, not transport**. Rejected an unbounded shared chat log on measured evidence. |
-| R2 | `REPORT-v2-hybrid.md` | Revised: keep `agent://` intact, add room + board + blocking waits. |
-| R3 | `PLAN-build.md` | Build-ready plan: repo layout, store, tools, panel, cards, 10 phases (P0–P8 + P1b). |
-| R4 | `REPORT-v3-tree.md` | Two-region log: raw tail + compressed tree over the cold backlog. |
+> **Authority order when documents disagree:** `plugin/src/**` > dated addenda in `PLAN-build.md` >
+> plan body > `SCAFFOLD.md` > reviews > reports. `PLAN-build.md:60-62` declares its own body a
+> historical record whose superseded prose was left untouched on purpose.
 
 ## Architecture & Data Flow
 
-The design keeps native `agent://` untouched for point-to-point steering and interrupts, and
-adds one coordination layer beside it.
+One omp plugin, loaded in-process as a TS module. Two halves: the plugin (`plugin/`) and the research
+record that produced it (`docs/research/`).
 
 ```mermaid
 flowchart TD
@@ -39,167 +26,137 @@ flowchart TD
   P["TUI panel (/room overlay)"]
   C["Inline transcript cards"]
 
-  T -->|synchronous mutation| S
+  T -->|"synchronous mutation"| S
   S --> G
-  G -->|T0 interrupt| D
-  G -->|T1 step boundary| D
-  G -->|T2 cursor only| S
+  G -->|"T0 interrupt"| D
+  G -->|"T1 step boundary"| D
+  G -->|"T2 cursor only"| S
   D --> P
   D --> C
 ```
 
-### Three-tier attention model
+`op:post` is the path everything hangs off: `tools/room.ts` appends synchronously, then
+`notifyRecipients` runs `classify → isMuted → admitPost/selectT1 → deliver` per recipient.
 
-Every record is classified; the tier decides delivery.
-
-| Tier | Kinds | Delivery | Wakes? |
-|---|---|---|---|
-| **T0** | direct DM, `@mention`, reply to your message, claim revoked, your task failed | interrupt queue; cuts an interruptible wait | yes |
-| **T1** | post on a topic you follow, claim status change, reply in a joined thread | `deliverAs: "aside"` at the step boundary | only if idle |
-| **T2** | general chatter, presence, progress, unaddressed broadcast | per-agent cursor only; never injected | never |
-
-Caps: K=10 T1/turn, B=2048 tokens/turn, N=20 T2 coalesce count, T=5 min coalesce lag,
-srTCM 1 post/2 s with burst 10, log retention 5000 records / 7 days.
-
-### Data flow notes
-
-- The **store is authoritative**; the tree is a rebuildable cache over it.
-- Cursors are **per agent**, advanced on delivery into context, never on send.
-- Delivery to a sibling session goes through `AgentRef.session.sendCustomMessage`; to the
-  calling session through `pi.sendMessage`. Null-check `AgentRef.session` (null when parked).
-- Cards are emitted as `customType` messages (`room:message`, `room:mention`, `room:claim`,
-  `room:board-delta`) and rendered by `registerMessageRenderer` handlers.
+**The store is authoritative**; the cold tree is a rebuildable cache over it. Cursors are per agent,
+advanced on delivery into context, never on send.
 
 ## Key Directories
 
-Planned layout, from `PLAN-build.md` §2.1 — none of it exists yet.
-
 | Path | Purpose |
 |---|---|
-| `src/store/` | Room store: log append, projection, claim arbiter, cursors |
-| `src/attention/` | Tier classification, governor, rate limiting |
-| `src/tools/` | `room` and the three wait tools |
-| `src/onboarding/` | Join digest + routing-rule prompt block |
-| `src/panel/` | `/room` TUI overlay components |
-| `src/cards/` | Inline transcript card renderers |
-| `src/commands/` | Slash command |
-| `tests/` | `bun:test` suites + multi-agent harness |
-| `skills/` | Bundled skill for agents using the room |
-| `docs/research/omp-agent-chatroom/` | Briefs, reports, plan, findings |
+| `plugin/src/store/` | log, projection, claim arbiter, cursors, config, tree, compactor |
+| `plugin/src/attention/` | tier classification, governor, delivery adapter |
+| `plugin/src/panel/` | three-pane overlay (chrome, keys, chat, board, roster) |
+| `plugin/src/cards/` | quote-bordered body lines, message cards, tool cards |
+| `plugin/src/tools/` | `room` and the three wait tools |
+| `plugin/src/onboarding/` | digest, routing rule, `before_agent_start` hook |
+| `plugin/src/commands/` | slash commands |
+| `docs/research/omp-agent-chatroom/` | brief → REPORT → REPORT-v2 → PLAN-build → REPORT-v3 → build |
+| `docs/research/omp-agent-notes/` | agent-facing notes on src / tests / config / docs |
+| `docs/research/optmem-2026-10-08/` | OptMem/UniiChat revision 2026-10-08: four reports + rejection |
 
 ## Development Commands
 
-**There is no build, lint, or format step, and none is specified.** Bun runs TypeScript
-directly; the plugin is loaded in-process by omp.
-
 ```sh
-# Link the plugin for development (planned, PLAN-build.md §9 P7)
-omp plugin link .
-
-# Run a test suite (planned, PLAN-build.md §9 P0 / P3)
-bun test tests/store.test.ts
-bun test tests/attention.test.ts
+cd plugin
+bun test tests/                                 # the whole suite (205 pass, 11 files)
+bunx --bun tsc --noEmit -p tsconfig.json        # typecheck only; Bun executes the TS
+bunx --bun @biomejs/biome check src tests       # lint + format
+bunx --bun @biomejs/biome check src tests --write   # apply fixes
 ```
 
-Per-phase acceptance checks are in `PLAN-build.md` §9. For P1/P2 the plan calls tool methods
-directly (`session.getToolByName().execute(...)`) instead of driving a model.
+**There is no build step** — Bun runs the TypeScript directly and omp loads it in-process. Two load
+routes reach `plugin/src/index.ts`: the project shim `.omp/extensions/chatroom.ts` (what this repo
+uses, auto-discovered) and `omp plugin link .` (packaged, verified with `omp plugin doctor`).
 
 ## Code Conventions & Common Patterns
 
-- **Tool names**: `room`, `wait_for_agent`, `wait_for_message`, `wait_for_claim` — separate
-  names, not one op-discriminated tool, because tool discovery is BM25 over name + description.
-- **`customType` namespace**: `room:message`, `room:mention`, `room:claim`, `room:board-delta`.
-- **Resource form**: `<topic>/<key>`.
-- **`loadMode: "essential"`** is required — the extension default (`discoverable`) leaves the
-  tool inactive.
-- **`interruptible`**: `true` for `wait_for_agent` / `wait_for_message`, `false` for
-  `wait_for_claim`. It is **not** in the typed `ToolDefinition`; declare it on the object literal
-  and never rely on it for correctness — every wait tool also observes `signal` directly.
-- **Tool `execute` signature**: `(toolCallId, params, signal, onUpdate, ctx)`. Follow the
-  wrapper, not the example extension.
-- **Result contract**: `{ outcome: "event" | "timeout" | "aborted", ... }` with `useless: true`
-  on non-event paths so compaction can elide them. Timeout is a normal outcome, not an error.
-- **State**: one module-level store keyed by the `local://` root — never a bare global. Cursors
-  persist via `appendEntry`, which is not rendered to the model.
-- **Atomicity**: synchronous `O_APPEND` writes, no lock, no `fsync`; claim state is rebuilt by
-  replaying the log on first open.
-- **Path resolution**: `ctx.localProtocolOptions` when present, else derive from
-  `sessionManager`.
-- **Panel**: opened from a slash command, guarded by `hasUI` and `ctx.mode === "tui"`; keys live
-  in `handleInput`; `dispose` must be idempotent.
+**Runtime is Bun. Never Node, npm, or npx.** There is no root `package.json` and no workspace.
 
-Invariants I1–I6 (sync mutations, no session-scoped module state, key by `ctx.agent.id`,
-refcounted `ctx.setInterval`, synchronous append, all wait promises settle) are in
-`PLAN-build.md` §3 and must hold across every phase.
+**Invariants that must hold when editing** (I1–I6):
+
+| # | Rule | Enforced at |
+|---|---|---|
+| I1 | mutations are synchronous — no `await` between mint, write, project, notify | `store/room-store.ts:127-146` |
+| I2 | no session-scoped module state; key by root/agent in `globalThis` maps | `store/room-store.ts:58-65`, `store/compactor.ts:255`, `store/tree-store.ts:133` |
+| I3 | key every shared structure by `ctx.agent.id` | `store/room-store.ts:224-229`, `panel/panel.ts:34` |
+| I4 | timers via `ctx.setInterval` only — never a raw timer (a throw is process-fatal) | `store/compactor.ts:259-270`, `store/room-store.ts:281-292` |
+| I5 | synchronous append survives a crash — `fsyncSync` in the one `appendLine` path | `store/log.ts:30-42` |
+| I6 | every wait promise settles — signal, timeout and promotion all `finish()` | `tools/wait-for-claim.ts:96-100` and both siblings |
+
+**Room root is `ctx.cwd + "/.omp-room"`, NOT the `local://` root.** `localProtocolOptions` is
+per-session — a subagent's artifacts dir is its own session file minus `.jsonl`, so keying the room
+there gave every agent a private room. `ctx.cwd` is inherited by subagents and is the one stable
+per-tree key. `rootOf()` is `store/room-store.ts:211-222`.
+
+**Result contract (K1).** Every tool returns `content: [{type:"text", text}]` — always present; a
+result without it is coerced to an error by the host — plus `details` with `ok`. The payload lives in
+`details`, never as a bare object. Timeouts are **normal outcomes**:
+`{ ok: true, outcome: "timeout", … }` with `useless: true` so compaction may elide them.
+`outcome` ∈ `"event" | "timeout" | "aborted"`. Room failures are results, never throws.
+
+**Escaping is load-bearing.** Every room-authored string that reaches the model goes through
+`safeRoomText` (`onboarding/escape.ts`) — harness-tag neutralisation plus `sanitizeText`. The digest
+rides `BeforeAgentStartEventResult.message` as a custom message, inside
+`<room-authored untrusted="true">`. The system prompt carries only the static routing rule, so the
+prompt-cache prefix is byte-stable.
+
+**Tests are plain `bun:test` — no `mock.module`** (it leaks across files in one process). Fixtures
+are real temp roots via `fs.mkdtempSync(path.join(os.tmpdir(), …))`; the fake LLM seam is
+`registerCustomApi`. Fake ctx builders must set `cwd` to the temp root and complete the timer API.
+Detailed conventions and the not-covered list: `docs/research/omp-agent-notes/tests.md`.
 
 ## Important Files
 
-| File | Why it matters |
+| File | Why |
 |---|---|
-| `docs/research/omp-agent-chatroom/PLAN-build.md` | The build-ready plan — repo layout, schemas, phases, risks, test plan |
-| `docs/research/omp-agent-chatroom/brief.md` | Research question + Addenda A (hybrid) and B (tree) |
-| `docs/research/omp-agent-chatroom/REPORT.md` | R1 gap analysis and the measured case against unbounded chat |
-| `docs/research/omp-agent-chatroom/REPORT-v2-hybrid.md` | R2 hybrid design: routing rule, wait tools, envelope, attention |
-| `docs/research/omp-agent-chatroom/findings/F*.md` | Per-angle evidence, every claim with a path:line or URL |
-| `.gitignore` | Excludes `node_modules/`, `dist/`, `build/`, `.omp/plugins/`, `.env*`, `coverage/` |
-
-Read `PLAN-build.md` §10 (risks) before changing any design decision — it lists the unsupported
-mechanisms and their fallbacks.
+| `plugin/src/index.ts` | the extension entry — calls every `registerX` |
+| `plugin/src/version.ts` | `HOST_VERSION_PIN`; the drift gate |
+| `plugin/src/store/room-store.ts` | append, projection, refcounted registry, retention |
+| `plugin/src/store/log.ts` | the one append path, with `fsyncSync` |
+| `plugin/src/store/tree-store.ts` | `cover`, `putNode`, `pending`/`ready`, `TREE_REC=512` |
+| `plugin/src/store/compactor.ts` | background summarisation, rate cap, retry-with-ruler |
+| `plugin/src/attention/tiers.ts` → `governor.ts` → `delivery.ts` | the attention pipeline |
+| `plugin/src/panel/panel.ts` | the overlay; `resolveTheme` handles a host theme with no `fg` |
+| `plugin/src/onboarding/routing-rule.md` | the shipped room-vs-`agent://` rule |
+| `docs/research/omp-agent-chatroom/PLAN-build.md` | normative design; §4.1 ops, §5.2 caps, §10 risks |
+| `docs/research/omp-agent-chatroom/HANDOFF.md` | current build state and verification evidence |
 
 ## Runtime/Tooling Preferences
 
-- **Runtime: Bun** (verified present: `bun 1.4.2` at `/usr/bin/bun`). Bun is also the package
-  manager and test runner. Do **not** use Node or npm.
-- **Host: omp 18.6.1** (`/home/yuzu/.bun/bin/omp`). The plugin loads in-process as a TS module.
-- **Not yet specified** in the plan: `engines`, `dependencies`, `scripts`, `tsconfig.json`
-  contents, CI. Fill these in when P0 starts; do not assume they exist.
-- **Deep imports are a risk, not a pattern.** Subpath imports such as
-  `@oh-my-pi/pi-coding-agent/irc/bus` resolve via a wildcard export but are not public API. Pin
-  the host version and add a smoke test that imports each specifier (`PLAN-build.md` §10 R2).
-- No per-directory trust gate: `ctx.isProjectTrusted()` is always `true`.
+- **Bun only** — `bun` 1.4.2. Package manager, runner, and runtime. No `node`, `npm`, or `npx`.
+- **Host: omp 18.8.7.** The plugin pins it exactly in both `peerDependencies` and
+  `devDependencies` because ten subpath imports are wildcard-only, not public API. `tests/drift.test.ts`
+  asserts the installed host equals `HOST_VERSION_PIN` and ESM-imports every deep specifier.
+- **No hot reload.** Extension factories bind once per session tree; source edits need a new session.
+- **Python via `uv`**, never `python3`/`pip` (global agent rule).
+- Biome config: `indentStyle: space`, `indentWidth: 2`, `lineWidth: 100`,
+  `noNonNullAssertion` **off** (those assertions are deliberate, documented invariants),
+  scope `src/**` + `tests/**`.
 
 ## Testing & QA
 
-- **Framework**: `bun:test`. No linter or formatter is configured.
-- **Deterministic harness**: `PLAN-build.md` §11 specifies an in-process multi-agent harness
-  built on `createAgentSession` with an in-memory `SessionManager`, extension discovery, MCP,
-  LSP, and UI all disabled — so tests exercise real sessions without a model.
-- **Store reset between tests**: `__roomTest.store.reset()` (test-only seam).
-- **Coverage expectation**: each phase in §9 has an acceptance check; §11.2 states what each
-  assertion proves. The attention governor is table-tested across all 12 trigger cases.
-- **What must not be tested away**: invariants I1–I6, the "no agent blocked on compaction" rule,
-  and the "tree is rebuildable from the log" property.
+`bun:test`, no mocking. Run `cd plugin && bun test tests/`.
 
-### Probes (run the host, don't just read it)
+Test-only seams: `__roomTest.store.reset()` (`src/index.ts`), `__compactTest`
+(`store/compactor.ts` — for the daily spend cap without 20 000 real calls), and
+`AgentRegistry.resetGlobalForTests()` for the process-wide registry singleton. Reset store state in
+`afterEach` for unit suites, and at the top of each test for the `createAgentSession` e2e suites.
 
-`probes/*.mjs` execute the plan's load-bearing assumptions against the installed host. See
-`docs/research/omp-agent-chatroom/PROBES.md` for results and the full recipe.
+**Assert the model-facing `content` array** for anything the model reads — `details` never reaches it.
+A gap here hid a real defect once (see the K1 block in `tests/room-tool.test.ts`).
 
-**Environment gotcha that costs ~20 minutes every time:** the native loader resolves
-`pi_natives.*.node` relative to the module's own directory. When the package is reached through
-Bun's cache the path becomes `~/.bun/install/cache/@oh-my-pi/pi-natives@<v>@@@1/native/`, and that
-directory ships **without** the `.node` files. A bare symlink to the global install therefore fails
-with `Failed to load pi_natives native addon`. Fix:
+**Not covered, so treat as unverified:** the panel in a real terminal, cards in a real transcript, a
+live model choosing to call the room, real-model summarisation quality, and
+`wait_for_agent`'s happy `event` path.
 
-```sh
-mkdir -p /tmp/roomprobe && cd /tmp/roomprobe
-cp -r ~/.bun/install/global/node_modules/@oh-my-pi node_modules/@oh-my-pi
-cp ~/.bun/install/global/node_modules/@oh-my-pi/pi-natives-linux-x64/*.node \
-   node_modules/@oh-my-pi/pi-natives/native/
-bun probes/probe2.mjs
-```
+**Do not re-litigate these settled findings** — both are recorded with evidence:
 
-**Probe limit worth remembering:** the K1 result-shape coercion lives in the **agent loop**
-(`coerceToolResult`), not at the `execute()` boundary. A probe that calls `execute()` directly
-cannot observe it — the raw object comes back unchanged. Assert on a real agent turn instead.
-
-## Open Questions
-
-Do not present these as settled. They are flagged as unmeasured in the corpus:
-
-- Room message volume has no study behind it; the design caps it rather than proving it helps.
-- Whether an agent given a bounded blocking wait uses it productively rather than parking is
-  untested.
-- No primary source studies hierarchical compression for a **multi-writer** agent log.
-- The routing-rule thresholds and the coalesce/rate-limit constants are proposals, not measured
-  values.
+- **Embeddings are deferred, not rejected**, with a stated revisit trigger (log past ~10⁵ records, or
+  observed "cannot find it" failures). `docs/research/embeddings/CONCLUSION.md`.
+- **The UniiChat merge-age formula change was measured and rejected.** The spec's `first`→`last` fix
+  looks authoritative (a reproducible counterexample plus a "481 of 20 001" match rate), but that
+  figure describes its greedy most-due-pair loop, not our bisection. Measured on our procedure, the
+  rejected change matches Taelin's `push` **worse** (8/400 vs 140/400).
+  `docs/research/optmem-2026-10-08/A-merge-order-verification.md`.
