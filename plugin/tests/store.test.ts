@@ -36,6 +36,7 @@ import {
 import { enforceRetention, type RoomStore, roomStoreFor } from "../src/store/room-store";
 import type { RoomRecord } from "../src/store/schema";
 import { registerRoomTool } from "../src/tools/room";
+import { zodStub } from "./zod-stub";
 
 // --- fixtures -------------------------------------------------------------
 
@@ -403,32 +404,7 @@ test("enforceRetention prunes to the config's logMaxRecords, not the default 500
 test("room tool registers renderCall/renderResult/describeCall/describeResult", () => {
   let tool: Record<string, unknown> | undefined;
   const pi = {
-    zod: {
-      object: (shape: Record<string, unknown>) => shape,
-      enum: (values: string[]) => ({
-        values,
-        optional: function () {
-          return this;
-        },
-      }),
-      string: () => ({
-        optional: function () {
-          return this;
-        },
-      }),
-      number: () => ({
-        optional: function () {
-          return this;
-        },
-      }),
-      array: (t: unknown) => ({
-        t,
-        optional: function () {
-          return this;
-        },
-      }),
-      optional: (t: unknown) => ({ t }),
-    },
+    zod: zodStub,
     registerTool: (def: Record<string, unknown>) => {
       if (def.name === "room") tool = def;
     },
@@ -555,32 +531,7 @@ test("claim adds topic to heldTopics and classify returns T1 for that topic", as
       }
     | undefined;
   const pi = {
-    zod: {
-      object: (shape: Record<string, unknown>) => shape,
-      enum: (values: string[]) => ({
-        values,
-        optional: function () {
-          return this;
-        },
-      }),
-      string: () => ({
-        optional: function () {
-          return this;
-        },
-      }),
-      number: () => ({
-        optional: function () {
-          return this;
-        },
-      }),
-      array: (t: unknown) => ({
-        t,
-        optional: function () {
-          return this;
-        },
-      }),
-      optional: (t: unknown) => ({ t }),
-    },
+    zod: zodStub,
     registerTool: (def: {
       name: string;
       execute: typeof tool extends infer T ? (T extends { execute: infer E } ? E : never) : never;
@@ -645,32 +596,7 @@ test("post truncates an oversized body and appends the read handle", async () =>
       }
     | undefined;
   const pi = {
-    zod: {
-      object: (shape: Record<string, unknown>) => shape,
-      enum: (values: string[]) => ({
-        values,
-        optional: function () {
-          return this;
-        },
-      }),
-      string: () => ({
-        optional: function () {
-          return this;
-        },
-      }),
-      number: () => ({
-        optional: function () {
-          return this;
-        },
-      }),
-      array: (t: unknown) => ({
-        t,
-        optional: function () {
-          return this;
-        },
-      }),
-      optional: (t: unknown) => ({ t }),
-    },
+    zod: zodStub,
     registerTool: (def: {
       name: string;
       execute: typeof tool extends infer T ? (T extends { execute: infer E } ? E : never) : never;

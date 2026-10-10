@@ -38,15 +38,21 @@ import {
   zoom,
 } from "../store/tree-store";
 export const ROOM_TOOL_NAME = "room";
-export const ROOM_DESCRIPTION: string = `Post to and read the shared room for this session tree: a
-topic-based claim board plus a bounded chat stream. Use it for coordination artifacts several agents
-must see — claims, releases, shared findings, status — NOT for private redirection (use agent://<id>
-for one recipient; see the room-vs-direct routing rule in your prompt).
-Ops: join (first call; mints your cursor), read (records after your cursor), post (send to a topic),
-claim/release (exclusive ownership of "<topic>/<key>" with a mandatory TTL), board (claims + roster +
-per-agent lag), topics (list with unread counts), mute/unmute (per-agent topic or room),
-tree/zoom (cold summary tiling), recall (regex search over the raw log).
-Before starting work another agent might also start, claim it. Read the board first.`;
+export const ROOM_DESCRIPTION: string = `Coordinate with the other agents in this session tree: a
+shared claim board (who owns what), a bounded chat log, and blocking waits. Use it whenever several
+agents could touch the same work, so nobody duplicates it.
+
+Triggers: before editing a shared file or step check the board, then claim the resource; when you
+find something other agents need, post it; when you finish, release your claims; when you have
+nothing to do but wait for a peer, a message, or a claim, block on the wait tools instead of polling.
+
+NOT for private redirection — use agent://<id> when exactly one agent is the recipient and no shared
+record is wanted.
+
+Ops: join (first call) · read (records since your cursor) · post (send to a topic; mention is T0
+wake+steer, so use it only when you really need to interrupt) · claim/release (exclusive ownership of
+"<topic>/<key>", lease default 5 min) · board (claims + roster + lag) · topics · mute/unmute ·
+tree/zoom (cold summary over older records) · recall (regex over the raw log).`;
 export const ROOM_LOAD_MODE = "essential"; // RISK R3
 
 // §4.1 — all 11 ops: join/read/post/claim/release/board/topics/mute/unmute/tree/zoom/recall
@@ -392,35 +398,94 @@ function okWithDelivery<T extends RoomToolDetails>(
 export function registerRoomTool(pi: ExtensionAPI): void {
   // §2.1.1
   const z = pi.zod;
+  // Every param carries its units, its default, and which ops read it. Once an agent has loaded the
+  // tool these strings are all it sees: a bare `ttl?: number` tells it nothing about milliseconds,
+  // and `lo`/`hi` without a block-range note is opaque. This was the gap — the room tool, the primary
+  // one, shipped with no param descriptions at all while all three wait tools had them.
   const params = z.object({
-    op: z.enum([
-      "join",
-      "read",
-      "post",
-      "claim",
-      "release",
-      "board",
-      "topics",
-      "mute",
-      "unmute",
-      "tree",
-      "zoom",
-      "recall",
-    ]),
-    topic: z.string().optional(),
-    body: z.string().optional(),
-    mention: z.array(z.string()).optional(),
-    replyTo: z.string().optional(),
+    op: z
+      .enum([
+        "join",
+        "read",
+        "post",
+        "claim",
+        "release",
+        "board",
+        "topics",
+        "mute",
+        "unmute",
+        "tree",
+        "zoom",
+        "recall",
+      ])
+      .describe(
+        "join · read · post · claim · release · board · topics · mute · unmute · tree · zoom · recall",
+      ),
+    topic: z
+      .string()
+      .optional()
+      .describe(
+        'Topic name, e.g. "build". Used by post, mute and unmute. A claim rolls topic+key together.',
+      ),
+    body: z
+      .string()
+      .optional()
+      .describe(
+        "Message text for post. Max 8192 bytes; longer is rejected, never truncated. Coordination " +
+          "summary — leave bulk output in an artifact and reference it by id.",
+      ),
+    mention: z
+      .array(z.string())
+      .optional()
+      .describe(
+        "Agent ids to notify. A mention is delivered as T0 (wake + steer), so use it deliberately and " +
+          "prefer a topic when the message can wait.",
+      ),
+    replyTo: z
+      .string()
+      .optional()
+      .describe("Message id this answers; makes the post a reply so the author gets a T0 nudge."),
     performative: z
       .enum(["inform", "request", "propose", "accept", "reject", "query", "failure"])
-      .optional(),
-    key: z.string().optional(),
-    ttl: z.number().optional(),
-    since: z.number().optional(),
-    limit: z.number().optional(),
-    lo: z.number().optional(),
-    hi: z.number().optional(),
-    pattern: z.string().optional(),
+      .optional()
+      .describe(
+        "Speech act, carried through to cards: inform · request · propose · accept · reject · query · failure.",
+      ),
+    key: z
+      .string()
+      .optional()
+      .describe(
+        'Second half of a claim resource, e.g. "src/auth". The full resource is "<topic>/<key>".',
+      ),
+    ttl: z
+      .number()
+      .optional()
+      .describe(
+        "Lease in MILLISECONDS, default 300000 (5 min), clamped 1000…86400000. Only claim uses it.",
+      ),
+    since: z
+      .number()
+      .optional()
+      .describe("Resume read at this log seq number (not a timestamp). Defaults to your cursor."),
+    limit: z.number().optional().describe("Max records to return from read. 1…200, default 50."),
+    lo: z
+      .number()
+      .optional()
+      .describe(
+        "First seq of the tree range for zoom, the same [lo, hi) pair the tree op printed. " +
+          "hi-lo must be a power of two and lo aligned to it.",
+      ),
+    hi: z
+      .number()
+      .optional()
+      .describe("Exclusive end of the zoom range, i.e. one past the last seq."),
+    pattern: z
+      .string()
+      .optional()
+      .describe(
+        "Regex for recall over the raw log, newest first, max 100 matches. Max 200 chars; " +
+          "a pattern that burns its 1s scan budget is refused rather than hanging the session.",
+      ),
   });
 
   pi.registerTool({

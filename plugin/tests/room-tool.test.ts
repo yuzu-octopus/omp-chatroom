@@ -26,7 +26,8 @@ import {
   storeFor,
 } from "../src/store/room-store";
 import { viewPath } from "../src/store/tree-store";
-import { registerRoomTool } from "../src/tools/room";
+import { ROOM_DESCRIPTION, registerRoomTool } from "../src/tools/room";
+import { zodStub } from "./zod-stub";
 
 // §3.1 — a real store over a real temp root; the real JSONL log is written (§3.3).
 const ROOM_ID = "rtool";
@@ -473,32 +474,7 @@ function invokeRoom(
       }
     | undefined;
   const pi = {
-    zod: {
-      object: (shape: Record<string, unknown>) => shape,
-      enum: (values: string[]) => ({
-        values,
-        optional: function (this: { optional: unknown }) {
-          return this;
-        },
-      }),
-      string: () => ({
-        optional: function (this: { optional: unknown }) {
-          return this;
-        },
-      }),
-      number: () => ({
-        optional: function (this: { optional: unknown }) {
-          return this;
-        },
-      }),
-      array: (t: unknown) => ({
-        t,
-        optional: function (this: { optional: unknown }) {
-          return this;
-        },
-      }),
-      optional: (t: unknown) => ({ t }),
-    },
+    zod: zodStub,
     registerTool: (def: {
       name: string;
       execute: typeof tool extends infer T ? (T extends { execute: infer E } ? E : never) : never;
@@ -937,4 +913,56 @@ test("zoom: a pair of messages opens to two raw singletons (zoom reaches one mes
   expect(children[0].text).toContain("body-0");
   expect(children[1]).toMatchObject({ lo: 1, hi: 2, size: 1, raw: true });
   expect(children[1].text).toContain("body-1");
+});
+
+/** The schema the tool registered, by param name — so tests can assert on its descriptions. */
+function capturedShapes(): Record<string, { describes: string[] }> {
+  const pi = {
+    zod: zodStub,
+    registerTool: (def: Record<string, unknown>) => {
+      captured = def;
+    },
+  };
+  let captured: Record<string, unknown> | undefined;
+  registerRoomTool(pi as unknown as Parameters<typeof registerRoomTool>[0]);
+  if (!captured) throw new Error("registerRoomTool registered no tool");
+  const parameters = captured.parameters as Record<string, { describes: string[] }>;
+  expect(parameters).toBeDefined();
+  return parameters;
+}
+
+// --- descriptions: units, defaults, and discovery vocabulary -----------------
+
+test("every room param carries a description naming its units and which ops read it", () => {
+  // The gap this pins: the room tool — the primary one — shipped with NO param descriptions while
+  // all three wait tools had them, so an agent loading it saw \`ttl?: number\` with no hint that it
+  // was milliseconds and \`lo\`/\`hi\` with no note that they are a block range.
+  const shapes = capturedShapes();
+  expect(Object.keys(shapes).length).toBeGreaterThan(0);
+  for (const [name, schema] of Object.entries(shapes)) {
+    const description = schema?.describes?.[schema.describes.length - 1];
+    expect(typeof description, `${name} must be described`).toBe("string");
+    expect(description!.length, `${name} needs a real description`).toBeGreaterThan(10);
+  }
+  const ttl = shapes.ttl.describes.join(" ");
+  expect(ttl).toContain("MILLISECONDS");
+  expect(ttl).toContain("300000");
+  const body = shapes.body.describes.join(" ");
+  expect(body).toContain("8192");
+  const lo = shapes.lo.describes.join(" ");
+  expect(lo).toContain("power of two");
+  const pattern = shapes.pattern.describes.join(" ");
+  expect(pattern).toContain("100");
+  const limit = shapes.limit.describes.join(" ");
+  expect(limit).toContain("200");
+});
+
+test("the tool description carries the vocabulary an agent would actually ask for", () => {
+  // Tool discovery is BM25 over name + description, so these phrases are the load-bearing part.
+  expect(ROOM_DESCRIPTION).toContain("claim board");
+  expect(ROOM_DESCRIPTION).toContain("shared file");
+  expect(ROOM_DESCRIPTION).toContain("duplicates");
+  expect(ROOM_DESCRIPTION).toContain("release");
+  expect(ROOM_DESCRIPTION).toContain("agent://<id>");
+  expect(ROOM_DESCRIPTION).toContain("polling");
 });
