@@ -16,15 +16,21 @@ Use the room (`room{op:"post"}`) when:
 When in doubt, use the room.
 
 Corrections:
-- A correction for a RUNNING agent goes to `agent://<id>` — a room mention does not hard-steer
-  a streaming agent.
+- A correction for a RUNNING agent goes to `agent://<id>` — a room mention is T0, so it DOES
+  hard-steer the running agent, and it steers every agent the mention classifies, not just the one
+  you meant.
 - A directed correction inside a multi-recipient collaboration goes to `agent://<id>` — the
   room is for shared context, not private redirection.
 
-Asymmetry to remember: an interrupt *intent* is not an interrupt *strength*. A parent `agent://`
-message hard-steers a running agent. A room mention is T0 — it wakes an idle agent and cuts an
-interruptible wait — but it does NOT hard-steer a streaming one. Put a correction in the room and
-the running agent may keep working on the wrong thing until its next step boundary.
+Asymmetry to remember: an interrupt *intent* is not an interrupt *strength*.
+
+A **room mention is T0**: it wakes an idle agent (a real turn starts) and hard-steers a streaming
+one. The advantage of native `agent://<id>` is not strength but precision — one addressee, a bounded
+blast radius, and no shared record. The room's T0 class (`@mention`, reply-to-your-message,
+lease-revoked) is computed *per viewer*, so a correction posted to the room reaches everyone it
+classifies.
+
+Use `agent://<id>` to correct one agent; use the room to tell several agents the same thing.
 
 Before starting work that another agent might also start, claim it:
 `room{op:"claim", topic, key, ttl}`. Release it when done: `room{op:"release", topic, key}`.

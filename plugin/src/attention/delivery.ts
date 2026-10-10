@@ -57,7 +57,16 @@ export async function deliver(
     display: true,
     details: record,
   };
-  const options = { deliverAs: tier === "T0" ? ("steer" as const) : ("aside" as const) };
+  // T0 must reach an agent whether it is streaming or idle. `deliverAs: "steer"` alone hard-steers a
+  // running agent but, per the host rule at agent-session.ts:8796-8798 ("Explicit `deliverAs`
+  // queues without starting a turn in either state"), an explicit deliverAs at an IDLE session only
+  // appends — no turn. A mention that does not wake the agent it names is a mention that does
+  // nothing, so T0 also sets `triggerTurn`: the host checks it before the idle fallthrough
+  // (agent-session.ts:8758) and starts a turn, while the streaming branch ignores it and steers.
+  const options =
+    tier === "T0"
+      ? { deliverAs: "steer" as const, triggerTurn: true }
+      : { deliverAs: "aside" as const };
 
   if (target === ctx.agent.id) {
     pi.sendMessage(payload, options);

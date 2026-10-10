@@ -531,6 +531,28 @@ test("deliver: T0 steers, T1 is an aside, T2 only bumps the cursor", async () =>
   expect(sibCalls[1]!.options).toMatchObject({ deliverAs: "steer" });
 });
 
+test("T0 also sets triggerTurn so a mention wakes an idle agent", async () => {
+  const root = tempRoot();
+  const ctx = fakeCtx(root, "Sender");
+  // A room mention that does not wake the agent it names does nothing. The host rule
+  // (agent-session.ts:8796-8798) is explicit: an explicit deliverAs at an IDLE session only
+  // appends — no turn. `triggerTurn` is checked before that fallthrough (:8758) and starts one,
+  // while the streaming branch ignores it and steers. So T0 needs both.
+  const calls: Send[] = [];
+  const sib = `attn-wake-${Date.now()}`;
+  registerSession(sib, calls);
+  await deliver(fakePi().pi, ctx, sib, msg(1, { from: "Other", mention: [sib] }), "T0");
+  expect(calls[0]!.options).toMatchObject({ deliverAs: "steer", triggerTurn: true });
+
+  // T1 must NOT set it: an aside is meant to wait for the step boundary.
+  const calls2: Send[] = [];
+  const sib2 = `attn-wake2-${Date.now()}`;
+  registerSession(sib2, calls2);
+  await deliver(fakePi().pi, ctx, sib2, msg(2, { from: "Other", topic: "build" }), "T1");
+  expect(calls2[0]!.options).toMatchObject({ deliverAs: "aside" });
+  expect(calls2[0]!.options).not.toHaveProperty("triggerTurn");
+});
+
 // --- 9. mute, unread, gap, oversized --------------------------------------
 
 test("a muted topic produces zero unread; a mention still promotes through the mute", () => {
