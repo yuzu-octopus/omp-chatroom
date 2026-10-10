@@ -1,6 +1,5 @@
 import type { AgentRef } from "@oh-my-pi/pi-coding-agent";
-import type { Theme } from "@oh-my-pi/pi-tui";
-import { statusDot, statusGlyph, statusText } from "@oh-my-pi/pi-tui/overlays/agent-hub-renderer";
+import type { Theme, ThemeColor } from "@oh-my-pi/pi-tui";
 
 export interface StatusCounts {
   running: number;
@@ -22,14 +21,38 @@ export function statusCounts(refs: readonly AgentRef[]): StatusCounts {
  * `statusDot` is asserted alongside them by the drift test; it stays part of this surface's
  * verified host contract.
  */
+/** Tone per host roster conventions (`agent-hub-renderer.ts` STATUS_TONE). */
+const STATUS_TONE = {
+  running: "accent",
+  idle: "success",
+  parked: "muted",
+  aborted: "error",
+} as const satisfies Record<string, ThemeColor>;
+
+/**
+ * Roster status → the theme status GLYPH key. The two differ for `idle`/`parked`: the theme names
+ * them `enabled` and `shadowed`.
+ */
+const STATUS_KEY = {
+  running: "running",
+  idle: "enabled",
+  parked: "shadowed",
+  aborted: "aborted",
+} as const satisfies Record<string, keyof Theme["status"]>;
+
 export function renderRosterStrip(refs: readonly AgentRef[], theme: Theme): string {
-  void statusDot;
   const counts = statusCounts(refs);
   const parts: string[] = [];
   for (const status of ["running", "idle", "parked", "aborted"] as const) {
     const count = counts[status];
     if (count === 0) continue;
-    parts.push(`${statusGlyph(status)} ${statusText(status, `${count} ${status}`)}`);
+    // The glyph and the tone both come from `theme`. Nothing from `agent-hub-renderer` is used
+    // here: both of its helpers read the HOST's theme singleton, which is uninitialised under the
+    // plugin, so either one killed the panel with "undefined is not an object (evaluating
+    // 'theme.fg')". Rendering locally is the only version that survives.
+    const symbol = theme.status[STATUS_KEY[status]];
+    const tone = STATUS_TONE[status];
+    parts.push(`${theme.fg(tone, symbol)} ${theme.fg(tone, `${count} ${status}`)}`);
   }
   return parts.length === 0 ? theme.fg("dim", "no agents") : parts.join(theme.sep.dot);
 }
