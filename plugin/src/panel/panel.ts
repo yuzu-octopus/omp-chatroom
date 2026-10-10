@@ -316,28 +316,39 @@ const ACTIVE_PANEL = new WeakMap<ExtensionAPI, () => void>();
 /** A theme with a working `fg` — the only member any panel code actually calls. */
 type UsableTheme = Theme & { fg: (tone: string, text: string) => string };
 function resolveTheme(injected: Theme | undefined): Theme {
+  // ALWAYS initialise the host singleton, even when the injected theme is fine. The roster strip
+  // renders through the host's own `statusGlyph`/`statusText` (agent-hub-renderer), which read the
+  // pi-tui module-level `theme` directly rather than the theme we were handed. Without this, a host
+  // that passes a usable injected theme but has not initialised its own singleton kills the panel
+  // inside `renderRosterStrip`.
+  ensureThemeSync();
   const usable = (t: Theme | undefined): t is UsableTheme =>
     t !== undefined && t !== null && typeof t === "object" && typeof t.fg === "function";
   if (usable(injected)) return injected;
   trace(
     `resolveTheme: injected theme unusable (fg=${typeof (injected as { fg?: unknown } | undefined)?.fg})`,
   );
-  // The pi-tui singleton is what `ensureThemeSync()` initialises; the host passes the same object.
-  ensureThemeSync();
+  // The singleton is now ensured, so this read is the populated object the host itself uses.
   const singleton: Theme | undefined = theme;
   if (usable(singleton)) {
     trace("resolveTheme: fell back to the pi-tui singleton");
     return singleton;
   }
   trace("resolveTheme: falling back to an uncoloured shim");
-  const identity = (text: string): string => text;
+  // Every member here must match the host Theme's OWN TYPE, not just exist: `sep`, `nav`, `tree` and
+  // `status` are string-valued getters (theme-class.ts:485-510) and consumers interpolate them, so a
+  // function there renders literally as "(text) => text" into the panel. Only `fg` is a method.
+  // `fg(tone, text)` must return the TEXT unchanged. Returning the identity function itself (the
+  // obvious-looking `fg: () => identity`) yields a function wherever a caller interpolates the
+  // result, which renders as the literal "(text) => text" into the pane.
+  const plain = (_tone: string, text: string): string => text;
   return {
-    fg: () => identity,
-    bold: identity,
-    sep: { dot: identity, space: identity },
-    tree: { vertical: "│ ", branch: "├─ " },
-    nav: { cursor: identity },
-    status: { error: identity, warning: identity, info: identity, success: identity },
+    fg: plain,
+    bold: plain,
+    sep: { dot: " · ", space: " " },
+    nav: { cursor: "❯", selected: "➤" },
+    tree: { branch: "├─", vertical: "│" },
+    status: { error: "✘", warning: "⚠", info: "ⓘ", success: "✔", pending: "…" },
   } as unknown as Theme;
 }
 

@@ -31,6 +31,14 @@ const TIER_TONE: Record<Tier, "error" | "warning" | "muted"> = {
   T2: "muted",
 };
 
+// The 1-cell status glyph per tier. `status.muted` does not exist in the theme's SymbolKey union, so
+// T2 borrows `info` and keeps the muted tone above.
+const TIER_GLYPH: Record<Tier, "error" | "warning" | "info"> = {
+  T0: "error",
+  T1: "warning",
+  T2: "info",
+};
+
 type MsgRecord = Extract<RoomRecord, { kind: "msg" }>;
 
 /** Reply chain depth, bounded at 8 so a cyclic log cannot spin. `byId` is the parent index. */
@@ -95,7 +103,10 @@ function padOrTrim(text: string, width: number): string {
 export function renderChatRows(rows: readonly ChatRow[], width: number, theme: Theme): string[] {
   return rows.map((row) => {
     const unread = row.unread ? theme.fg("accent", theme.nav.cursor) : " ";
-    const badge = theme.fg(TIER_TONE[row.tier], row.tier);
+    // D3: the theme owns a 1-cell status glyph per severity (theme-class.ts:485-503). Painting the
+    // ASCII "T0"/"T1"/"T2" made the badge 2 cells and the only row element not theme-sourced.
+    // There is no `status.muted` key, so T2 uses glyph `status.info` with the muted tone.
+    const badge = theme.fg(TIER_TONE[row.tier], theme.status[TIER_GLYPH[row.tier]]);
     const time = theme.fg("dim", new Date(row.ts).toISOString().slice(11, 19));
     const author = row.mention
       ? theme.bold(theme.fg("accent", sanitizeText(row.author)))
@@ -103,9 +114,12 @@ export function renderChatRows(rows: readonly ChatRow[], width: number, theme: T
     const indent =
       row.threadDepth > 0 ? theme.tree.vertical.repeat(row.threadDepth) + theme.tree.branch : "";
     const body = truncateToWidth(row.body.replace(/[\r\n]+/g, " "), Math.max(1, width - 32));
+    // D2: one space between the unread cursor and the badge. D1: `sep.dot` is already " · " with its
+    // flanks (symbols.ts:455), so it must not be wrapped in more spaces. D7: the separator between
+    // author and topic is `nav.selected`, a SymbolKey, not a hardcoded "›".
     const head =
-      `${unread}${badge} ${time} ${indent}${author} ${theme.fg("dim", "›")} ` +
-      `${theme.fg("muted", sanitizeText(row.topic))} ${theme.sep.dot} ${body}`;
+      `${unread}${badge} ${time} ${indent}${author}${theme.sep.dot}` +
+      `${theme.fg("muted", sanitizeText(row.topic))}${theme.nav.selected}${body}`;
     return padOrTrim(head, width);
   });
 }

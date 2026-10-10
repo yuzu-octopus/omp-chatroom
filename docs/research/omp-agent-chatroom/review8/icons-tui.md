@@ -120,7 +120,7 @@ the ones the layout code uses.
 | `✕` | U+2715 | `message-cards.ts:185` (release detail row) | **1** | **room-invented — no host key** |
 | `➤` | U+27A4 | `message-cards.ts:136` (`"➤ me"`) | **1** | host `nav.selected` (`symbols.ts:404`) — same codepoint, hardcoded |
 | `◷` | U+25F7 | `tool-cards.ts:28` (wait cards) | **1** | **room-invented — no host key** |
-| `→` | U+2192 | `room.ts` board/roster lines, `message-cards.ts:181` | **1** | room convention |
+| `→` | U+2192 | `room.ts` board/roster lines, `message-cards.ts:177` | **1** | room convention |
 | `…` | U+2026 | `digest.ts:54`, `body-lines.ts:42`, `room.ts` tail | **1** | room convention |
 | `—` | U+2014 | `governor.ts:56`, `governor.ts:151`, `governor.ts:221` | **1** | room convention |
 | `⟦` `⟧` | U+27E6 U+27E7 | not used — host badge brackets, unicode | **1 / 1** | host `format.bracketLeft/Right` (`symbols.ts:580-581`) |

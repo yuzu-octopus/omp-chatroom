@@ -601,3 +601,97 @@ test("roomId with ANSI escape is sanitized in the title", () => {
   expect(text).not.toContain("\x1b");
   expect(text).toContain("xy");
 });
+
+// --- 9. theme fallback shape (D5) -------------------------------------------
+
+test("a shim-shaped theme renders strings, not function source (D5)", () => {
+  // The panel's last-ditch theme must match the host Theme's OWN TYPES: `sep`, `nav`, `tree` and
+  // `status` are string-valued getters (pi-tui theme-class.ts:485-510) that consumers INTERPOLATE,
+  // and `fg` must return the TEXT. A shim that returns functions renders "(text) => text" into the
+  // pane — which is exactly what the first version of resolveTheme's fallback did.
+  const root = tempRoot();
+  const store = storeFor(root, roomIdFor(root));
+  for (let i = 0; i < 6; i++)
+    store.append({ kind: "msg", from: "AgentA", topic: "t", body: `m${i}` });
+
+  const plain = (_tone: string, text: string): string => text;
+  const shimTheme = {
+    fg: plain,
+    bold: plain,
+    sep: { dot: " · ", space: " " },
+    nav: { cursor: "❯", selected: "➤" },
+    tree: { branch: "├─", vertical: "│" },
+    status: { error: "✘", warning: "⚠", info: "ⓘ", success: "✔", pending: "…" },
+  } as unknown as Theme;
+
+  const panel = makePanel(store, 30, { theme: shimTheme, registry: registryStub() });
+  const text = panel
+    .render(120)
+    .map((r) => String(r).replace(ANSI, ""))
+    .join("\n");
+
+  expect(text).not.toContain("=> text");
+  expect(text).not.toContain("identity");
+  // The separator the shim supplies must actually appear, proving it is a string and interpolated.
+  expect(text).toContain(" · ");
+  panel.dispose();
+});
+
+// --- 10. chat row glyph and spacing defects (D1/D2/D3/D7) ------------------
+
+test("chat row: one-cell tier glyph, single-spaced separator", () => {
+  const store = storeFor(tempRoot(), "r");
+  const rows: ChatRow[] = [
+    {
+      seq: 1,
+      ts: 1_700_000_000_000,
+      tier: "T0",
+      author: "Alpha",
+      topic: "build",
+      body: "first",
+      unread: true,
+      threadDepth: 0,
+      mention: false,
+    },
+    {
+      seq: 2,
+      ts: 1_700_000_000_100,
+      tier: "T1",
+      author: "Beta",
+      topic: "build",
+      body: "second",
+      unread: false,
+      threadDepth: 0,
+      mention: false,
+    },
+    {
+      seq: 3,
+      ts: 1_700_000_000_200,
+      tier: "T2",
+      author: "Gamma",
+      topic: "chat",
+      body: "third",
+      unread: true,
+      threadDepth: 0,
+      mention: true,
+    },
+  ];
+  const out = renderChatRows(rows, 100, theme);
+
+  // D3: no ASCII tier badge anywhere — the badge is a 1-cell theme status glyph.
+  for (const row of out) {
+    expect(row.replace(ANSI, "")).not.toContain("T0");
+    expect(row.replace(ANSI, "")).not.toContain("T1");
+    expect(row.replace(ANSI, "")).not.toContain("T2");
+  }
+  // D1: no triple space around the separator. `sep.dot` is already " · " (symbols.ts:455), so the
+  // old `${topic} ${sep.dot} ${body}` produced "topic  ·  body".
+  for (const row of out) expect(row.replace(ANSI, "")).not.toContain("  ·  ");
+  // D2: the unread cursor no longer abuts the badge. It reads "❯✘ <time>" — cursor, glyph, space.
+  expect(out[0]!.replace(ANSI, "")).toMatch(/^❯✘ \d\d:\d\d:\d\d /);
+  // D7: the author/topic separator is the theme's nav.selected, not a hardcoded "›".
+  expect(out[0]!.replace(ANSI, "")).not.toContain("›");
+  // Every row is padded/trimmed to exactly `width` VISIBLE cells (ANSI codes are invisible).
+  for (const row of out) expect(visibleWidth(row)).toBe(100);
+  store.reset();
+});
