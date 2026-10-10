@@ -1,6 +1,17 @@
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent";
-import { type Component, SplitPane, Stack, type Theme, type TUI } from "@oh-my-pi/pi-tui";
+import {
+  type Component,
+  ensureThemeSync,
+  SplitPane,
+  Stack,
+  type Theme,
+  type TUI,
+  theme,
+} from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { contended } from "../store/claims";
 import { cursorFor } from "../store/cursors";
@@ -81,6 +92,10 @@ export class RoomPanel implements Component {
   #lastRender: readonly string[] = [];
 
   constructor(options: RoomPanelOptions) {
+    trace(
+      `RoomPanel ctor: theme=${options.theme === undefined ? "undefined" : typeof options.theme}` +
+        ` fg=${options.theme !== undefined && options.theme !== null ? typeof (options.theme as { fg?: unknown }).fg : "n/a"}`,
+    );
     this.#options = options;
     this.#registry = options.registry ?? AgentRegistry.global();
     const registry = this.#registry;
@@ -287,6 +302,65 @@ export class RoomPanel implements Component {
 const ACTIVE_PANEL = new WeakMap<ExtensionAPI, () => void>();
 
 /**
+ * The host injects its `Theme` as the factory's 2nd arg, but on 18.8.7 that object arrives WITHOUT
+ * `fg` (and possibly the rest), so every `theme.fg(...)` throws "undefined is not an object
+ * (evaluating 'theme.fg')" and the panel dies before it renders. `ensureThemeSync()` populates the
+ * pi-tui module singleton, which is the same object the host passes — so either the host now hands a
+ * partially-built theme, or it hands one whose `fg` is a lazy getter that has not resolved.
+ *
+ * 17 call sites, resolve the theme ONCE here: prefer the injected one, fall back to
+ * the pi-tui singleton after ensuring it, and last-ditch to a minimal shim so the panel renders
+ * uncoloured rather than not at all.
+ */
+
+/** A theme with a working `fg` — the only member any panel code actually calls. */
+type UsableTheme = Theme & { fg: (tone: string, text: string) => string };
+function resolveTheme(injected: Theme | undefined): Theme {
+  const usable = (t: Theme | undefined): t is UsableTheme =>
+    t !== undefined && t !== null && typeof t === "object" && typeof t.fg === "function";
+  if (usable(injected)) return injected;
+  trace(
+    `resolveTheme: injected theme unusable (fg=${typeof (injected as { fg?: unknown } | undefined)?.fg})`,
+  );
+  // The pi-tui singleton is what `ensureThemeSync()` initialises; the host passes the same object.
+  ensureThemeSync();
+  const singleton: Theme | undefined = theme;
+  if (usable(singleton)) {
+    trace("resolveTheme: fell back to the pi-tui singleton");
+    return singleton;
+  }
+  trace("resolveTheme: falling back to an uncoloured shim");
+  const identity = (text: string): string => text;
+  return {
+    fg: () => identity,
+    bold: identity,
+    sep: { dot: identity, space: identity },
+    tree: { vertical: "│ ", branch: "├─ " },
+    nav: { cursor: identity },
+    status: { error: identity, warning: identity, info: identity, success: identity },
+  } as unknown as Theme;
+}
+
+/**
+ * Debug breadcrumbs, written to a file so a failure inside `ctx.ui.custom` — where the host swallows
+ * everything into a one-line notify — is diagnosable from outside the TUI. Never throws; a logger
+ * that can break the feature it is logging is worse than no logger.
+ */
+function trace(label: string, extra?: unknown): void {
+  try {
+    const file = path.join(os.tmpdir(), "omp-room-panel-debug.log");
+    const stamp = new Date().toISOString();
+    let body = `${stamp} ${label}`;
+    if (extra !== undefined) body += ` ${String(extra)}`;
+    const err = extra instanceof Error ? extra : undefined;
+    if (err !== undefined) body += `\n  stack: ${err.stack ?? "none"}`;
+    fs.appendFileSync(file, `${body}\n`);
+  } catch {
+    // A logger must never break the feature.
+  }
+}
+
+/**
  * §6.1/§6.8 — open the overlay. Guarded for non-TUI modes (RPC `custom` returns `undefined as never`)
  * and wrapped in try/catch (R5: `hasUI === true` does not guarantee `custom` works). NEVER passes
  * `signal: ctx.signal` — `ExtensionContext` has no `signal`; abort comes from `session_shutdown`.
@@ -308,8 +382,14 @@ export async function openRoomPanel(pi: ExtensionAPI, ctx: ExtensionContext): Pr
   }
 
   try {
+    trace("openRoomPanel: calling ctx.ui.custom");
     await ctx.ui.custom<void>(
       (tui, theme, _keybindings, done) => {
+        trace(
+          `factory: tui=${tui === undefined ? "undefined" : typeof tui}` +
+            ` theme=${theme === undefined ? "undefined" : typeof theme}` +
+            ` theme.fg=${theme !== undefined && theme !== null ? typeof (theme as { fg?: unknown }).fg : "n/a"}`,
+        );
         let unsubscribe: () => void = () => {};
         let closed = false;
         // Idempotent: `handleInput` may fire `done` more than once (a second `esc`, a key arriving
@@ -321,13 +401,14 @@ export async function openRoomPanel(pi: ExtensionAPI, ctx: ExtensionContext): Pr
           unsubscribe();
           done();
         };
+        trace("factory: constructing RoomPanel");
         const panel = new RoomPanel({
           roomId: store.roomId,
           store,
           tui,
           done: close,
           selfId: ctx.agent.id,
-          theme,
+          theme: resolveTheme(theme),
           onReleaseClaim: (resource: string) => {
             const held = store.claims.get(resource);
             if (held !== undefined) {
@@ -371,6 +452,7 @@ export async function openRoomPanel(pi: ExtensionAPI, ctx: ExtensionContext): Pr
       },
     );
   } catch (error) {
+    trace("openRoomPanel FAILED", error);
     ctx.ui.notify(
       `Room panel unavailable: ${error instanceof Error ? error.message : "unknown"}`,
       "warning",
