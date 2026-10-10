@@ -92,15 +92,15 @@ export function buildDigest(
         `- ${room(ref.id)} [${ref.status}] · cursor=${cursorFor(store, ref.id)} · lag=${lagFor(store, ref.id)}`,
     );
 
-  // Two counts, named distinctly: `joined` is the room's member set (agents that sent
-  // member{join}); `live` is the registry population the roster below prints (roster-capped).
-  // They are different sets — an agent can be live without having joined — so reporting only one
-  // beside the other's list read as a contradiction ("0 member(s)" above a full roster). Both
-  // Both numbers are derived, not room-authored, so neither needs `room()` escaping.
-  // `store.roomId` comes from `local://room/config.json` — a file any agent can write — so it IS
-  // room-authored data and stays escaped here.
+  // ONE count: the population the roster below actually prints. `store.members` was tried here and
+  // is a monotonic lifetime counter — every agent that ever sent member{join} is retained and
+  // nothing prunes it (no kind:"leave" record is ever appended, and retention does not touch
+  // members), so a live swarm read "200 joined · 32 live" and the 200 only grows. It answers no
+  // question anyone has. The roster cap is the honest bound, so report exactly what is listed.
+  // Derived counts need no `room()` escaping; `store.roomId` DOES come from
+  // `local://room/config.json`, a file any agent can write, so it is room-authored and stays escaped.
   const header = [
-    `Room ${room(store.roomId)} — ${store.members.size} joined · ${roster.length} live · ${store.records.length} record(s)`,
+    `Room ${room(store.roomId)} — ${roster.length} live · ${store.records.length} record(s)`,
   ];
   // Never truncated (§5.4 U8): the viewer's cursor + lag, and the active caps.
   const footer = [
