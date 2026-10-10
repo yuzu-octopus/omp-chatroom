@@ -35,7 +35,7 @@ interface ToolCall {
  */
 async function newSession(
   bus: EventBus,
-  registry: AgentRegistry,
+  registry: AgentRegistry | undefined,
   root: string,
   id: string,
 ): Promise<Session> {
@@ -47,7 +47,10 @@ async function newSession(
     sessionManager: SessionManager.inMemory(root),
     localProtocolOptions: { getArtifactsDir: () => root, getSessionId: () => id },
     extensions: [roomExtension],
-    agentRegistry: registry,
+    // Omit for `wait_for_agent`: it reads `AgentRegistry.global()`, and production never injects a
+    // registry (sdk.ts:2199 `options.agentRegistry ?? AgentRegistry.global()`). An injected instance
+    // here would leave the global empty, so the tool could only ever hit its timeout branch.
+    ...(registry === undefined ? {} : { agentRegistry: registry }),
     agentId: id,
     disableExtensionDiscovery: true,
     enableMCP: false,
@@ -301,6 +304,81 @@ test("wait_for_agent times out normally: {outcome:'timeout'}, useless:true, cont
     expect(typeof res.content[0]?.text).toBe("string");
   } finally {
     await a.dispose();
+  }
+});
+
+/**
+ * The happy path — the only one the suite never covered. It needs its own session wiring:
+ * `wait_for_agent` reads `AgentRegistry.global()` (src/tools/wait-for-agent.ts), while
+ * `newSession` here injects an explicit `new AgentRegistry()`. An injected registry leaves
+ * `global()` empty, so a test built on it silently exercises the tool's timeout branch no
+ * matter what the peer does. Production never injects it (sdk.ts:2199
+ * `options.agentRegistry ?? AgentRegistry.global()`), so the unwired variant is the faithful one.
+ */
+test("wait_for_agent resolves {outcome:'event'} when a named peer changes status", async () => {
+  AgentRegistry.resetGlobalForTests();
+  const root = freshRoot();
+  const bus = new EventBus();
+  const registry = AgentRegistry.global();
+  const a = await newSession(bus, undefined, root, "AgentA");
+  const peer = await newSession(bus, undefined, root, "AgentB");
+  try {
+    // Both are really registered in the registry the tool will read.
+    expect(registry.get("AgentA")?.status).toBe("running");
+    expect(registry.get("AgentB")?.status).toBe("running");
+
+    const waitP = toolOf(a, "wait_for_agent").execute("c-agent-wait", {
+      agents: ["AgentB"],
+      timeout: 120_000,
+      require: "any",
+    });
+    // One microtask proves nothing; a broken impl that resolved on the next macrotask would pass.
+    expect(await Promise.race([waitP.then(() => true), Bun.sleep(80).then(() => false)])).toBe(
+      false,
+    );
+
+    // The registry's own transition on a really registered peer.
+    expect(registry.setStatus("AgentB", "idle")).toBe(true);
+
+    const res = await Promise.race([waitP, Bun.sleep(5_000).then(() => null)]);
+    expect(res).not.toBeNull();
+    expect(res!.details).toMatchObject({
+      ok: true,
+      outcome: "event",
+      agents: [{ id: "AgentB", status: "idle" }],
+    });
+    // An event is useful, so compaction must not elide it.
+    expect(res!.useless).not.toBe(true);
+  } finally {
+    await a.dispose();
+    await peer.dispose();
+    AgentRegistry.resetGlobalForTests();
+  }
+});
+
+test("wait_for_agent ignores a status change on an agent that was NOT named", async () => {
+  // The wait is scoped to the named list. An unnamed peer's transition must not resolve it,
+  // and the caller must still get a normal timeout rather than a hang.
+  AgentRegistry.resetGlobalForTests();
+  const root = freshRoot();
+  const bus = new EventBus();
+  const registry = AgentRegistry.global();
+  const a = await newSession(bus, undefined, root, "AgentA");
+  const other = await newSession(bus, undefined, root, "AgentC");
+  try {
+    const waitP = toolOf(a, "wait_for_agent").execute("c-agent-scoped", {
+      agents: ["AgentB"],
+      timeout: 1_000,
+    });
+    // The unnamed peer must change status WHILE the wait is pending — awaiting the tool first
+    // would let it time out before the event and prove nothing about the scoping guard.
+    registry.setStatus("AgentC", "idle");
+    const res = await waitP;
+    expect(res.details).toMatchObject({ ok: true, outcome: "timeout" });
+  } finally {
+    await a.dispose();
+    await other.dispose();
+    AgentRegistry.resetGlobalForTests();
   }
 });
 
