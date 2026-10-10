@@ -396,10 +396,13 @@ export async function openRoomPanel(pi: ExtensionAPI, ctx: ExtensionContext): Pr
     trace("openRoomPanel: calling ctx.ui.custom");
     await ctx.ui.custom<void>(
       (tui, theme, _keybindings, done) => {
+        const t = theme as Record<string, unknown> | undefined;
         trace(
           `factory: tui=${tui === undefined ? "undefined" : typeof tui}` +
             ` theme=${theme === undefined ? "undefined" : typeof theme}` +
-            ` theme.fg=${theme !== undefined && theme !== null ? typeof (theme as { fg?: unknown }).fg : "n/a"}`,
+            ` fg=${typeof t?.fg} bold=${typeof t?.bold} sep=${typeof t?.sep}` +
+            ` status=${typeof t?.status} nav=${typeof t?.nav} tree=${typeof t?.tree}` +
+            ` boxRound=${typeof t?.boxRound} boxRoundTopLeft=${JSON.stringify(t?.boxRoundTopLeft)}`,
         );
         let unsubscribe: () => void = () => {};
         let closed = false;
