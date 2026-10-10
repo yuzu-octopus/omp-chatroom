@@ -9,6 +9,11 @@ export const HOST_VERSION_PIN = "18.8.6";
 //
 // Option A only imports the first four; the rest are listed so a future Option B phase fails loudly
 // on drift rather than at first use.
+//
+// `@oh-my-pi/pi-tui/overlays/agent-hub-renderer` used to be here — `statusGlyph`/`statusText` read
+// the host `theme` singleton and took the panel down with it. The roster strip now paints from the
+// theme it is handed (roster-strip.ts), so nothing imports it and listing it would gate a
+// dependency the plugin does not have. Ten, not eleven.
 export const DEEP_SPECIFIERS: readonly string[] = [
   "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol",
   "@oh-my-pi/pi-coding-agent/registry/agent-registry",
@@ -16,7 +21,6 @@ export const DEEP_SPECIFIERS: readonly string[] = [
   "@oh-my-pi/pi-coding-agent/utils/event-bus",
   "@oh-my-pi/pi-tui/chat/messages",
   "@oh-my-pi/pi-tui/chrome/overlay-box",
-  "@oh-my-pi/pi-tui/overlays/agent-hub-renderer",
   "@oh-my-pi/pi-tui/render/render-utils",
   "@oh-my-pi/pi-tui/render/status-line",
   "@oh-my-pi/pi-tui/tools/renderer",

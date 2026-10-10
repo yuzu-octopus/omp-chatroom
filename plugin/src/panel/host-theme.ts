@@ -1,25 +1,29 @@
 /**
- * Host chrome helpers (`@oh-my-pi/pi-tui/chrome/overlay-box`) and the roster helpers
- * (`@oh-my-pi/pi-tui/overlays/agent-hub-renderer`) all read the HOST's `theme` module singleton,
- * which is *not* initialised under a plugin — the factory hands us a theme, but those modules read
- * their own binding. In the real TUI every one of them throws
- * `undefined is not an object (evaluating 'theme.boxRound')` (or `theme.fg`, `theme.sep`, …) and
- * takes the panel with it.
+ * The host's chrome helpers (`@oh-my-pi/pi-tui/chrome/overlay-box`) read the HOST's `theme` module
+ * singleton, which is *not* initialised under a plugin — the factory hands us a theme, but
+ * `topBorderSplit`/`divider`/`bottomBorder` read their own binding. In the real TUI every one of
+ * them throws `undefined is not an object (evaluating 'theme.boxRound')` and takes the panel with
+ * it.
  *
- * Fix: install the injected theme on the host module BEFORE any chrome/roster helper runs. The host
- * exports `setThemeInstance` for exactly this, so the panel stays a consumer of the host's own
- * chrome and the frame rows keep their host look.
+ * Fix: install the injected theme on the host module BEFORE any chrome helper runs. The host exports
+ * `setThemeInstance` for exactly this, so the panel stays a consumer of the host's own chrome and
+ * the frame rows keep their host look.
+ *
+ * The roster strip used to be in the same position — `statusGlyph`/`statusText` from
+ * `agent-hub-renderer` read the same singleton. It no longer is: roster-strip.ts paints the glyph
+ * and the tone from the theme it is handed, so it cannot be killed by the host's initialisation
+ * order and nothing imports `agent-hub-renderer` any more.
  */
 import { theme as hostTheme, setThemeInstance } from "@oh-my-pi/pi-tui";
 
 /**
- * Make the host chrome/roster helpers see `theme`, but ONLY when they cannot see anything.
+ * Make the host chrome helpers see `theme`, but ONLY when they cannot see anything.
  *
  * Two readers, one theme. The panel draws its frame through the host's `topBorderSplit` /
- * `divider` / `bottomBorder` and its roster strip through `agent-hub-renderer`; every one of them
- * reads the `theme` export of `pi-tui/theme`, not the theme the factory handed us. Under the plugin
- * that binding can be uninitialised, in which case each helper throws
- * `undefined is not an object (evaluating 'theme.boxRound')` and takes the panel with it.
+ * `divider` / `bottomBorder`, which read the `theme` export of `pi-tui/theme` rather than the
+ * theme the factory handed us. Under the plugin that binding can be uninitialised, in which case
+ * each helper throws `undefined is not an object (evaluating 'theme.boxRound')` and takes the
+ * panel with it.
  *
  * `setThemeInstance` is the host's own publish path (`theme = value` + `setActiveSymbolTheme` +
  * theme-change notify). It is deliberately NOT called when the host already has a live theme: it
