@@ -10,11 +10,65 @@ import type { RecordKind, RoomRecord } from "./schema";
 const O_CLOEXEC = process.platform === "linux" ? 0o2000000 : 0;
 const FDS = globalMap<string, number>("__roomLogFds");
 
+export function lockPathFor(root: string): string {
+  return `${root}/room/.lock`;
+}
+
+/**
+ * Cross-process single-writer lock (plan 017 followup). Two omp processes on one project root
+ * would mint colliding seqs and never see each other's records (proven: 10 duplicate seqs over
+ * 40 records with a rendezvous probe) — silent divergence, not an error. The lock makes the
+ * second writer fail LOUDLY instead. O_CREAT|O_EXCL is the atomic primitive (no flock in this
+ * runtime); the file holds the owner pid so a dead owner's stale lock can be reaped after one
+ * liveness check. Throws Error("room file locked by pid <N>") when a LIVE owner holds it.
+ */
+export function acquireRoomLock(root: string): void {
+  const lockPath = lockPathFor(root);
+  fs.mkdirSync(lockPath.slice(0, lockPath.lastIndexOf("/")), { recursive: true });
+  try {
+    fs.writeFileSync(lockPath, String(process.pid), { flag: "wx" });
+    return;
+  } catch (error) {
+    if ((error as { code?: string }).code !== "EEXIST") throw error;
+  }
+  // A lock exists: reap it iff the owner is dead, else fail loudly.
+  let owner = 0;
+  try {
+    owner = Number.parseInt(fs.readFileSync(lockPath, "utf-8"), 10);
+  } catch {
+    owner = 0; // unreadable → treat as stale, fall through to unlink
+  }
+  if (Number.isInteger(owner) && owner > 0) {
+    try {
+      process.kill(owner, 0); // liveness check only — no signal sent
+      throw new Error(`room file locked by pid ${owner}`);
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith("room file locked by pid"))
+        throw error;
+      // ESRCH: owner dead → stale lock, fall through and reap it.
+    }
+  }
+  fs.rmSync(lockPath, { force: true });
+  fs.writeFileSync(lockPath, String(process.pid), { flag: "wx" });
+}
+
+/** Release the lock taken by `acquireRoomLock`. Only the owner unlinks (pid check). */
+export function releaseRoomLock(root: string): void {
+  const lockPath = lockPathFor(root);
+  try {
+    const owner = Number.parseInt(fs.readFileSync(lockPath, "utf-8"), 10);
+    if (owner === process.pid) fs.rmSync(lockPath, { force: true });
+  } catch {
+    // Best-effort: a leftover lock is reaped as stale by the next opener.
+  }
+}
+
 export function roomLogFd(root: string, roomId: string): number {
   // mkdirSync + O_APPEND|O_CLOEXEC
   const path = logPathFor(root, roomId);
   const existing = FDS.get(path);
   if (existing !== undefined) return existing;
+  acquireRoomLock(root);
   fs.mkdirSync(path.slice(0, path.lastIndexOf("/")), { recursive: true });
   const fd = fs.openSync(
     path,
@@ -92,6 +146,7 @@ export function closeRoomLog(root: string, roomId: string): void {
     fs.closeSync(fd);
   } finally {
     FDS.delete(path);
+    releaseRoomLock(root);
   }
 }
 
@@ -198,12 +253,24 @@ function gapRecord(seq: number, reason: "corrupt" | "invalid"): RoomRecord {
 // F8 — [invented] the U6 mapping: errno → the detail string. Never throws.
 export type LogOpenResult =
   | { ok: true; fd: number }
-  | { ok: false; error: "room file not found" | "room file unwritable" | "room file corrupt" };
+  | {
+      ok: false;
+      error:
+        | "room file not found"
+        | "room file unwritable"
+        | "room file corrupt"
+        | "room file locked by another session";
+    };
 export function openRoomLog(root: string, roomId: string): LogOpenResult {
   // [invented] F8 wrapper
   try {
     return { ok: true, fd: roomLogFd(root, roomId) };
   } catch (error) {
+    // The lock failure carries the owner pid ("room file locked by pid <N>"); the U6 surface
+    // reports the stable variant so callers can match on it without parsing a pid.
+    if (error instanceof Error && error.message.startsWith("room file locked by pid")) {
+      return { ok: false, error: "room file locked by another session" };
+    }
     let code: string | undefined;
     if (
       typeof error === "object" &&

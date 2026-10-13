@@ -26,9 +26,12 @@ import {
   restoreOwnCursor,
 } from "../src/store/cursors";
 import {
+  acquireRoomLock,
   appendLine,
   closeRoomLog,
+  lockPathFor,
   openRoomLog,
+  releaseRoomLock,
   replay,
   roomLogFd,
   validateRecord,
@@ -679,4 +682,51 @@ test("roomTimers.start with no timer API schedules nothing and never throws", ()
   // No entry, so stop is a no-op and no raw timer was ever scheduled.
   expect(() => roomTimers.stop(root)).not.toThrow();
   store.dispose();
+});
+
+// --- cross-process single-writer lock (plan 017 followup) --------------------
+
+test("acquire/release round-trips: the lock file appears and disappears", () => {
+  const root = tempRoot();
+  acquireRoomLock(root);
+  expect(fs.existsSync(lockPathFor(root))).toBe(true);
+  expect(fs.readFileSync(lockPathFor(root), "utf-8")).toBe(String(process.pid));
+  releaseRoomLock(root);
+  expect(fs.existsSync(lockPathFor(root))).toBe(false);
+});
+
+test("a second live holder fails loudly; openRoomLog reports the locked variant", () => {
+  const root = tempRoot();
+  const roomId = roomIdFor(root);
+  const fd = roomLogFd(root, roomId); // first opener takes the lock
+  try {
+    // Simulate a second process: drop the in-process fd entry so roomLogFd re-opens.
+    closeRoomLog(root, roomId); // releases fd AND lock — re-acquire to hold it
+    acquireRoomLock(root);
+    // Same process re-opening hits its OWN live lock: still loud (pid check is honest).
+    expect(() => acquireRoomLock(root)).toThrow(/room file locked by pid/);
+    const second = openRoomLog(root, roomId);
+    expect(second.ok).toBe(false);
+    if (!second.ok) expect(second.error).toBe("room file locked by another session");
+  } finally {
+    releaseRoomLock(root);
+    void fd;
+  }
+});
+
+test("a stale lock from a dead pid is reaped, not fatal", () => {
+  const root = tempRoot();
+  fs.mkdirSync(`${root}/room`, { recursive: true });
+  fs.writeFileSync(lockPathFor(root), "999999999"); // no such pid
+  expect(() => acquireRoomLock(root)).not.toThrow();
+  expect(fs.readFileSync(lockPathFor(root), "utf-8")).toBe(String(process.pid));
+  releaseRoomLock(root);
+});
+
+test("releaseRoomLock never unlinks another owner's lock", () => {
+  const root = tempRoot();
+  fs.mkdirSync(`${root}/room`, { recursive: true });
+  fs.writeFileSync(lockPathFor(root), "999999999");
+  releaseRoomLock(root); // not our pid → must not unlink
+  expect(fs.existsSync(lockPathFor(root))).toBe(true);
 });
