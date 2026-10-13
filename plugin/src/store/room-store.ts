@@ -284,26 +284,42 @@ export interface RoomTimerRegistry {
   start(root: string, ctx: ExtensionContext): void;
   stop(root: string): void;
 }
-const TIMERS = globalMap<string, Timer[]>("__roomTimers");
+interface RoomTimerEntry {
+  /**
+   * The `clearTimer` captured at start, NOT the ctx itself. Holding the ctx and calling
+   * `ctx.clearTimer` later is unsafe: `stop` runs from `resetRoomStores`/`dispose`, which can fire
+   * after the owning session is gone (same rationale as the compactor's `CompactorEntry`).
+   */
+  clearTimer: (handle: Timer) => void;
+  handles: Timer[];
+}
+const TIMERS = globalMap<string, RoomTimerEntry>("__roomTimers");
 
 export const roomTimers: RoomTimerRegistry = {
   start(root: string, ctx: ExtensionContext): void {
     if (TIMERS.has(root)) return;
     const store = STORES.get(root);
     if (store === undefined) return;
-    TIMERS.set(root, [
-      ctx.setInterval(() => {
-        enforceRetention(store, Date.now());
-      }, PRUNE_INTERVAL_MS),
-      ctx.setInterval(() => {
-        expireStale(store, Date.now());
-      }, store.config.claimSweepMs),
-    ]);
+    // Capture the bound clearer up front; `ctx` may be unusable by the time we stop. No timer
+    // API → no job (never a raw timer; I4).
+    const clearTimer = ctx.clearTimer?.bind(ctx);
+    if (clearTimer === undefined) return;
+    TIMERS.set(root, {
+      clearTimer,
+      handles: [
+        ctx.setInterval(() => {
+          enforceRetention(store, Date.now());
+        }, PRUNE_INTERVAL_MS),
+        ctx.setInterval(() => {
+          expireStale(store, Date.now());
+        }, store.config.claimSweepMs),
+      ],
+    });
   },
   stop(root: string): void {
-    const handles = TIMERS.get(root);
-    if (handles === undefined) return;
-    for (const handle of handles) clearInterval(handle);
-    TIMERS.delete(root);
+    const entry = TIMERS.get(root);
+    if (entry === undefined) return;
+    TIMERS.delete(root); // delete FIRST: a throwing clearer must not strand the entry
+    for (const handle of entry.handles) entry.clearTimer(handle);
   },
 };

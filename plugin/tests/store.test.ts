@@ -33,7 +33,13 @@ import {
   roomLogFd,
   validateRecord,
 } from "../src/store/log";
-import { enforceRetention, type RoomStore, roomStoreFor } from "../src/store/room-store";
+import {
+  enforceRetention,
+  type RoomStore,
+  roomStoreFor,
+  roomTimers,
+  storeFor,
+} from "../src/store/room-store";
 import type { RoomRecord } from "../src/store/schema";
 import { registerRoomTool } from "../src/tools/room";
 import { zodStub } from "./zod-stub";
@@ -641,4 +647,38 @@ test("appendLine fsyncs the fd, so a crash cannot lose the last write", () => {
     spy.mockRestore();
     closeRoomLog(root, roomId);
   }
+});
+
+// --- roomTimers: managed-timer hygiene (plan 001) ---------------------------
+
+test("roomTimers.stop clears through the captured host clearTimer, not the bare global", () => {
+  const root = tempRoot();
+  const store = storeFor(root, roomIdFor(root));
+  const cleared: unknown[] = [];
+  let next = 1;
+  const ctx = {
+    setInterval: () => next++ as unknown as Timer,
+    clearTimer: (handle: unknown) => {
+      cleared.push(handle);
+    },
+  } as unknown as ExtensionContext;
+  try {
+    roomTimers.start(root, ctx);
+    roomTimers.stop(root);
+    // prune + sweep: exactly the two scheduled handles, via the host clearer.
+    expect(cleared).toEqual([1, 2]);
+  } finally {
+    roomTimers.stop(root); // safe no-op: stop() deletes before clearing
+    store.dispose();
+  }
+});
+
+test("roomTimers.start with no timer API schedules nothing and never throws", () => {
+  const root = tempRoot();
+  const store = storeFor(root, roomIdFor(root));
+  const ctx = {} as unknown as ExtensionContext;
+  expect(() => roomTimers.start(root, ctx)).not.toThrow();
+  // No entry, so stop is a no-op and no raw timer was ever scheduled.
+  expect(() => roomTimers.stop(root)).not.toThrow();
+  store.dispose();
 });
