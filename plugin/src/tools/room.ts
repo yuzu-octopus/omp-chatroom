@@ -309,13 +309,16 @@ function notice(
  * append (I1/I5): the log is already durable, so a delivery failure can only be reported, never
  * corrupt the record or throw out of `execute`. Returns the first failure message, if any.
  *
- * T0 is never dropped, but its pending set is ceiling-batched by `selectT0` (N5) — past the ceiling
- * ONE digest interrupt carries the count and the records stay above the recipient's cursor. T2 is
- * cursor-only, except that its pending set is digested by `coalescePending` (N/T) onto the next
- * T0/T1 delivery for that recipient. A post past the producer's srTCM burst is coalesced for the
- * digest — the record is already durable and its recipients' cursors stay put.
+ * Exported for the `/room` command path (room-command.ts), the second caller: the command handler
+ * has no `deliveryError` envelope, so this function must stay throw-free — a throw would surface
+ * as an unhandled rejection in the TUI. T0 is never dropped, but its pending set is ceiling-batched
+ * by `selectT0` (N5) — past the ceiling ONE digest interrupt carries the count and the records stay
+ * above the recipient's cursor. T2 is cursor-only, except that its pending set is digested by
+ * `coalescePending` (N/T) onto the next T0/T1 delivery for that recipient. A post past the
+ * producer's srTCM burst is coalesced for the digest — the record is already durable and its
+ * recipients' cursors stay put.
  */
-async function notifyRecipients(
+export async function notifyRecipients(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
   store: RoomStore,
@@ -382,7 +385,7 @@ async function notifyRecipients(
 }
 
 /** The records an operation appended: everything with a seq above the pre-op watermark. */
-function appendedSince(store: RoomStore, before: number): RoomRecord[] {
+export function appendedSince(store: RoomStore, before: number): RoomRecord[] {
   return store.records.filter((r) => r.seq > before);
 }
 
