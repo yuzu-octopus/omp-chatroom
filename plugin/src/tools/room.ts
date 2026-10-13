@@ -169,7 +169,7 @@ export function viewerStateFor(store: RoomStore, agentId: string): MemberState {
   return store.members.get(agentId) ?? freshViewer(store, agentId);
 }
 
-/** One model-facing line per record, tier-free (Option A has no governor) — §4.5.1 K17. */
+/** One model-facing line per record — tier-free by format (no badge field); tiering lives in `classify`/`renderLine`. §4.5.1 K17. */
 function recordLine(record: RoomRecord): string {
   const head = `seq ${record.seq} · ${safe(record.from)}`;
   switch (record.kind) {

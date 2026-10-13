@@ -19,7 +19,7 @@ import { appendedSince, notifyRecipients } from "../tools/room";
 
 export const ROOM_COMMAND_NAME = "room";
 
-// Option A (§1.4) subcommand set: exactly the shipped `room` ops, plus `config` (P7/R6 — the
+// Subcommand set: exactly the shipped `room` ops, plus `config` (P7/R6 — the
 // manifest settings are unreachable from extension code, so the command is the human surface).
 export const ROOM_SUBCOMMANDS = ["board", "join", "claim", "release", "post", "config"] as const;
 export type RoomSubcommand = (typeof ROOM_SUBCOMMANDS)[number];

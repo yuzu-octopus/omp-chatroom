@@ -7,7 +7,7 @@ import { safeRoomText } from "./escape";
 export const DIGEST_BUDGET_TOKENS = 3_800; // K5/X3 — measured band max + margin; rule NOT counted
 export const ROSTER_CAP = 32; // §5.4
 export const DIGEST_CLAIMS_CAP = 10; // §5.4
-export const RAW_TAIL_R = 50; // §5.4/§3.5 — Option A's only backlog item is the raw tail
+export const RAW_TAIL_R = 50; // §5.4/§3.5 — the raw tail is the whole backlog item
 const BACKLOG_BODY_CHARS = 240; // [invented] — one record must never eat the whole budget
 
 // §3.3 — the claim TTL is rendered as a coarse bucket, never a per-second countdown: a countdown
@@ -129,7 +129,7 @@ export function buildDigest(
       return `- ${room(claim.resource)} held by ${room(claim.holder)} · ${left} (expires ${clock})`;
     });
 
-  // Option A (§1.4): the raw tail is the whole backlog — there is no cold-tree item.
+  // The raw tail is the whole backlog — there is no cold-tree item.
   //
   // §3.3 — this section is the digest's tail, so it must be append-only: each line is derived from
   // its own record alone, so a record that is still inside the window renders byte-identically on

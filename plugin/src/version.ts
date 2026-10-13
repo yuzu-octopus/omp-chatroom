@@ -7,7 +7,7 @@ export const HOST_VERSION_PIN = "18.10.3";
 // `pi-tui/chrome`, `pi-tui/render`, `pi-tui/tools`); the two highest-risk without one are
 // `pi-tui/overlays/agent-hub-renderer` and `pi-coding-agent/session/harness-tags`.
 //
-// Option A only imports the first four; the rest are listed so a future Option B phase fails loudly
+// The first four are the store-critical surface; the rest are listed so a future phase fails loudly
 // on drift rather than at first use.
 //
 // `@oh-my-pi/pi-tui/overlays/agent-hub-renderer` used to be here — `statusGlyph`/`statusText` read

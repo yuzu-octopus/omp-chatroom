@@ -313,10 +313,11 @@ function resolveTheme(injected: Theme | undefined): Theme {
     t !== undefined && t !== null && typeof t === "object" && typeof t.fg === "function";
   if (usable(injected)) {
     // ALWAYS publish whatever usable theme we are given to the host modules, even when the injected
-    // theme is fine. The panel's frame rows come from `pi-tui/chrome/overlay-box` and its roster
-    // strip from `agent-hub-renderer`, and BOTH read the host `theme` singleton rather than the theme
-    // the factory handed us — under the plugin that singleton is uninitialised, so every one of them
-    // throws `undefined is not an object (evaluating 'theme.boxRound')` and takes the panel with it.
+    // theme is fine. The panel's frame rows come from `pi-tui/chrome/overlay-box`, whose
+    // `topBorderSplit`/`divider`/`bottomBorder` read the host `theme` singleton rather than the
+    // theme the factory handed us — under the plugin that singleton is uninitialised, so every one
+    // of them throws `undefined is not an object (evaluating 'theme.boxRound')` and takes the panel
+    // with it. (The roster strip paints from the handed theme; see host-theme.ts.)
     adoptHostTheme(injected);
     return injected;
   }
