@@ -224,6 +224,18 @@ export function registerRoomCommand(pi: ExtensionAPI): void {
           const resource = resourceKey(topic, key);
           const requested =
             ttlArg === undefined ? resolveRoomConfig(pi, store.root).claimTtlMs : Number(ttlArg);
+          // Math.max/Math.min propagate NaN instead of clamping it: without this guard a typo'd
+          // TTL appends a NaN lease, which JSON persists as ttlMs:null and replay quarantines as
+          // gap{reason:"invalid"} — the claim silently never existed after a restart.
+          if (!Number.isFinite(requested)) {
+            report(
+              ctx,
+              pi,
+              `claim: bad ttlMs "${ttlArg}" — expected a number of milliseconds`,
+              "warning",
+            );
+            return;
+          }
           const ttlMs = Math.min(
             CLAIM_TTL_MAX_MS,
             Math.max(CLAIM_TTL_MIN_MS, Math.trunc(requested)),
