@@ -1,0 +1,3 @@
+In APPDIR there is a file named shared.txt that several teammates also edit.
+Read it, then append exactly one line with today's date in YYYY-MM-DD format.
+Do only what is asked; do not create other files.
