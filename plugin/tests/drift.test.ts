@@ -22,6 +22,30 @@ test("the installed host version equals HOST_VERSION_PIN (X6/R34)", async () => 
   expect(version).toBe(HOST_VERSION_PIN);
 });
 
+test("the GLOBAL host (production) matches HOST_VERSION_PIN when one is installed", async () => {
+  // The linked plugin resolves the host's modules at runtime, so the dev install the test above
+  // checks is not what production serves. Resolve the global prefix from the omp binary itself —
+  // never a hardcoded home path — and skip gracefully where no global install exists (CI).
+  const omp = Bun.which("omp");
+  if (omp === null) {
+    console.log("skip: no omp on PATH, no global host to check");
+    return;
+  }
+  // <prefix>/bin/omp → <prefix>/install/global/node_modules (bun global layout).
+  const prefix = omp.replace(/\/bin\/omp$/, "");
+  const pkgPath = `${prefix}/install/global/node_modules/@oh-my-pi/pi-coding-agent/package.json`;
+  const file = Bun.file(pkgPath);
+  if (!(await file.exists())) {
+    console.log(`skip: no global host manifest at ${pkgPath}`);
+    return;
+  }
+  const parsed: unknown = JSON.parse(await file.text());
+  if (parsed === null || typeof parsed !== "object" || !("version" in parsed)) {
+    throw new Error("global host package.json has no version field");
+  }
+  expect(parsed.version).toBe(HOST_VERSION_PIN);
+});
+
 test("assertHostVersion throws on a mismatch and returns on a match", () => {
   expect(() => assertHostVersion(HOST_VERSION_PIN)).not.toThrow();
   expect(() => assertHostVersion("0.0.0-not-installed")).toThrow(/mismatch/i);
