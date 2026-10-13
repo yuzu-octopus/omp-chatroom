@@ -31,7 +31,8 @@ import {
   type RoomPanelOptions,
 } from "../src/panel/panel";
 import { renderRosterStrip, statusCounts } from "../src/panel/roster-strip";
-import { type MemberState, type RoomStore, storeFor } from "../src/store/room-store";
+import { enqueueWaiter, grant } from "../src/store/claims";
+import { type MemberState, type RoomStore, roomStoreFor, storeFor } from "../src/store/room-store";
 import type { RoomRecord } from "../src/store/schema";
 
 // --- fixtures -------------------------------------------------------------
@@ -720,4 +721,22 @@ test("chat row: one-cell tier glyph, single-spaced separator", () => {
   // Every row is padded/trimmed to exactly `width` VISIBLE cells (ANSI codes are invisible).
   for (const row of out) expect(visibleWidth(row)).toBe(100);
   store.reset();
+});
+
+test("panel `r` releases through the arbiter: reason released + waiter promoted + notified", async () => {
+  const pi = { on: () => {} } as unknown as ExtensionAPI;
+  const capture = captureTerminalInput();
+  await openRoomPanel(pi, capture.tuiCtx);
+  const store = roomStoreFor(capture.tuiCtx);
+  // Main holds the lease; W waits on it.
+  grant(store, "build/step", "Main", 60_000);
+  enqueueWaiter(store, "build/step", "W");
+  // Focus the board pane, select the row, press `r`.
+  expect(capture.handler("2")).toEqual({ consume: true });
+  expect(capture.handler("r")).toEqual({ consume: true });
+  // The holder's own release reasons "released" (not "reclaimed") and promotes the waiter.
+  const releases = store.records.filter((r) => r.kind === "release");
+  expect(releases.length).toBe(1);
+  expect(releases[0]).toMatchObject({ resource: "build/step", reason: "released" });
+  expect(store.claims.get("build/step")?.holder).toBe("W");
 });

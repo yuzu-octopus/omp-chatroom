@@ -5,10 +5,11 @@ import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent";
 import { type Component, SplitPane, Stack, type Theme, type TUI } from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
-import { contended } from "../store/claims";
+import { contended, reclaimIfStale, release } from "../store/claims";
 import { cursorFor } from "../store/cursors";
 import { type MemberState, type RoomStore, roomStoreFor } from "../store/room-store";
 import type { ClaimRow } from "../store/schema";
+import { appendedSince, notifyRecipients } from "../tools/room";
 import { type BoardRow, createBoardPane } from "./board-pane";
 import { type ChatRow, createChatPane, projectChatRows } from "./chat-pane";
 import { fitBlock, frameRows } from "./chrome";
@@ -402,15 +403,31 @@ export async function openRoomPanel(pi: ExtensionAPI, ctx: ExtensionContext): Pr
           theme: resolveTheme(theme),
           onReleaseClaim: (resource: string) => {
             const held = store.claims.get(resource);
-            if (held !== undefined) {
-              store.append({
-                kind: "release",
-                from: ctx.agent.id,
-                resource,
-                reason: "reclaimed",
-                prevHolder: held.holder,
-              });
+            if (held === undefined) {
+              panel.refresh();
+              return;
             }
+            // Route through the arbiter like the tool path (room.ts release): a direct append
+            // would skip waiter promotion, use the wrong reason, and notify nobody. Holder
+            // releasing their own lease → "released"; anyone else → explicit reclaim-if-stale.
+            const before = store.seq;
+            if (held.holder === ctx.agent.id) {
+              release(store, resource, ctx.agent.id, "released");
+            } else {
+              reclaimIfStale(store, resource, Date.now());
+            }
+            // The push is async but key handling is sync: float it with a contained catch that
+            // surfaces via notify (a floating rejection here would be process-level noise).
+            notifyRecipients(pi, ctx, store, appendedSince(store, before), ctx.agent.id).then(
+              (failure) => {
+                if (failure !== undefined) ctx.ui.notify(`delivery: ${failure}`, "warning");
+              },
+              (error: unknown) =>
+                ctx.ui.notify(
+                  `delivery: ${error instanceof Error ? error.message : "failed"}`,
+                  "warning",
+                ),
+            );
             panel.refresh();
           },
           onFocusAgent: (agentId: string) => {
