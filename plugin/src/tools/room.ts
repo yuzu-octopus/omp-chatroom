@@ -143,7 +143,14 @@ function fail(error: string, holder?: string, expiresAt?: number): RoomToolResul
 export function viewerFor(store: RoomStore, agentId: string): MemberState {
   const existing = store.members.get(agentId);
   if (existing) return existing;
-  const fresh: MemberState = {
+  const fresh = freshViewer(store, agentId);
+  store.members.set(agentId, fresh);
+  return fresh;
+}
+
+/** The fresh-member shape, shared by the ensure and lookup paths. */
+function freshViewer(store: RoomStore, agentId: string): MemberState {
+  return {
     agentId,
     joinedAtSeq: store.seq,
     topics: new Set(),
@@ -151,8 +158,15 @@ export function viewerFor(store: RoomStore, agentId: string): MemberState {
     threadRoots: new Set(),
     heldTopics: new Set(),
   };
-  store.members.set(agentId, fresh);
-  return fresh;
+}
+
+/**
+ * Read-only viewer state for classification; never mints membership. Use this on every path that
+ * only READS the viewer (read/board/topics delivery classification). Use `viewerFor` only where
+ * the mutation must persist (join/claim/post, wait_for_claim's waitedResource).
+ */
+export function viewerStateFor(store: RoomStore, agentId: string): MemberState {
+  return store.members.get(agentId) ?? freshViewer(store, agentId);
 }
 
 /** One model-facing line per record, tier-free (Option A has no governor) — §4.5.1 K17. */
@@ -337,7 +351,7 @@ export async function notifyRecipients(
       admitPost(store, actorId, Date.now(), config) === "red";
     for (const target of recipients(store, actorId)) {
       try {
-        const viewer = viewerFor(store, target);
+        const viewer = viewerStateFor(store, target);
         const cursor = store.cursors.get(target) ?? 0;
         // The recipient's whole pending set, minus muted and cursor-only T2: exactly what a
         // push may show. T0 is exempt from K/B; T1 is admitted oldest-first by `selectT1`.
@@ -534,7 +548,7 @@ export function registerRoomTool(pi: ExtensionAPI): void {
         }
 
         case "read": {
-          const viewer = viewerFor(store, agentId);
+          const viewer = viewerStateFor(store, agentId);
           const cursor = cursorFor(store, agentId);
           const since = p.since ?? cursor;
           const limit = clamp(p.limit ?? READ_LIMIT_DEFAULT, 1, READ_LIMIT_MAX);
@@ -695,7 +709,7 @@ export function registerRoomTool(pi: ExtensionAPI): void {
         }
 
         case "board": {
-          const board = buildBoard(store, viewerFor(store, agentId));
+          const board = buildBoard(store, viewerStateFor(store, agentId));
           return ok(
             { ok: true, op: "board", board },
             withRows(
@@ -706,7 +720,7 @@ export function registerRoomTool(pi: ExtensionAPI): void {
         }
 
         case "topics": {
-          const viewer = viewerFor(store, agentId);
+          const viewer = viewerStateFor(store, agentId);
           const counts = unreadCounts(store, viewer);
           const byTopic = new Map<string, TopicRow>();
           const topics: TopicRow[] = [];
