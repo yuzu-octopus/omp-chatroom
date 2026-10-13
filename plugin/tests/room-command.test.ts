@@ -82,7 +82,7 @@ test("/room claim with a numeric TTL grants with that lease (positive control)",
   expect(notified.some((line) => line.includes("granted"))).toBe(true);
 });
 
-test("/room config tells the truth: governor knobs live, only three inert", async () => {
+test("/room config tells the truth: governor knobs live, only two inert", async () => {
   const notified: string[] = [];
   const handler = captureHandler(notified);
   const root = tempRoot();
@@ -95,11 +95,11 @@ test("/room config tells the truth: governor knobs live, only three inert", asyn
   // The stale banner is gone.
   expect(text).not.toContain("inert under Option A");
   expect(text).not.toContain("both reserved, no effect yet");
-  // The inert line names exactly the three genuinely unread knobs.
+  // The inert line names exactly the two genuinely unread knobs.
   const inert = notified.find((line) => line.includes("inert (present in the file"));
   expect(inert).toBeDefined();
-  expect(inert).toContain("compactionCallsPerDay=");
   expect(inert).toContain("coldTreeEnabled=");
   expect(inert).toContain("panelKey=");
   expect(inert).not.toContain("maxT1PerTurn=");
+  expect(inert).not.toContain("compactionCallsPerDay=");
 });

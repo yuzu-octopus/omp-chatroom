@@ -144,14 +144,14 @@ function configLines(pi: ExtensionAPI, store: RoomStore): string[] {
     `room config — ${safe(configPath(store.root))}`,
     `live: roomId=${safe(config.roomId)} · claimTtlMs=${config.claimTtlMs}` +
       ` · maxBodyBytes=${config.maxBodyBytes} · digestBudgetTokens=${config.digestBudgetTokens}`,
-    // Option B reads the governor, retention and sweep knobs live; only the three below are inert.
+    // Option B reads the governor, retention, sweep and compaction knobs live; only the two below are inert.
     `live (governor): maxT1PerTurn=${config.maxT1PerTurn} · maxT1Tokens=${config.maxT1Tokens}` +
       ` · coalesceCount=${config.coalesceCount} · coalesceMs=${config.coalesceMs}` +
       ` · postsPerWindow=${config.postsPerWindow} · burstPosts=${config.burstPosts}`,
     `live (retention/sweep): logMaxRecords=${config.logMaxRecords} · logMaxAgeMs=${config.logMaxAgeMs}` +
-      ` · claimSweepMs=${config.claimSweepMs}`,
-    `inert (present in the file, read by nothing yet): compactionCallsPerDay=${config.compactionCallsPerDay}` +
-      ` · coldTreeEnabled=${config.coldTreeEnabled} · panelKey=${safe(config.panelKey)}`,
+      ` · claimSweepMs=${config.claimSweepMs} · compactionCallsPerDay=${config.compactionCallsPerDay}`,
+    `inert (present in the file, read by nothing yet): coldTreeEnabled=${config.coldTreeEnabled}` +
+      ` · panelKey=${safe(config.panelKey)}`,
     `flags: --room-panel-key="${String(pi.getFlag("room-panel-key") ?? "")}" (opens the panel; empty = disabled)` +
       ` · --room-cold-tree=${String(pi.getFlag("room-cold-tree") ?? "")} (reserved, no effect yet)`,
   ];

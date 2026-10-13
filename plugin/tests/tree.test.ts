@@ -17,6 +17,7 @@ import {
   summarizeBlock,
   withWriteMutex,
 } from "../src/store/compactor";
+import { DEFAULT_ROOM_CONFIG } from "../src/store/config";
 import {
   disposeRoomSession,
   type RoomStore,
@@ -187,7 +188,12 @@ function fakeCtx(kind: "main" | "sub"): FakeCtx {
 }
 
 function fakeStore(treePath: string, records: RoomRecord[]): RoomStore {
-  return { root: path.dirname(path.dirname(treePath)), treePath, records } as unknown as RoomStore;
+  return {
+    root: path.dirname(path.dirname(treePath)),
+    treePath,
+    records,
+    config: { ...DEFAULT_ROOM_CONFIG },
+  } as unknown as RoomStore;
 }
 
 /** Build every pending node, smallest first (OptMem's `nap` order). */
@@ -339,6 +345,41 @@ test("the compaction spend cap is a daily RATE: at the cap the compactor pauses 
   const tree = openTreeStore(treePath, 4);
   expect(tree.getNode(0, 2)).toBe("S0-2");
   expect(tree.cover(4, 96)).toHaveLength(4);
+
+  __compactTest.resetSpend();
+  stopCompactor(root);
+});
+
+test("compactOnce honors the configured compactionCallsPerDay, not just the constant", async () => {
+  const { root, treePath } = tmpRootTree();
+  const store = fakeStore(treePath, [msg(0), msg(1), msg(2), msg(3)]);
+  store.config.compactionCallsPerDay = 1;
+  const { ctx } = fakeCtx("main");
+
+  __compactTest.resetSpend();
+  __compactTest.setSpendToday(1);
+  llmCalls = 0;
+  expect(await compactOnce(store, ctx, [0, 2])).toBe(false);
+  expect(llmCalls).toBe(0);
+  expect(compactionSpendToday()).toBe(1);
+
+  __compactTest.resetSpend();
+  stopCompactor(root);
+});
+
+test("a zero configured cap floors at 1: one node builds, then the cap bites", async () => {
+  const { root, treePath } = tmpRootTree();
+  const store = fakeStore(treePath, [msg(0), msg(1), msg(2), msg(3)]);
+  store.config.compactionCallsPerDay = 0;
+  const { ctx } = fakeCtx("main");
+
+  __compactTest.resetSpend();
+  llmCalls = 0;
+  expect(await compactOnce(store, ctx, [0, 2])).toBe(true);
+  expect(llmCalls).toBe(1);
+  llmCalls = 0;
+  expect(await compactOnce(store, ctx, [2, 4])).toBe(false);
+  expect(llmCalls).toBe(0);
 
   __compactTest.resetSpend();
   stopCompactor(root);
@@ -529,23 +570,19 @@ test("a subagent session does NOT start the compactor (R11/R28)", () => {
   roomStoreFor(main.ctx);
   expect(main.intervals).toHaveLength(3);
   expect(sub.intervals).toHaveLength(0);
-
-  resetRoomStores();
 });
 
-test("dispose() on the last session stops the compactor — the timer is cleared exactly once", () => {
+test("dispose() on the last session stops all three jobs — each timer cleared exactly once", () => {
   const dir = tmpArtifacts();
   const main = sessionCtx(dir, "main", "Main");
   roomStoreFor(main.ctx);
   expect(main.cleared).toHaveLength(0);
 
-  disposeRoomSession(main.ctx); // last session → the compactor tick is cleared, not leaked
-  expect(main.cleared).toHaveLength(1);
+  disposeRoomSession(main.ctx); // last session → prune + sweep + compactor cleared, none leaked
+  expect(main.cleared).toHaveLength(3);
 
   disposeRoomSession(main.ctx); // idempotent: an already-dropped session clears nothing again
-  expect(main.cleared).toHaveLength(1);
-
-  // The root was evicted, so a fresh session restarts all three jobs.
+  expect(main.cleared).toHaveLength(3);
   const again = sessionCtx(dir, "main", "Main");
   roomStoreFor(again.ctx);
   expect(again.intervals).toHaveLength(3);

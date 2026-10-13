@@ -50,9 +50,19 @@ export function compactionSpendToday(): number {
   return spendToday;
 }
 
-function atCap(): boolean {
+/**
+ * T5 — the daily rate cap, read from config with the constant as fallback. `coerceConfig`
+ * accepts any finite number, so the call sites clamp to >= 1: a knob set to 0 must mean
+ * "compact ~nothing", never "unlimited" and never a crash.
+ */
+function atCap(limit: number = COMPACT_MAX_CALLS_PER_DAY): boolean {
   rollSpendDay();
-  return spendToday >= COMPACT_MAX_CALLS_PER_DAY;
+  return spendToday >= limit;
+}
+
+/** The configured daily cap, floored at 1 (see atCap). */
+function configuredCap(store: RoomStore): number {
+  return Math.max(1, Math.trunc(store.config.compactionCallsPerDay));
 }
 
 // [invented] test seam (the `__roomTest` precedent, §2.1.1 M-4): put the counter at the cap
@@ -213,10 +223,10 @@ export async function compactOnce(
   const [lo, hi] = block;
   const tree = openTreeStore(store.treePath, store.records.length);
   if (tree.getNode(lo, hi) !== null) return false; // T4 — one node per range
-  if (atCap()) return false; // T5 — the rate cap, checked before spending
+  if (atCap(configuredCap(store))) return false; // T5 — the rate cap, checked before spending
   return withWriteMutex(async () => {
     if (tree.getNode(lo, hi) !== null) return false; // re-check inside the critical section
-    if (atCap()) return false;
+    if (atCap(configuredCap(store))) return false;
     spendToday++; // one logical compaction = one call
     const summary = await summarizeBlock(ctx, store, lo, hi);
     if (summary === "") return false; // skipped; the raw log is the fallback (T2/T3)
@@ -235,7 +245,7 @@ export async function compactOnce(
 async function runJobs(store: RoomStore, ctx: ExtensionContext): Promise<void> {
   const tree = openTreeStore(store.treePath, store.records.length);
   for (const block of tree.ready(COMPACT_JOBS)) {
-    if (atCap()) return;
+    if (atCap(configuredCap(store))) return;
     await compactOnce(store, ctx, block);
   }
 }
