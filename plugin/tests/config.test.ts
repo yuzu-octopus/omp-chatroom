@@ -71,7 +71,8 @@ test("loadRoomConfig falls back to defaults for wrong-typed values", () => {
   const root = tempRoot();
   const cfg = { ...DEFAULT_ROOM_CONFIG, claimTtlMs: 1000, maxBodyBytes: 256 };
   saveRoomConfig(root, cfg);
-  // Manually inject wrong-typed values
+  // Manually inject wrong-typed values — plus the REMOVED coldTreeEnabled key, which must be
+  // ignored (old config files need no migration).
   const raw = JSON.parse(fs.readFileSync(configPath(root), "utf-8"));
   raw.claimTtlMs = "not a number";
   raw.maxBodyBytes = true;
@@ -81,7 +82,7 @@ test("loadRoomConfig falls back to defaults for wrong-typed values", () => {
   const loaded = loadRoomConfig(root);
   expect(loaded.claimTtlMs).toBe(DEFAULT_ROOM_CONFIG.claimTtlMs);
   expect(loaded.maxBodyBytes).toBe(DEFAULT_ROOM_CONFIG.maxBodyBytes);
-  expect(loaded.coldTreeEnabled).toBe(DEFAULT_ROOM_CONFIG.coldTreeEnabled);
+  expect("coldTreeEnabled" in loaded).toBe(false);
   expect(loaded.roomId).toBe(DEFAULT_ROOM_CONFIG.roomId);
 });
 

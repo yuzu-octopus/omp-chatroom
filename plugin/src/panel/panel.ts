@@ -46,8 +46,7 @@ export const PANEL_RIGHT_MIN_WIDTH = 30; // §6.2
 /** §6.8 — the slow relative-age repaint cadence. */
 export const PANEL_AGE_INTERVAL_MS = 5_000;
 
-// §6.6 — only the keys the panel actually acts on; the full key map is in `keys.ts` (`p`/`/`/Enter`
-// are mapped but the composer/filter are not built yet, so they are not advertised here).
+// §6.6 — only the keys the panel actually acts on; the full key map is in `keys.ts`.
 const HINTS = [
   "esc close",
   "tab narrow",
@@ -174,7 +173,6 @@ export class RoomPanel implements Component {
     const action = actionFor(data, {
       splitMode: this.#split.measure(this.#width).mode,
       editorEmpty: true,
-      filterOpen: false,
     });
     if (action === null) return false;
     switch (action) {
@@ -212,10 +210,8 @@ export class RoomPanel implements Component {
         if (row !== undefined) this.#options.onFocusAgent(row.holder);
         break;
       }
-      case "detail":
-      case "compose":
-      case "filter":
-        break;
+      // No default: PanelAction is total over the implemented actions, so an unhandled case is a
+      // type error, not a silent no-op. (detail/compose/filter were removed, not stubbed.)
     }
     this.#clampSelection();
     this.refresh();

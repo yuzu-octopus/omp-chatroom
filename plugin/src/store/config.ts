@@ -17,8 +17,9 @@ export interface RoomConfig {
   logMaxAgeMs: number;
   compactionCallsPerDay: number; // K4 — a RATE, not a total
   digestBudgetTokens: number; // K5 — digest only; the routing rule is excluded
-  panelKey: string;
-  coldTreeEnabled: boolean; // K6 — the runtime toggle (flag), not a manifest feature
+  // NOTE: `panelKey` and `coldTreeEnabled` were removed — neither was read anywhere (the live
+  // panel shortcut is the `room-panel-key` *flag*, not a config field). Old config files may
+  // still carry them; coerceConfig ignores unknown keys, so no migration is needed.
 }
 
 // Values are the §5.2 caps verbatim (10 / 2048 / 20 / 5 min / 1 per 2 s / 10 / 300 s / 5 s /
@@ -38,8 +39,6 @@ export const DEFAULT_ROOM_CONFIG: RoomConfig = {
   logMaxAgeMs: 604_800_000,
   compactionCallsPerDay: 20_000,
   digestBudgetTokens: 3_800,
-  panelKey: "",
-  coldTreeEnabled: true,
 };
 
 export function configPath(root: string): string {
@@ -108,9 +107,10 @@ export function resolveRoomId(root: string): string {
   return roomId;
 }
 
-// K6 — the two runtime flags. `room-panel-key` is the optional shortcut that opens the panel
-// (R4: default "" disables it); `room-cold-tree` toggles the cold-tree view. Both are read by
-// the panel at registration time.
+// K6 — the runtime flag. `room-panel-key` is the optional shortcut that opens the panel (R4:
+// default "" disables it); the panel reads it at registration time. (`room-cold-tree` was
+// removed — registered but never read. `coerceConfig` ignores unknown keys, so old config
+// files carrying `coldTreeEnabled` need no migration.)
 //
 // Configuration lives in `local://room/config.json` (see `loadRoomConfig`) and is editable via
 // `/room config`.
@@ -119,11 +119,6 @@ export function registerRoomFlags(pi: ExtensionAPI): void {
     description: "Keyboard shortcut that opens the agent chatroom panel (empty = disabled)",
     type: "string",
     default: "",
-  });
-  pi.registerFlag("room-cold-tree", {
-    description: "Enable the cold-tree view in the chatroom panel",
-    type: "boolean",
-    default: true,
   });
 }
 

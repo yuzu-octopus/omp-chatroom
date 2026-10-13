@@ -289,7 +289,7 @@ test("a throw in the first refresh releases the age timer and both listeners", (
 // --- 6. key map -----------------------------------------------------------
 
 test("key map resolves every documented key and an unknown key is a no-op", () => {
-  const narrow = { splitMode: "narrow" as const, editorEmpty: true, filterOpen: false };
+  const narrow = { splitMode: "narrow" as const, editorEmpty: true };
   const documented: ReadonlyArray<readonly [string, PanelAction]> = [
     ["\x1b", "close"],
     ["\t", "toggle-narrow"],
@@ -299,32 +299,29 @@ test("key map resolves every documented key and an unknown key is a no-op", () =
     ["\x1b[A", "up"],
     ["g", "top"],
     ["G", "bottom"],
-    ["\r", "detail"],
     ["o", "focus-agent"],
     ["r", "release-claim"],
-    ["p", "compose"],
-    ["/", "filter"],
     ["1", "focus-chat"],
     ["2", "focus-board"],
   ];
   for (const [key, action] of documented) expect(actionFor(key, narrow)).toBe(action);
 
   // The table is exactly the documented key set.
-  expect(Object.keys(PANEL_KEY_MAP).length).toBe(15);
+  expect(Object.keys(PANEL_KEY_MAP).length).toBe(12);
 
-  // unknown / empty input is a no-op
+  // unknown / empty input is a no-op — including the unbound ex-detail/compose/filter keys.
   expect(actionFor("z", narrow)).toBeNull();
   expect(actionFor("", narrow)).toBeNull();
+  expect(actionFor("\r", narrow)).toBeNull();
+  expect(actionFor("p", narrow)).toBeNull();
+  expect(actionFor("/", narrow)).toBeNull();
 
   // Tab only collapses when the split is narrow
-  expect(actionFor("\t", { splitMode: "split", editorEmpty: true, filterOpen: false })).toBeNull();
+  expect(actionFor("\t", { splitMode: "split", editorEmpty: true })).toBeNull();
 
   // "once the reader starts typing, the editor owns every key" (§6.7)
   expect(actionFor("j", { ...narrow, editorEmpty: false })).toBeNull();
   expect(actionFor("\x1b", { ...narrow, editorEmpty: false })).toBeNull();
-
-  // the filter input owns keys while it is open
-  expect(actionFor("j", { ...narrow, filterOpen: true })).toBeNull();
 });
 
 // --- chrome rows ----------------------------------------------------------

@@ -1,18 +1,16 @@
 import { parseKey } from "@oh-my-pi/pi-tui";
 
 export type PanelAction =
-  // §6.6 — verbatim key list
+  // §6.6 — only the actions the panel implements. `detail`/`compose`/`filter` were bound but
+  // never built (their dispatch arms were no-ops); unbound rather than advertised-and-dead.
   | "close"
   | "toggle-narrow"
   | "up"
   | "down"
   | "top"
   | "bottom"
-  | "detail"
   | "focus-agent"
   | "release-claim"
-  | "compose"
-  | "filter"
   | "focus-chat"
   | "focus-board";
 
@@ -26,33 +24,27 @@ export const PANEL_KEY_MAP: Readonly<Record<string, PanelAction>> = {
   up: "up",
   g: "top",
   G: "bottom",
-  enter: "detail",
   o: "focus-agent",
   r: "release-claim",
-  p: "compose",
-  "/": "filter",
   "1": "focus-chat",
   "2": "focus-board",
 };
-
 /** What the panel must know before a key can be mapped (§6.6 + §6.7). */
 export interface PanelKeyState {
   splitMode: "split" | "narrow";
   /** §6.7 — "once the reader starts typing, the editor owns every key". */
   editorEmpty: boolean;
-  /** While the filter input is open it owns every key. */
-  filterOpen: boolean;
 }
 
 /**
  * §6.6 — resolve a raw terminal chunk to an action, or `null` when the key is not bound.
  *
- * A `null` is the no-op: an unknown key, an empty chunk, a keystroke the composer/filter owns, or
- * `Tab` when the split is not collapsed (the narrow toggle only exists below the threshold).
+ * A `null` is the no-op: an unknown key, an empty chunk, a keystroke the editor owns, or `Tab`
+ * when the split is not collapsed (the narrow toggle only exists below the threshold).
  */
 export function actionFor(data: string, state: PanelKeyState): PanelAction | null {
   if (data === "") return null;
-  if (!state.editorEmpty || state.filterOpen) return null;
+  if (!state.editorEmpty) return null;
   const action = PANEL_KEY_MAP[parseKey(data) ?? ""];
   if (action === undefined) return null;
   if (action === "toggle-narrow" && state.splitMode !== "narrow") return null;

@@ -83,7 +83,7 @@ test("/room claim with a numeric TTL grants with that lease (positive control)",
   expect(notified.some((line) => line.includes("granted"))).toBe(true);
 });
 
-test("/room config tells the truth: governor knobs live, only two inert", async () => {
+test("/room config shows only live knobs — no inert line, no reserved flags", async () => {
   const notified: string[] = [];
   const handler = captureHandler(notified);
   const root = tempRoot();
@@ -93,16 +93,12 @@ test("/room config tells the truth: governor knobs live, only two inert", async 
   // Live knobs appear on live lines.
   expect(text).toContain("live (governor): maxT1PerTurn=");
   expect(text).toContain("live (retention/sweep): logMaxRecords=");
-  // The stale banner is gone.
-  expect(text).not.toContain("inert under Option A");
-  expect(text).not.toContain("both reserved, no effect yet");
-  // The inert line names exactly the two genuinely unread knobs.
-  const inert = notified.find((line) => line.includes("inert (present in the file"));
-  expect(inert).toBeDefined();
-  expect(inert).toContain("coldTreeEnabled=");
-  expect(inert).toContain("panelKey=");
-  expect(inert).not.toContain("maxT1PerTurn=");
-  expect(inert).not.toContain("compactionCallsPerDay=");
+  // The removed surfaces are gone entirely.
+  expect(text).not.toContain("inert");
+  expect(text).not.toContain("coldTreeEnabled");
+  expect(text).not.toContain("panelKey");
+  expect(text).not.toContain("room-cold-tree");
+  expect(text).toContain('--room-panel-key=""');
 });
 
 // --- plan 007 — the command path runs the delivery pass ----------------------

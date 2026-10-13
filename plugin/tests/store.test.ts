@@ -358,7 +358,7 @@ test("config: defaults when absent, save/load round-trip, and resolveRoomId pers
   expect(resolveRoomId(root)).toBe("custom-room");
 });
 
-test("registerRoomFlags registers room-panel-key (string) and room-cold-tree (boolean)", () => {
+test("registerRoomFlags registers only room-panel-key (room-cold-tree was removed)", () => {
   const flags = new Map<string, { type: string; default?: unknown }>();
   const pi = {
     registerFlag: (
@@ -371,11 +371,9 @@ test("registerRoomFlags registers room-panel-key (string) and room-cold-tree (bo
   } as unknown as ExtensionAPI;
 
   registerRoomFlags(pi);
-  expect([...flags.keys()].sort()).toEqual(["room-cold-tree", "room-panel-key"]);
+  expect([...flags.keys()].sort()).toEqual(["room-panel-key"]);
   expect(flags.get("room-panel-key")?.type).toBe("string");
   expect(flags.get("room-panel-key")?.default).toBe("");
-  expect(flags.get("room-cold-tree")?.type).toBe("boolean");
-  expect(flags.get("room-cold-tree")?.default).toBe(true);
 
   const root = tempRoot();
   saveRoomConfig(root, { ...DEFAULT_ROOM_CONFIG, claimTtlMs: 120_000 });
