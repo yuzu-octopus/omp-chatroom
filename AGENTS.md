@@ -126,9 +126,11 @@ Detailed conventions and the not-covered list: `docs/research/omp-agent-notes/te
 ## Runtime/Tooling Preferences
 
 - **Bun only** — `bun` 1.4.2. Package manager, runner, and runtime. No `node`, `npm`, or `npx`.
-- **Host: omp 18.8.7.** The plugin pins it exactly in both `peerDependencies` and
+- **Host: omp 18.10.3.** The plugin pins it exactly in both `peerDependencies` and
   `devDependencies` because ten subpath imports are wildcard-only, not public API. `tests/drift.test.ts`
   asserts the installed host equals `HOST_VERSION_PIN` and ESM-imports every deep specifier.
+  Whoever bumps the global omp must re-pin (`package.json` + `bun.lock` + `HOST_VERSION_PIN`) —
+  the host moves fast and the drift gate only guards the pinned version.
 - **No hot reload.** Extension factories bind once per session tree; source edits need a new session.
 - **Python via `uv`**, never `python3`/`pip` (global agent rule).
 - Biome config: `indentStyle: space`, `indentWidth: 2`, `lineWidth: 100`,
