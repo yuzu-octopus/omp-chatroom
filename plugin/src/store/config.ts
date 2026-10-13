@@ -65,7 +65,21 @@ function coerceConfig(raw: unknown): RoomConfig {
       target[key] = value;
     }
   }
+  // roomId becomes a filename (logPathFor), so a type check is not enough: an id containing
+  // `/`, `\` or `..` would escape the room directory. Fall back to "mint from the root",
+  // exactly like a wrong-typed value falls back to its default.
+  if (config.roomId !== "" && !isValidRoomId(config.roomId)) config.roomId = "";
   return config;
+}
+
+/**
+ * The roomId alphabet: what `roomIdFor` mints (`r` + 16 hex) plus the documented custom form
+ * (`"custom-room"`). Nothing containing a path separator, so a config-provided id can never
+ * escape `${root}/room/` when it becomes `${roomId}.jsonl`.
+ */
+const ROOM_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+export function isValidRoomId(value: string): boolean {
+  return ROOM_ID_RE.test(value);
 }
 
 export function loadRoomConfig(root: string): RoomConfig {
@@ -86,7 +100,9 @@ export function saveRoomConfig(root: string, config: RoomConfig): void {
 export function resolveRoomId(root: string): string {
   // [invented]
   const config = loadRoomConfig(root);
-  if (config.roomId !== "") return config.roomId;
+  // Defense in depth for callers that construct a config without going through coerceConfig:
+  // only a valid id wins over the minted one.
+  if (config.roomId !== "" && isValidRoomId(config.roomId)) return config.roomId;
   const roomId = roomIdFor(root);
   saveRoomConfig(root, { ...config, roomId }); // persist once; every later session reads it back
   return roomId;

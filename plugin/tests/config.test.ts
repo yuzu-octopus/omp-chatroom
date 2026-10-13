@@ -1,10 +1,11 @@
 import { afterAll, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { roomIdFor } from "../src/ids";
+import { logPathFor, roomIdFor } from "../src/ids";
 import {
   configPath,
   DEFAULT_ROOM_CONFIG,
+  isValidRoomId,
   loadRoomConfig,
   resolveRoomId,
   saveRoomConfig,
@@ -100,4 +101,31 @@ test("resolveRoomId respects an explicit roomId override", () => {
   const root = tempRoot();
   saveRoomConfig(root, { ...DEFAULT_ROOM_CONFIG, roomId: "custom-room" });
   expect(resolveRoomId(root)).toBe("custom-room");
+});
+
+// --- plan 003 — roomId validation -----------------------------------------
+
+test("a stored roomId with path separators resolves to the minted id, inside the root", () => {
+  const root = tempRoot();
+  saveRoomConfig(root, { ...DEFAULT_ROOM_CONFIG, roomId: "../../evil" });
+  const id = resolveRoomId(root);
+  expect(id).toBe(roomIdFor(root));
+  expect(isValidRoomId(id)).toBe(true);
+  // The resolved log path stays under the room directory.
+  expect(logPathFor(root, id).startsWith(`${root}/room/`)).toBe(true);
+});
+
+test("isValidRoomId admits minted and custom ids, rejects separators and empties", () => {
+  expect(isValidRoomId(roomIdFor("/tmp/x"))).toBe(true);
+  expect(isValidRoomId("custom-room")).toBe(true);
+  expect(isValidRoomId("a/b")).toBe(false);
+  expect(isValidRoomId("..\\x")).toBe(false);
+  expect(isValidRoomId("")).toBe(false);
+  expect(isValidRoomId("x".repeat(65))).toBe(false);
+});
+
+test("loadRoomConfig coerces an invalid roomId back to mint-from-root", () => {
+  const root = tempRoot();
+  saveRoomConfig(root, { ...DEFAULT_ROOM_CONFIG, roomId: "a/b" });
+  expect(loadRoomConfig(root).roomId).toBe("");
 });
