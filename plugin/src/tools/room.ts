@@ -607,6 +607,11 @@ export function registerRoomTool(pi: ExtensionAPI): void {
           const { head, handle } = truncateOversized(body, config.maxT1Tokens);
           const storedBody = handle !== "" ? `${head}${handle}` : head;
           const viewer = viewerFor(store, agentId);
+          // §5.1 N1 — replying subscribes the poster to the thread: resolve the parent's root
+          // (or the parent itself when it starts the thread) and stamp it on the new record. An
+          // unknown replyTo is ignored, never a failure — the reply still posts.
+          const parent = p.replyTo ? store.byId.get(p.replyTo) : undefined;
+          const threadRoot = parent?.kind === "msg" ? (parent.threadRoot ?? parent.id) : undefined;
           const record = store.append({
             kind: "msg",
             from: agentId, // S4 — `from` is always the authenticated caller id
@@ -614,10 +619,12 @@ export function registerRoomTool(pi: ExtensionAPI): void {
             body: storedBody,
             ...(p.mention ? { mention: p.mention } : {}),
             ...(p.replyTo ? { replyTo: p.replyTo } : {}),
+            ...(threadRoot ? { threadRoot } : {}),
             ...(p.performative ? { performative: p.performative } : {}),
           });
           viewer.lastMessageId = record.id;
           viewer.topics.add(topic);
+          if (threadRoot) viewer.threadRoots.add(threadRoot);
           const failure = await notifyRecipients(pi, ctx, store, [record], agentId);
           return okWithDelivery(
             {

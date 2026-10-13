@@ -1060,3 +1060,41 @@ test("board reports unknown (not running) for members absent from the registry",
   };
   expect(board.roster.find((m) => m.agentId === "AgentA")?.status).toBe("unknown");
 });
+
+test("post with replyTo stamps threadRoot and subscribes the poster (§5.1 N1)", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "room-tool-"));
+  const ctxA = fakeCtx(root, "AgentA");
+  const store = roomStoreFor(ctxA);
+  const first = await invokeRoom(ctxA, { op: "post", topic: "t", body: "root message" });
+  const rootId = (first.details as unknown as { id: string }).id;
+  // B replies without following the topic: the reply carries the root and B is subscribed.
+  const ctxB = fakeCtx(root, "AgentB");
+  const reply = await invokeRoom(ctxB, { op: "post", topic: "t", body: "reply", replyTo: rootId });
+  expect(reply.details).toMatchObject({ ok: true, op: "post" });
+  const replyRecord = store.byId.get((reply.details as unknown as { id: string }).id);
+  expect(replyRecord?.kind).toBe("msg");
+  if (replyRecord?.kind !== "msg") throw new Error("expected msg");
+  expect(replyRecord.threadRoot).toBe(rootId);
+  expect(store.members.get("AgentB")?.threadRoots.has(rootId)).toBe(true);
+  // A nested reply resolves the ROOT, not the parent.
+  const nested = await invokeRoom(ctxA, {
+    op: "post",
+    topic: "t",
+    body: "nested",
+    replyTo: replyRecord.id,
+  });
+  const nestedRecord = store.byId.get((nested.details as unknown as { id: string }).id);
+  if (nestedRecord?.kind !== "msg") throw new Error("expected msg");
+  expect(nestedRecord.threadRoot).toBe(rootId);
+});
+
+test("post with an unknown replyTo still posts, with no threadRoot", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "room-tool-"));
+  const ctx = fakeCtx(root, "AgentA");
+  const store = roomStoreFor(ctx);
+  const res = await invokeRoom(ctx, { op: "post", topic: "t", body: "orphan", replyTo: "nope" });
+  expect(res.details).toMatchObject({ ok: true, op: "post" });
+  const record = store.byId.get((res.details as unknown as { id: string }).id);
+  if (record?.kind !== "msg") throw new Error("expected msg");
+  expect(record.threadRoot).toBeUndefined();
+});
