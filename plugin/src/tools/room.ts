@@ -301,18 +301,21 @@ function t1Admitted(
 }
 
 /** A board-delta card, the same shell `deliver` uses, for the T0 batch and the T2 digest. */
-function notice(
+async function notice(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
   target: string,
   content: string,
   deliverAs: "steer" | "aside",
-): void {
+): Promise<void> {
   // K22/S1 — the digest line carries room-authored topic names; escape before it reaches the model.
   const payload = { customType: "room:board-delta", content: safe(content), display: true };
   const session = AgentRegistry.global().get(target)?.session;
   if (session) {
-    void session.sendCustomMessage(payload, { deliverAs });
+    // Awaited: the callers already `await notice(...)`, and a floating send would escape
+    // notifyRecipients' per-recipient try/catch as an unhandled rejection. A throw here lands
+    // in the caller's `failure` note and surfaces as deliveryError, like deliver() failures.
+    await session.sendCustomMessage(payload, { deliverAs });
     return;
   }
   if (target === ctx.agent.id) pi.sendMessage(payload, { deliverAs });

@@ -826,3 +826,19 @@ test("selectT1 with explicit caps injects at most maxT1PerTurn records", () => {
   const { injected } = selectT1(store, v, pending, { caps: { maxT1PerTurn: 2 } });
   expect(injected.length).toBe(2);
 });
+
+test("a failing T0-batch send surfaces as deliveryError, never an unhandled rejection", async () => {
+  const root = tempRoot();
+  const b = `attn-noticefail-${Date.now()}`;
+  registerFailingSession(b);
+  const h = roomHarness(root, "A");
+  // 51 mentions already pending for B: the next mention pushes past the T0 ceiling, so the ONLY
+  // send on the delivery path is the batched notice(steer) — deliver() is never called. A floating
+  // send here would escape as an unhandled rejection and leave deliveryError unset.
+  for (let i = 0; i < 51; i++) {
+    h.store.append({ kind: "msg", from: "X", topic: "build", body: `ping ${i}`, mention: [b] });
+  }
+  const res = await h.execute({ op: "post", topic: "build", body: "over to you", mention: [b] });
+  expect(res.details).toMatchObject({ ok: true, op: "post", deliveryError: "transport down" });
+  expect(h.store.records.some((r) => r.kind === "msg" && r.body === "over to you")).toBe(true);
+});
