@@ -1,4 +1,5 @@
 import { estimateTokens } from "../onboarding/digest";
+import { safeRoomText } from "../onboarding/escape";
 import type { MemberState, RoomStore } from "../store/room-store"; // MemberState is owned here (K11)
 import type { RoomRecord } from "../store/schema";
 import { roomBodyOf } from "./delivery";
@@ -217,7 +218,11 @@ export function coalescePending(
   if (t2.length < caps.coalesceCount && lagMs < caps.coalesceMs) return null;
   const topics = new Set<string>();
   for (const r of t2) if (r.kind === "msg" || r.kind === "note") topics.add(r.topic);
-  const where = topics.size > 0 ? ` in ${[...topics].slice(0, 3).join(", ")}` : "";
+  // K22/S1 — topic names are room-authored and this line reaches the model on TWO paths (deliver's
+  // `extra` and notice's content), only one of which escapes. Escape at production; safeRoomText is
+  // idempotent so the notice path's blanket safe() is harmless, not corrupting.
+  const where =
+    topics.size > 0 ? ` in ${[...topics].slice(0, 3).map(safeRoomText).join(", ")}` : "";
   return `room ⟵ ${t2.length} new message(s)${where} — read with room{op:"read", since:${cursor}}`;
 }
 
