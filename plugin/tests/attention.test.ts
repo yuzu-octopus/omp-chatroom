@@ -242,7 +242,7 @@ test("classify(): the four ambiguous §5.1 rows", () => {
   expect(classify(msg(2, { topic: "build" }), viewer({ topics: new Set(["build"]) }))).toBe("T1");
   // Topic you do not follow, no claim, no post → T2.
   expect(classify(msg(3, { topic: "build" }), viewer())).toBe("T2");
-  // Claim expired > 1 h ago (the window has already pruned `heldTopics`), topic not followed → T2.
+  // Claim released or expired (the projection prunes `heldTopics` on release), topic not followed → T2.
   expect(classify(msg(4, { topic: "build" }), viewer({ heldTopics: new Set() }))).toBe("T2");
   // Waiting on a resource you do not hold → T1.
   expect(classify(release(5, { prevHolder: "Z" }), viewer({ waitedResource: "build/step" }))).toBe(

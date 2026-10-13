@@ -966,3 +966,56 @@ test("the tool description carries the vocabulary an agent would actually ask fo
   expect(ROOM_DESCRIPTION).toContain("agent://<id>");
   expect(ROOM_DESCRIPTION).toContain("polling");
 });
+
+// --- plan 002 — heldTopics liveness ------------------------------------------
+
+test("release prunes the topic from heldTopics when it was the holder's last claim there", () => {
+  const s = newStore();
+  s.members.set("A", {
+    agentId: "A",
+    joinedAtSeq: 0,
+    topics: new Set(),
+    muted: new Set(),
+    threadRoots: new Set(),
+    heldTopics: new Set(),
+  });
+  expect(grant(s, "build/step", "A", 60_000).ok).toBe(true);
+  expect(s.members.get("A")?.heldTopics.has("build")).toBe(true);
+  expect(release(s, "build/step", "A", "released")).toBe(true);
+  expect(s.members.get("A")?.heldTopics.has("build")).toBe(false);
+});
+
+test("release keeps the topic while the holder still holds another claim under it", () => {
+  const s = newStore();
+  s.members.set("A", {
+    agentId: "A",
+    joinedAtSeq: 0,
+    topics: new Set(),
+    muted: new Set(),
+    threadRoots: new Set(),
+    heldTopics: new Set(),
+  });
+  expect(grant(s, "build/a", "A", 60_000).ok).toBe(true);
+  expect(grant(s, "build/b", "A", 60_000).ok).toBe(true);
+  expect(release(s, "build/a", "A", "released")).toBe(true);
+  expect(s.members.get("A")?.heldTopics.has("build")).toBe(true);
+  expect(release(s, "build/b", "A", "released")).toBe(true);
+  expect(s.members.get("A")?.heldTopics.has("build")).toBe(false);
+});
+
+test("expireStale prunes heldTopics for the expired holder", () => {
+  const s = newStore();
+  s.members.set("A", {
+    agentId: "A",
+    joinedAtSeq: 0,
+    topics: new Set(),
+    muted: new Set(),
+    threadRoots: new Set(),
+    heldTopics: new Set(),
+  });
+  expect(grant(s, "build/step", "A", 1_000).ok).toBe(true);
+  expect(s.members.get("A")?.heldTopics.has("build")).toBe(true);
+  const dropped = expireStale(s, Date.now() + 60_000);
+  expect(dropped.length).toBe(1);
+  expect(s.members.get("A")?.heldTopics.has("build")).toBe(false);
+});

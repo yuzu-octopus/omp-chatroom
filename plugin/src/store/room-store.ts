@@ -17,7 +17,7 @@ export interface MemberState {
   topics: Set<string>; // followed topics
   muted: Set<string>; // muted topics; the sentinel "" means whole-room mute (§5.2)
   threadRoots: Set<string>; // thread roots this agent posted in (§5.1 N1)
-  heldTopics: Set<string>; // topics with a claim held within 1 h (§5.1 N1)
+  heldTopics: Set<string>; // topics on which this agent holds a live claim (§5.1 N1)
   lastMessageId?: string; // the agent's most recent msg id (replyTo → T0)
   waitedResource?: string; // active wait_for_claim resource (§5.1 M-8 → T1)
 }
@@ -97,9 +97,35 @@ function project(store: RoomStore, record: RoomRecord): void {
       acquiredAt: record.ts,
       seq: record.seq,
     });
+    // Plan 002 — the mirror of the release prune: every grant path (direct claim AND waiter
+    // promotion via resolveWaiters) funnels through here, so the holder's topics stay correct
+    // no matter which path granted the lease. Idempotent: Set.add on re-grant is a no-op.
+    store.members.get(record.from)?.heldTopics.add(topicOf(record.resource));
   } else if (record.kind === "release") {
     store.claims.delete(record.resource);
+    // Plan 002 — prune AFTER the delete, so the liveness check sees the post-release state.
+    // Every claim end (release, expiry, reclaim) funnels through a `release` record, so one
+    // hook here covers all three paths with no call-site changes.
+    pruneHeldTopic(store, record.prevHolder, topicOf(record.resource));
   }
+}
+
+/** `"<topic>/<key>"` → `"<topic>"` (same split as `topicOf` in attention/tiers.ts). */
+function topicOf(resource: string): string {
+  const at = resource.indexOf("/");
+  return at < 0 ? resource : resource.slice(0, at);
+}
+
+/**
+ * Drop `topic` from `holder`'s `heldTopics` iff they hold no other live claim under it.
+ * Lives here (not claims.ts) because claims.ts imports RoomStore type-only to break the
+ * runtime cycle — and because the projection is the one funnel every release passes through.
+ */
+export function pruneHeldTopic(store: RoomStore, holder: string, topic: string): void {
+  for (const claim of store.claims.values()) {
+    if (claim.holder === holder && claim.resource.startsWith(`${topic}/`)) return;
+  }
+  store.members.get(holder)?.heldTopics.delete(topic);
 }
 
 function createStore(root: string, roomId: string): RoomStore {
