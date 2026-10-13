@@ -6,6 +6,7 @@ import type { Api, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import { createAssistantMessageEventStream, registerCustomApi } from "@oh-my-pi/pi-ai";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { resolveLocalRoot } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
+import { roomIdFor } from "../src/ids";
 import {
   __compactTest,
   COMPACT_MAX_CALLS_PER_DAY,
@@ -17,12 +18,14 @@ import {
   summarizeBlock,
   withWriteMutex,
 } from "../src/store/compactor";
-import { DEFAULT_ROOM_CONFIG } from "../src/store/config";
+import { DEFAULT_ROOM_CONFIG, saveRoomConfig } from "../src/store/config";
 import {
   disposeRoomSession,
+  enforceRetention,
   type RoomStore,
   resetRoomStores,
   roomStoreFor,
+  storeFor,
 } from "../src/store/room-store";
 import type { RoomRecord } from "../src/store/schema";
 import {
@@ -783,5 +786,32 @@ test("F5: the view never contains a block covering exactly one message", () => {
     const last = tiling[tiling.length - 1][1];
     expect(last).toBeGreaterThanOrEqual(T);
     expect(last).toBeLessThanOrEqual(T + 1);
+  }
+});
+
+// --- plan 008 — retention/tree addressing skew (CONFIRMED defect, pinned) ----
+
+test("plan-008: after retention prunes the head, tree ranges still address the right records", () => {
+  // FAILING TEST — pins the confirmed skew for the fix plan. After enforceRetention drops the
+  // head, store.records[i] is seq K+i+1 while the tree files still address position i as seq i:
+  // getNode(0,2) returns a summary of pruned records, and zoom's store.records[seq] resolves the
+  // wrong record. Probe evidence: /tmp/skew-probe.ts output in the plan-008 report.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "room-skew-"));
+  TMP.push(root);
+  saveRoomConfig(root, { ...DEFAULT_ROOM_CONFIG, logMaxRecords: 100 });
+  const store = storeFor(root, roomIdFor(root));
+  try {
+    for (let i = 0; i < 150; i++) {
+      store.append({ kind: "msg", from: "A", topic: "t", body: `b${i}` });
+    }
+    const pre = openTreeStore(store.treePath, store.records.length);
+    expect(pre.putNode(0, 2, "summary of records 0-1")).toBe(true);
+    enforceRetention(store, Date.now());
+    // The tree range [0,2) must describe the records now at index [0,2) — seqs 51,52 — not the
+    // pruned ones. Today it returns the stale pre-prune summary.
+    const post = openTreeStore(store.treePath, store.records.length);
+    expect(post.getNode(0, 2)).toBeNull();
+  } finally {
+    resetRoomStores();
   }
 });
