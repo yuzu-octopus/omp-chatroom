@@ -789,13 +789,12 @@ test("F5: the view never contains a block covering exactly one message", () => {
   }
 });
 
-// --- plan 008 — retention/tree addressing skew (CONFIRMED defect, pinned) ----
+// --- retention invalidates the tree (plan 008 fix) ---------------------------
 
-test("plan-008: after retention prunes the head, tree ranges still address the right records", () => {
-  // FAILING TEST — pins the confirmed skew for the fix plan. After enforceRetention drops the
-  // head, store.records[i] is seq K+i+1 while the tree files still address position i as seq i:
-  // getNode(0,2) returns a summary of pruned records, and zoom's store.records[seq] resolves the
-  // wrong record. Probe evidence: /tmp/skew-probe.ts output in the plan-008 report.
+test("retention prunes the head AND invalidates the tree built over it", () => {
+  // Tree positions are dense indices into store.records: after enforceRetention drops the head,
+  // a node built over positions [0,2) would keep describing the pruned records. Retention
+  // invalidates the tree instead — getNode returns null and the compactor rebuilds lazily.
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "room-skew-"));
   TMP.push(root);
   saveRoomConfig(root, { ...DEFAULT_ROOM_CONFIG, logMaxRecords: 100 });
@@ -807,10 +806,11 @@ test("plan-008: after retention prunes the head, tree ranges still address the r
     const pre = openTreeStore(store.treePath, store.records.length);
     expect(pre.putNode(0, 2, "summary of records 0-1")).toBe(true);
     enforceRetention(store, Date.now());
-    // The tree range [0,2) must describe the records now at index [0,2) — seqs 51,52 — not the
-    // pruned ones. Today it returns the stale pre-prune summary.
+    // The stale summary is gone; the range rebuilds against the new dense space.
     const post = openTreeStore(store.treePath, store.records.length);
     expect(post.getNode(0, 2)).toBeNull();
+    expect(post.putNode(0, 2, "summary of seqs 51-52")).toBe(true);
+    expect(post.getNode(0, 2)).toBe("summary of seqs 51-52");
   } finally {
     resetRoomStores();
   }

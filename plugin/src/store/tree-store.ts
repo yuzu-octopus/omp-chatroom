@@ -323,6 +323,28 @@ export function loadView(treePath: string, T: number, budget: number): Array<[nu
 }
 
 /**
+ * Drop every persisted summary and the saved view, and reset the in-memory ready queue.
+ * Called by retention AFTER the head is pruned: tree positions are dense indices into
+ * `store.records`, so a prune shifts every surviving record under its summary — a node built
+ * over positions [0,2) would otherwise keep describing the pruned records. The compactor
+ * rebuilds lazily from the new dense space; reads fall back to raw records meanwhile (T2/T3).
+ * Never throws: a cache that can break pruning is worse than a stale one.
+ */
+export function invalidateTree(treePath: string): void {
+  QUEUES.delete(treePath);
+  try {
+    fs.rmSync(treePath, { recursive: true, force: true });
+  } catch {
+    // Best-effort: the level files are a rebuildable cache.
+  }
+  try {
+    fs.rmSync(viewPath(treePath), { force: true });
+  } catch {
+    // Best-effort: loadView recomputes a missing view.
+  }
+}
+
+/**
  * `openTreeStore(treePath, logLength)` — a binary summary tree over the log.
  *
  * Layout (REPORT-v3 §1): one file per level, named by its block size. Block `[lo,hi)` at level

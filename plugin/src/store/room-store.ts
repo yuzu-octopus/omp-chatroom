@@ -8,6 +8,7 @@ import { startCompactor, stopCompactor } from "./compactor";
 import { loadRoomConfig, type RoomConfig, resolveRoomId } from "./config";
 import { appendLine, closeRoomLog, openRoomLog, replay } from "./log";
 import type { RoomRecord, RoomRecordDraft } from "./schema";
+import { invalidateTree } from "./tree-store";
 
 // K11 — MemberState is declared ONCE, here (the store owns it); imported by tiers, governor,
 // digest, chat-pane, delivery.
@@ -298,6 +299,10 @@ export function enforceRetention(store: RoomStore, now: number): RoomRecord | nu
     dropped++;
   }
   if (dropped === 0) return null;
+  // Tree positions are dense indices into `store.records`: the prune just shifted every survivor
+  // under its summary, so the persisted tree is stale by construction. Invalidate it — the
+  // compactor rebuilds lazily, and reads fall back to raw records meanwhile (T2/T3).
+  invalidateTree(store.treePath);
   // The drop is itself a record — the file is never truncated, only the projection (K19).
   return noteGap(store, dropped, "retention");
 }
