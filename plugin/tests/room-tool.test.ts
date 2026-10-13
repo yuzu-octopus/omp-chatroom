@@ -1019,3 +1019,29 @@ test("expireStale prunes heldTopics for the expired holder", () => {
   expect(dropped.length).toBe(1);
   expect(s.members.get("A")?.heldTopics.has("build")).toBe(false);
 });
+
+// --- plan 009 — read ops must not mint membership ---------------------------
+
+test("board by a never-joined agent does not add them to the roster", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "room-tool-"));
+  const store = roomStoreFor(fakeCtx(root, "AgentA"));
+  expect(store.members.has("Ghost")).toBe(false);
+  await invokeRoom(fakeCtx(root, "Ghost"), { op: "board" });
+  expect(store.members.has("Ghost")).toBe(false);
+});
+
+test("read by a never-joined agent returns records without minting membership", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "room-tool-"));
+  const store = roomStoreFor(fakeCtx(root, "AgentA"));
+  store.append({ kind: "msg", from: "AgentA", topic: "t", body: "hello" });
+  const res = await invokeRoom(fakeCtx(root, "Ghost"), { op: "read" });
+  expect((res.details?.records as unknown[]).length).toBeGreaterThan(0);
+  expect(store.members.has("Ghost")).toBe(false);
+});
+
+test("post by a never-joined agent DOES create the member (writers keep ensure)", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "room-tool-"));
+  const store = roomStoreFor(fakeCtx(root, "AgentA"));
+  await invokeRoom(fakeCtx(root, "Newcomer"), { op: "post", topic: "t", body: "hi" });
+  expect(store.members.has("Newcomer")).toBe(true);
+});
