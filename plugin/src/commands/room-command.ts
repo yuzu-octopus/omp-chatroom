@@ -15,6 +15,7 @@ import {
 } from "../store/config";
 import { cursorFor, initCursor, lagFor } from "../store/cursors";
 import { type RoomStore, roomStoreFor } from "../store/room-store";
+import { appendedSince, notifyRecipients } from "../tools/room";
 
 export const ROOM_COMMAND_NAME = "room";
 
@@ -240,6 +241,7 @@ export function registerRoomCommand(pi: ExtensionAPI): void {
             CLAIM_TTL_MAX_MS,
             Math.max(CLAIM_TTL_MIN_MS, Math.trunc(requested)),
           );
+          const before = store.seq;
           const result = grant(store, resource, agentId, ttlMs);
           if (!result.ok) {
             report(
@@ -250,11 +252,21 @@ export function registerRoomCommand(pi: ExtensionAPI): void {
             );
             return;
           }
+          // Same delivery pass as the tool path (room.ts claim): waiters wake, recipients notify.
+          store.members.get(agentId)?.heldTopics.add(topic);
+          const failure = await notifyRecipients(
+            pi,
+            ctx,
+            store,
+            appendedSince(store, before),
+            agentId,
+          );
           report(
             ctx,
             pi,
             `room claim ${safe(resource)} → granted, expires in ${Math.round(ttlMs / 1000)}s`,
           );
+          if (failure !== undefined) report(ctx, pi, `delivery: ${safe(failure)}`, "warning");
           return;
         }
 
@@ -270,10 +282,19 @@ export function registerRoomCommand(pi: ExtensionAPI): void {
             report(ctx, pi, `room release ${safe(resource)} → unknown resource`, "warning");
             return;
           }
+          const before = store.seq;
           if (held.holder !== agentId) {
             // §4.1 — a reclaim against a stale claim is explicit, never silent.
             if (reclaimIfStale(store, resource, Date.now())) {
+              const failure = await notifyRecipients(
+                pi,
+                ctx,
+                store,
+                appendedSince(store, before),
+                agentId,
+              );
               report(ctx, pi, `room release ${safe(resource)} → reclaimed (was stale)`);
+              if (failure !== undefined) report(ctx, pi, `delivery: ${safe(failure)}`, "warning");
               return;
             }
             report(
@@ -285,7 +306,15 @@ export function registerRoomCommand(pi: ExtensionAPI): void {
             return;
           }
           release(store, resource, agentId, "released");
+          const failure = await notifyRecipients(
+            pi,
+            ctx,
+            store,
+            appendedSince(store, before),
+            agentId,
+          );
           report(ctx, pi, `room release ${safe(resource)} → released`);
+          if (failure !== undefined) report(ctx, pi, `delivery: ${safe(failure)}`, "warning");
           return;
         }
 
@@ -309,7 +338,9 @@ export function registerRoomCommand(pi: ExtensionAPI): void {
             member.lastMessageId = record.id;
             member.topics.add(topic);
           }
+          const failure = await notifyRecipients(pi, ctx, store, [record], agentId);
           report(ctx, pi, `room post → ${safe(topic)} · seq ${record.seq}`);
+          if (failure !== undefined) report(ctx, pi, `delivery: ${safe(failure)}`, "warning");
           return;
         }
 
