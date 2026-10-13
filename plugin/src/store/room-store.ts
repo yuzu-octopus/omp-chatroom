@@ -2,7 +2,7 @@ import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 
 import { noteGap } from "../attention/governor";
 import { globalMap } from "../globals";
-import { logPathFor, newMessageId } from "../ids";
+import { logPathFor, newMessageId, topicOf } from "../ids";
 import { type ClaimState, expireStale, hydrateClaims } from "./claims";
 import { startCompactor, stopCompactor } from "./compactor";
 import { loadRoomConfig, type RoomConfig, resolveRoomId } from "./config";
@@ -109,12 +109,6 @@ function project(store: RoomStore, record: RoomRecord): void {
     // hook here covers all three paths with no call-site changes.
     pruneHeldTopic(store, record.prevHolder, topicOf(record.resource));
   }
-}
-
-/** `"<topic>/<key>"` → `"<topic>"` (same split as `topicOf` in attention/tiers.ts). */
-function topicOf(resource: string): string {
-  const at = resource.indexOf("/");
-  return at < 0 ? resource : resource.slice(0, at);
 }
 
 /**

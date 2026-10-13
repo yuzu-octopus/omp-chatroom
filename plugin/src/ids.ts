@@ -11,6 +11,12 @@ export function resourceKey(topic: string, key: string): string {
   // "<topic>/<key>"
   return `${topic}/${key}`;
 }
+export function topicOf(resource: string): string {
+  // resourceKey's inverse (§2.1.2): "<topic>/<key>" → "<topic>". Splits on the FIRST slash, so a
+  // key containing "/" stays intact in the remainder.
+  const at = resource.indexOf("/");
+  return at < 0 ? resource : resource.slice(0, at);
+}
 export function newMessageId(): string {
   // UUID v4
   return crypto.randomUUID();
