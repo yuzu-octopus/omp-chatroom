@@ -7,27 +7,25 @@ reproduced — see plan 014). Execute in the order below unless dependencies say
 otherwise. Each executor: read the plan fully before starting, honor its STOP
 conditions, and update your row when done.
 
-## Execution order & status
-
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
-| 001 | Stop the managed-timer leak in `roomTimers.stop` | P1 | S | — | TODO |
-| 002 | Prune `heldTopics` so released claims stop promoting topics to T1 forever | P1 | S | — | TODO |
-| 003 | Validate `roomId` before it becomes a filename | P1 | S | — | TODO |
-| 004 | Reject non-numeric TTL in `/room claim` before it becomes a NaN lease | P2 | S | — | TODO |
-| 005 | Tell the truth in `/room config` — most knobs are live | P2 | S | — | TODO |
-| 006 | Wire `compactionCallsPerDay` through to the compactor's rate cap | P2 | S | 005 | TODO |
-| 007 | Give `/room claim`/`release`/`post` the delivery pass the tool path has | P2 | M | 004 | TODO |
-| 008 | Investigate whether retention skews `tree`/`zoom`/recall addressing | P3 | S | — | TODO |
-| 009 | Stop auto-creating roster members on every read/board/topics call | P3 | M | — | TODO |
-| 010 | Reconcile the three-way host version drift (pin/docs/live) | P1 | S | — | TODO |
-| 011 | Fix stale suite-size and host claims in AGENTS.md, README, HANDOFF | P3 | S | 010 | TODO |
-| 012 | Add the missing CI workflow (typecheck + lint + tests on push) | P2 | S | — | TODO |
-| 013 | Sweep the stale "Option A" comments from `src/` | P3 | S | 005 | TODO |
-| 014 | Hunt the one transient suite failure (unreproduced since) | P3 | S | — | TODO |
-| 015 | Spike — resolve the panel's three dead keys and two inert flags | P3 | S | — | TODO |
-| 016 | Spike — a harness that proves a real model reaches for the room unprompted | P3 | S | — | TODO |
-| 017 | Spike — replace the single-writer assumption with a cross-process story | P3 | S | — | TODO |
+| 001 | Stop the managed-timer leak in `roomTimers.stop` | P1 | S | — | DONE (`f563c9c`) |
+| 002 | Prune `heldTopics` so released claims stop promoting topics to T1 forever | P1 | S | — | DONE (`caf06cf`) |
+| 003 | Validate `roomId` before it becomes a filename | P1 | S | — | DONE (`bf13f95`) |
+| 004 | Reject non-numeric TTL in `/room claim` before it becomes a NaN lease | P2 | S | — | DONE (`28a45d7`) |
+| 005 | Tell the truth in `/room config` — most knobs are live | P2 | S | — | DONE (`9e4490d`) |
+| 006 | Wire `compactionCallsPerDay` through to the compactor's rate cap | P2 | S | 005 | DONE (`42c387c`) |
+| 007 | Give `/room claim`/`release`/`post` the delivery pass the tool path has | P2 | M | 004 | DONE (`d01612e` + `27f6016`) |
+| 008 | Investigate whether retention skews `tree`/`zoom`/recall addressing | P3 | S | — | DONE (`9b11225` — CONFIRMED, pinning test fails by design) |
+| 009 | Stop auto-creating roster members on every read/board/topics call | P3 | M | — | DONE (`5b07814` + `98337fb`) |
+| 010 | Reconcile the three-way host version drift (pin/docs/live) | P1 | S | — | DONE (`77e6f9d` + `25ff7e9`, host now 18.10.3) |
+| 011 | Fix stale suite-size and host claims in AGENTS.md, README, HANDOFF | P3 | S | 010 | DONE (`24afec3`) |
+| 012 | Add the missing CI workflow (typecheck + lint + tests on push) | P2 | S | — | DONE (`6e0df85`) |
+| 013 | Sweep the stale "Option A" comments from `src/` | P3 | S | 005 | DONE (`92bddc1`) |
+| 014 | Hunt the one transient suite failure (unreproduced since) | P3 | S | — | DONE (NOT REPRODUCED — 10 full + 3 stress runs green; only failure is the 008 pin) |
+| 015 | Spike — resolve the panel's three dead keys and two inert flags | P3 | S | — | DONE (recommendation (b): remove dead bindings; Q2 = no public input component) |
+| 016 | Spike — a harness that proves a real model reaches for the room unprompted | P3 | S | — | DONE (recommendation (a): build; model reachable, `getEntries()` is the assertion surface) |
+| 017 | Spike — replace the single-writer assumption with a cross-process story | P3 | S | — | DONE (recommendation (b): document + loud lockfile error; collision confirmed 10 dup seqs/40) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJECTED (with one-line rationale — finding fixed independently or approach abandoned)
 
