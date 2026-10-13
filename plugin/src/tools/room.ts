@@ -236,7 +236,10 @@ function buildBoard(store: RoomStore, viewer: MemberState): BoardResult {
   }));
   const roster = [...store.members.values()].map((member) => ({
     agentId: member.agentId,
-    status: AgentRegistry.global().get(member.agentId)?.status ?? "running",
+    // Absent from the registry ≠ running: after a restart the roster replays from the log while
+    // the registry starts empty, so every member would read "running". "unknown" matches the
+    // /room board path (room-command.ts) and tells the truth.
+    status: AgentRegistry.global().get(member.agentId)?.status ?? "unknown",
     cursor: cursorFor(store, member.agentId),
     lag: lagFor(store, member.agentId),
     topics: [...member.topics],

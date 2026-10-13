@@ -1045,3 +1045,18 @@ test("post by a never-joined agent DOES create the member (writers keep ensure)"
   await invokeRoom(fakeCtx(root, "Newcomer"), { op: "post", topic: "t", body: "hi" });
   expect(store.members.has("Newcomer")).toBe(true);
 });
+
+test("board reports unknown (not running) for members absent from the registry", async () => {
+  // After a restart the roster replays from the log while the host registry starts empty: every
+  // member would read "running". The honest default matches the /room board path.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "room-tool-"));
+  const ctx = fakeCtx(root, "AgentA");
+  roomStoreFor(ctx);
+  await invokeRoom(ctx, { op: "join" });
+  AgentRegistry.global().unregister("AgentA");
+  const res = await invokeRoom(ctx, { op: "board" });
+  const board = res.details?.board as {
+    roster: Array<{ agentId: string; status: string }>;
+  };
+  expect(board.roster.find((m) => m.agentId === "AgentA")?.status).toBe("unknown");
+});
