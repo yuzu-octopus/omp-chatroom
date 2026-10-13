@@ -60,7 +60,7 @@ advanced on delivery into context, never on send.
 
 ```sh
 cd plugin
-bun test tests/                                 # the whole suite (205 pass, 11 files)
+bun test tests/                                 # the whole suite (232 pass, 13 files)
 bunx --bun tsc --noEmit -p tsconfig.json        # typecheck only; Bun executes the TS
 bunx --bun @biomejs/biome check src tests       # lint + format
 bunx --bun @biomejs/biome check src tests --write   # apply fixes

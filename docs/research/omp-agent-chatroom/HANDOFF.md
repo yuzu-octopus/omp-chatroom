@@ -26,7 +26,7 @@ picked up on the next session (no hot reload — restart omp).
 | Gate | Result |
 |---|---|
 | `bunx --bun tsc --noEmit -p tsconfig.json` | **0 errors** |
-| `bun test tests/` | **186 pass / 0 fail**, 1530 assertions, 11 files |
+| `bun test tests/` | **232 pass / 1 fail**, 3259 assertions, 13 files (as of 2026-10-13; the 1 fail is the plan-008 skew pin, failing by design) |
 | `bunx --bun @biomejs/biome check src tests` | **0 errors, 0 warnings** |
 | Remaining `not implemented` stubs | **0** |
 | Plugin loads in a real session | **0 extension errors**, all 4 tools + `/room` registered |
