@@ -1035,7 +1035,7 @@ test("read by a never-joined agent returns records without minting membership", 
   const store = roomStoreFor(fakeCtx(root, "AgentA"));
   store.append({ kind: "msg", from: "AgentA", topic: "t", body: "hello" });
   const res = await invokeRoom(fakeCtx(root, "Ghost"), { op: "read" });
-  expect((res.details?.records as unknown[]).length).toBeGreaterThan(0);
+  expect((res.details as unknown as { records: unknown[] }).records.length).toBeGreaterThan(0);
   expect(store.members.has("Ghost")).toBe(false);
 });
 
