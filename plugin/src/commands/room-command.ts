@@ -281,7 +281,8 @@ export function registerRoomCommand(pi: ExtensionAPI): void {
           const before = store.seq;
           if (held.holder !== agentId) {
             // §4.1 — a reclaim against a stale claim is explicit, never silent.
-            if (reclaimIfStale(store, resource, Date.now())) {
+            const outcome = reclaimIfStale(store, resource, Date.now());
+            if (outcome.reclaimed) {
               const failure = await notifyRecipients(
                 pi,
                 ctx,
@@ -289,7 +290,9 @@ export function registerRoomCommand(pi: ExtensionAPI): void {
                 appendedSince(store, before),
                 agentId,
               );
-              report(ctx, pi, `room release ${safe(resource)} → reclaimed (was stale)`);
+              const successor =
+                outcome.holder === null ? " (lease dropped)" : ` → ${safe(outcome.holder)}`;
+              report(ctx, pi, `room release ${safe(resource)} → reclaimed (was stale)${successor}`);
               if (failure !== undefined) report(ctx, pi, `delivery: ${safe(failure)}`, "warning");
               return;
             }

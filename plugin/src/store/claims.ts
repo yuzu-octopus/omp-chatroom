@@ -61,9 +61,26 @@ export function release(
   return true;
 }
 
-export function reclaimIfStale(store: RoomStore, resource: string, now: number): ClaimState | null {
+/**
+ * The outcome of a reclaim attempt.
+ *
+ * `reclaimed: false` means nothing happened (no claim, or the claim is still live). `reclaimed:
+ * true` means the stale claim WAS freed — `holder` is the new lease holder when a waiter was
+ * promoted, or null when the lease was simply dropped. The distinction matters: the old API
+ * returned the promoted claim, so a reclaim with no waiter looked identical to "not stale" and
+ * the caller reported "denied — not holder" for a lease it had just freed.
+ */
+export type ReclaimOutcome = {
+  reclaimed: boolean;
+  holder: string | null;
+  prevHolder: string;
+};
+
+export function reclaimIfStale(store: RoomStore, resource: string, now: number): ReclaimOutcome {
   const existing = store.claims.get(resource);
-  if (existing === undefined || !isStale(existing, now)) return null;
+  if (existing === undefined || !isStale(existing, now)) {
+    return { reclaimed: false, holder: null, prevHolder: "" };
+  }
 
   // §3.4 — the CONTENDED path: replace the stale claim and notify the previous holder (T0).
   // `from` is the releaser; for a reclaim that is the new claimant (the oldest waiter), else the
@@ -76,7 +93,8 @@ export function reclaimIfStale(store: RoomStore, resource: string, now: number):
     reason: "reclaimed",
     prevHolder: existing.holder,
   });
-  return resolveWaiters(store, resource, existing.ttlMs);
+  const promoted = resolveWaiters(store, resource, existing.ttlMs);
+  return { reclaimed: true, holder: promoted?.holder ?? null, prevHolder: existing.holder };
 }
 
 export function contended(store: RoomStore, resource: string): string[] {
@@ -88,14 +106,14 @@ export function contended(store: RoomStore, resource: string): string[] {
 export function expireStale(
   store: RoomStore,
   now: number,
-): Array<{ resource: string; prev: string; next?: string }> {
+): Array<{ resource: string; prev: string; next?: string; record: RoomRecord }> {
   const stale: ClaimState[] = [];
   for (const claim of store.claims.values()) {
     if (isStale(claim, now)) stale.push(claim);
   }
-  const out: Array<{ resource: string; prev: string; next?: string }> = [];
+  const out: Array<{ resource: string; prev: string; next?: string; record: RoomRecord }> = [];
   for (const claim of stale) {
-    store.append({
+    const record = store.append({
       kind: "release",
       from: "system",
       resource: claim.resource,
@@ -106,8 +124,8 @@ export function expireStale(
     const next = resolveWaiters(store, claim.resource, claim.ttlMs);
     out.push(
       next === null
-        ? { resource: claim.resource, prev: claim.holder }
-        : { resource: claim.resource, prev: claim.holder, next: next.holder },
+        ? { resource: claim.resource, prev: claim.holder, record }
+        : { resource: claim.resource, prev: claim.holder, next: next.holder, record },
     );
   }
   return out;

@@ -5,8 +5,7 @@ import type {
   ExtensionContext,
   ToolDefinition,
 } from "@oh-my-pi/pi-coding-agent";
-import { escapeHarnessTags } from "@oh-my-pi/pi-coding-agent/session/harness-tags";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { safeRoomText } from "../onboarding/escape";
 import {
   type ClaimState,
   dequeueWaiter,
@@ -49,10 +48,8 @@ export interface WaitForClaimDetails {
 }
 export type WaitForClaimResult = AgentToolResult<WaitForClaimDetails>;
 
-/** K22/S1 — the resource string reaches the model, so it goes through the sanitising pair. */
-function safe(text: string): string {
-  return escapeHarnessTags(sanitizeText(text));
-}
+/** K22/S1 — the resource string reaches the model, so it goes through the shared escaper. */
+const safe = safeRoomText;
 
 /** The schema's documented bounds are the contract; this is the one place they are applied. */
 function clamp(value: number, lo: number, hi: number): number {

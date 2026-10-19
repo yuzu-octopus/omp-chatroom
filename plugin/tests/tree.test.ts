@@ -295,18 +295,34 @@ test("the write mutex serialises two concurrent compactions (no interleaved writ
     order.push(`${label}:write`);
     return label;
   };
-  const first = withWriteMutex(section("A"));
-  const second = withWriteMutex(section("B"));
+  const first = withWriteMutex("mutex-root", section("A"));
+  const second = withWriteMutex("mutex-root", section("B"));
   expect(await Promise.all([first, second])).toEqual(["A", "B"]);
   expect(order).toEqual(["A:check", "A:write", "B:check", "B:write"]);
 
   // The chain survives a rejected section: a later compaction must still run.
   await expect(
-    withWriteMutex(async () => {
+    withWriteMutex("mutex-root", async () => {
       throw new Error("boom");
     }),
   ).rejects.toThrow("boom");
-  expect(await withWriteMutex(async () => "after")).toBe("after");
+  expect(await withWriteMutex("mutex-root", async () => "after")).toBe("after");
+});
+
+test("the write mutex is per room root (I2): one room's queue never blocks another's", async () => {
+  const order: string[] = [];
+  const section = (label: string) => async () => {
+    order.push(`${label}:start`);
+    await Promise.resolve();
+    order.push(`${label}:end`);
+    return label;
+  };
+  // Interleave two roots: a shared queue would serialise A and B, so the starts would never
+  // overlap the way they do here.
+  const a = withWriteMutex("root-a", section("A"));
+  const b = withWriteMutex("root-b", section("B"));
+  await Promise.all([a, b]);
+  expect(order.slice(0, 2).sort()).toEqual(["A:start", "B:start"]);
 });
 
 // --- 6. the daily rate cap -------------------------------------------------
@@ -321,10 +337,10 @@ test("the compaction spend cap is a daily RATE: at the cap the compactor pauses 
   lastPrompt = "";
 
   // One call below the cap: the node builds and one call is spent.
-  __compactTest.setSpendToday(COMPACT_MAX_CALLS_PER_DAY - 1);
+  __compactTest.setSpendToday(root, COMPACT_MAX_CALLS_PER_DAY - 1);
   expect(await compactOnce(store, ctx, [0, 2])).toBe(true);
   expect(llmCalls).toBe(1);
-  expect(compactionSpendToday()).toBe(COMPACT_MAX_CALLS_PER_DAY);
+  expect(compactionSpendToday(root)).toBe(COMPACT_MAX_CALLS_PER_DAY);
   // M9 — the untrusted-input framing still reaches the summarizer, now as the TASK text's opening
   // (F6: no custom system prompt — the compaction shares the turns' cached system prompt).
   expect(lastPrompt.startsWith(UNTRUSTED_PREFIX)).toBe(true);
@@ -360,11 +376,11 @@ test("compactOnce honors the configured compactionCallsPerDay, not just the cons
   const { ctx } = fakeCtx("main");
 
   __compactTest.resetSpend();
-  __compactTest.setSpendToday(1);
+  __compactTest.setSpendToday(root, 1);
   llmCalls = 0;
   expect(await compactOnce(store, ctx, [0, 2])).toBe(false);
   expect(llmCalls).toBe(0);
-  expect(compactionSpendToday()).toBe(1);
+  expect(compactionSpendToday(root)).toBe(1);
 
   __compactTest.resetSpend();
   stopCompactor(root);

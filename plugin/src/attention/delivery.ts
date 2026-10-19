@@ -15,6 +15,7 @@ export async function deliver(
   record: RoomRecord,
   tier: Tier,
   extra: readonly string[] = [],
+  cursorCap?: number,
 ): Promise<void> {
   const store = roomStoreFor(ctx);
 
@@ -33,8 +34,13 @@ export async function deliver(
   }
 
   if (tier === "T2") {
-    // pull-only: cursor only, never injected
-    bumpCursor(store, target, record.seq);
+    // pull-only: cursor only, never injected.
+    //
+    // The cursor must not advance past a record the target has NOT seen: a T1 record the K/B cap
+    // refused, or a T0 record past the batch ceiling, still sits above the cursor and is still
+    // readable. `cursorCap` is that floor (the seq just below the oldest owed record). Without it
+    // a T2 delivery would skip the owed record and `room{op:"read"}` could never return it.
+    bumpCursor(store, target, Math.min(record.seq, cursorCap ?? record.seq));
     return;
   }
 
@@ -94,15 +100,18 @@ export function roomBodyOf(record: RoomRecord): string {
 
 // K17 — the model-facing line: tier badge · from · topic|resource · escaped body.
 export function renderLine(record: RoomRecord, safeBody: string, tier: Tier): string {
+  // K22/S1 — the topic and the resource are room-authored (any agent picks them), so they go
+  // through the escaper like the body: an unescaped `</room-authored>` in a topic name would
+  // close the digest's own region and let a post forge a harness block in the recipient.
   const where =
     record.kind === "claim" || record.kind === "release"
-      ? `resource:${record.resource}`
+      ? `resource:${safeRoomText(record.resource)}`
       : record.kind === "member"
         ? "presence"
         : record.kind === "gap"
           ? "retention"
-          : `topic:${record.topic}`; // msg | note
-  return `[${tier}] room ⟵ ${record.from} · ${where} · ${safeBody}`;
+          : `topic:${safeRoomText(record.topic)}`; // msg | note
+  return `[${tier}] room ⟵ ${safeRoomText(record.from)} · ${where} · ${safeBody}`;
 }
 
 // §5.3 S1+S2 — delegates to the shared escaper so every room-facing surface is marker-safe.

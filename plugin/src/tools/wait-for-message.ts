@@ -5,14 +5,13 @@ import type {
   ExtensionContext,
   ToolDefinition,
 } from "@oh-my-pi/pi-coding-agent";
-import { escapeHarnessTags } from "@oh-my-pi/pi-coding-agent/session/harness-tags";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
 import {
   describeWaitCall,
   describeWaitResult,
   renderWaitCall,
   renderWaitResult,
 } from "../cards/tool-cards";
+import { safeRoomText } from "../onboarding/escape";
 import { type RoomStore, roomStoreFor } from "../store/room-store";
 import type { RoomRecord } from "../store/schema";
 import {
@@ -48,7 +47,7 @@ export interface WaitForMessageDetails {
 export type WaitForMessageResult = AgentToolResult<WaitForMessageDetails>;
 
 /** K22/S1 — caller-supplied strings and room bodies both reach the model; both are sanitised. */
-const safe = (text: string): string => escapeHarnessTags(sanitizeText(text));
+const safe = safeRoomText;
 
 /** The schema's documented bounds are the contract; this is the one place they are applied. */
 const clamp = (value: number, lo: number, hi: number): number =>

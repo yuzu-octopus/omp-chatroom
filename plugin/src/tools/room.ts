@@ -22,6 +22,7 @@ import {
   renderRoomCall,
   renderRoomResult,
 } from "../cards/tool-cards";
+import { globalMap } from "../globals";
 import { buildDigest, DIGEST_CLAIMS_CAP, ROSTER_CAP } from "../onboarding/digest";
 import { safeRoomText } from "../onboarding/escape";
 import { contended, grant, reclaimIfStale, release } from "../store/claims";
@@ -120,6 +121,12 @@ export const READ_LIMIT_DEFAULT = 50; // K20 — was 100; routed through the T1 
 export const READ_LIMIT_MAX = 200; // K20 — was 1 000 (~97k tokens)
 export const RECALL_LIMIT_MAX = 100; // §4.1
 
+/**
+ * A quantifier applied to a group that itself contains a quantifier — the classic catastrophic
+ * backtracking shape. The regex engine has no timeout, so the shape is refused rather than run.
+ */
+const NESTED_QUANTIFIER = /\([^()]*[+*][^()]*\)\s*[+*]/;
+
 const CLAIM_TTL_MIN_MS = 1_000; // §3.4 — TTL is mandatory; a zero lease is not a lease
 const CLAIM_TTL_MAX_MS = 86_400_000;
 const _READ_CURSOR_LAG_MAX = 1_000;
@@ -133,7 +140,9 @@ function ok<T extends RoomToolDetails>(details: T, text: string): AgentToolResul
 
 /** Failures return `content` + `details:{ok:false}` and never throw (§4.5). */
 function fail(error: string, holder?: string, expiresAt?: number): RoomToolResult {
-  const line = holder ? `room → ${error} (held by ${holder})` : `room → ${error}`;
+  // The error text embeds caller-chosen values (the resource, the holder), so it is escaped like
+  // every other model-facing string. `details` keeps the raw values for the caller.
+  const line = holder ? `room → ${safe(error)} (held by ${safe(holder)})` : `room → ${safe(error)}`;
   return {
     content: [{ type: "text", text: line }],
     details: holder !== undefined ? { ok: false, error, holder, expiresAt } : { ok: false, error },
@@ -345,6 +354,34 @@ export async function notifyRecipients(
   records: readonly RoomRecord[],
   actorId: string,
 ): Promise<string | undefined> {
+  // Serialised per room root (I2: the chain lives in a globalThis map, keyed by root). Two agents
+  // posting in the same tick would otherwise interleave their awaits, so a recipient could see
+  // seq 11 before seq 10 — and if 10's send failed, 10 would fall below the cursor for good.
+  const previous = DELIVERY_CHAIN.get(store.root) ?? Promise.resolve();
+  const pass = previous.then(
+    () => deliverPass(pi, ctx, store, records, actorId),
+    () => deliverPass(pi, ctx, store, records, actorId),
+  );
+  DELIVERY_CHAIN.set(
+    store.root,
+    pass.then(
+      () => undefined,
+      () => undefined,
+    ),
+  );
+  return pass;
+}
+
+/** The delivery chain, one per room root. */
+const DELIVERY_CHAIN = globalMap<string, Promise<void>>("__roomDeliveryChain");
+
+async function deliverPass(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  store: RoomStore,
+  records: readonly RoomRecord[],
+  actorId: string,
+): Promise<string | undefined> {
   const config = resolveRoomConfig(pi, store.root);
   let failure: string | undefined;
   const note = (error: unknown): void => {
@@ -391,8 +428,16 @@ export async function notifyRecipients(
         // durable and the cursor must NOT advance, or `coalescePending` could never see them.
         // A non-coalesced T2 is cursor-only — never injected, and consumed on arrival.
         if (coalesced) continue;
+        // The floor for this target: the seq just below the oldest record it still OWES (a T1 the
+        // K/B cap refused, or a T0 past the batch ceiling). The T2 cursor bump must not cross it,
+        // or the owed record falls below the cursor and `room{op:"read"}` can never return it.
+        const owed = pending.filter((r) => !admitted.some((a) => a.seq === r.seq));
+        const owedFloor = owed.reduce((min, r) => Math.min(min, r.seq), Number.POSITIVE_INFINITY);
+        const cursorCap = owedFloor - 1;
         for (const record of records) {
-          if (classify(record, viewer) === "T2") await deliver(pi, ctx, target, record, "T2");
+          if (classify(record, viewer) === "T2") {
+            await deliver(pi, ctx, target, record, "T2", [], cursorCap);
+          }
         }
       } catch (error) {
         note(error);
@@ -507,7 +552,8 @@ export function registerRoomTool(pi: ExtensionAPI): void {
       .optional()
       .describe(
         "Regex for recall over the raw log, newest first, max 100 matches. Max 200 chars; " +
-          "a pattern that burns its 1s scan budget is refused rather than hanging the session.",
+          "patterns with a quantifier over a quantified group ((a+)+) are refused, and the " +
+          "scan stops at its 1s budget between records.",
       ),
   });
 
@@ -533,333 +579,354 @@ export function registerRoomTool(pi: ExtensionAPI): void {
       }
       const agentId = ctx.agent.id;
       const config = resolveRoomConfig(pi, store.root);
-      switch (p.op) {
-        case "join": {
-          // §4.1 join idempotency — a second join is a no-op: no second member record.
-          // The membership check MUST run BEFORE `viewerFor`, which registers a fresh member as a
-          // side effect. Checking after it is always false, so no `member{join}` record would ever be
-          // appended and the roster would stay empty forever.
-          const isNewMember = !store.members.has(agentId);
-          const viewer = viewerFor(store, agentId);
-          if (isNewMember) {
-            store.append({ kind: "member", from: agentId, action: "join" });
-          }
-          initCursor(store, agentId);
-          const cursor = cursorFor(store, agentId);
-          const digest = buildDigest(store, viewer, config.digestBudgetTokens);
-          return ok(
-            { ok: true, op: "join", digest, cursor },
-            `room join → ${safe(store.roomId)} · ${store.claims.size} claim(s) · ${store.members.size} member(s) · cursor ${cursor}`,
-          );
-        }
-
-        case "read": {
-          const viewer = viewerStateFor(store, agentId);
-          const cursor = cursorFor(store, agentId);
-          const since = p.since ?? cursor;
-          const limit = clamp(p.limit ?? READ_LIMIT_DEFAULT, 1, READ_LIMIT_MAX);
-          const pending = store.records.filter((r) => r.seq > since);
-          // K20 — `read` is routed through the same per-turn K/B budget as the injection path.
-          const { injected } = selectT1(store, viewer, pending, {
-            spend: true,
-            limit,
-            caps: config,
-          });
-          const next = injected.length > 0 ? injected[injected.length - 1]!.seq : since;
-          bumpCursor(store, agentId, next);
-          const body = injected.map(recordLine).join("\n");
-          // The summary must name the resume point — the last delivered seq, not the pre-read
-          // cursor — or the caller would re-read the records it was just shown.
-          const remaining = pending.slice(injected.length);
-          const summary =
-            remaining.length > 0
-              ? moreLine(
-                  remaining.length,
-                  remaining.filter((r) => r.kind === "msg" && r.mention?.includes(agentId)).length,
-                  next,
-                )
-              : null;
-          return ok(
-            {
-              ok: true,
-              op: "read",
-              records: injected,
-              cursor: next,
-              more: remaining.length > 0,
-            },
-            `room read → ${injected.length} record(s) since seq ${since}` +
-              (body ? `\n${body}` : "") +
-              (summary !== null ? `\n${summary}` : ""),
-          );
-        }
-
-        case "post": {
-          const topic = p.topic;
-          if (!topic) return fail("post requires a topic");
-          const body = p.body;
-          if (body === undefined) return fail("post requires a body");
-          // K19 — the body cap is enforced here, before the record is drafted; never truncated silently.
-          const bytes = Buffer.byteLength(body, "utf-8");
-          if (bytes > config.maxBodyBytes) {
-            return fail(`body exceeds maxBodyBytes (${config.maxBodyBytes})`);
-          }
-          // N7 — a body over the T1 token budget is truncated to a head + a read handle.
-          const { head, handle } = truncateOversized(body, config.maxT1Tokens);
-          const storedBody = handle !== "" ? `${head}${handle}` : head;
-          const viewer = viewerFor(store, agentId);
-          // §5.1 N1 — replying subscribes the poster to the thread: resolve the parent's root
-          // (or the parent itself when it starts the thread) and stamp it on the new record. An
-          // unknown replyTo is ignored, never a failure — the reply still posts.
-          const parent = p.replyTo ? store.byId.get(p.replyTo) : undefined;
-          const threadRoot = parent?.kind === "msg" ? (parent.threadRoot ?? parent.id) : undefined;
-          const record = store.append({
-            kind: "msg",
-            from: agentId, // S4 — `from` is always the authenticated caller id
-            topic,
-            body: storedBody,
-            ...(p.mention ? { mention: p.mention } : {}),
-            ...(p.replyTo ? { replyTo: p.replyTo } : {}),
-            ...(threadRoot ? { threadRoot } : {}),
-            ...(p.performative ? { performative: p.performative } : {}),
-          });
-          viewer.lastMessageId = record.id;
-          viewer.topics.add(topic);
-          if (threadRoot) viewer.threadRoots.add(threadRoot);
-          const failure = await notifyRecipients(pi, ctx, store, [record], agentId);
-          return okWithDelivery(
-            {
-              ok: true,
-              op: "post",
-              id: record.id,
-              seq: record.seq,
-              tier: classify(record, viewer),
-            },
-            `room post → ${safe(topic)} · seq ${record.seq}`,
-            failure,
-          );
-        }
-
-        case "claim": {
-          const topic = p.topic;
-          const key = p.key;
-          if (!topic || !key) return fail("claim requires topic and key");
-          const resource = `${topic}/${key}`;
-          const viewer = viewerFor(store, agentId);
-          const ttlMs = clamp(p.ttl ?? config.claimTtlMs, CLAIM_TTL_MIN_MS, CLAIM_TTL_MAX_MS);
-          const before = store.seq;
-          const result = grant(store, resource, agentId, ttlMs);
-          if (!result.ok) {
-            return fail(
-              `claim ${resource} denied — held by ${result.holder}`,
-              result.holder,
-              result.expiresAt,
+      try {
+        switch (p.op) {
+          case "join": {
+            // §4.1 join idempotency — a second join is a no-op: no second member record.
+            // The membership check MUST run BEFORE `viewerFor`, which registers a fresh member as a
+            // side effect. Checking after it is always false, so no `member{join}` record would ever be
+            // appended and the roster would stay empty forever.
+            const isNewMember = !store.members.has(agentId);
+            const viewer = viewerFor(store, agentId);
+            if (isNewMember) {
+              store.append({ kind: "member", from: agentId, action: "join" });
+            }
+            initCursor(store, agentId);
+            const cursor = cursorFor(store, agentId);
+            const digest = buildDigest(store, viewer, config.digestBudgetTokens);
+            return ok(
+              { ok: true, op: "join", digest, cursor },
+              `room join → ${safe(store.roomId)} · ${store.claims.size} claim(s) · ${store.members.size} member(s) · cursor ${cursor}`,
             );
           }
-          viewer.heldTopics.add(topic);
-          const failure = await notifyRecipients(
-            pi,
-            ctx,
-            store,
-            appendedSince(store, before),
-            agentId,
-          );
-          return okWithDelivery(
-            {
-              ok: true,
-              op: "claim",
-              holder: result.claim.holder,
-              expiresAt: result.claim.acquiredAt + result.claim.ttlMs,
-            },
-            `room claim ${safe(resource)} → granted, expires in ${Math.round(ttlMs / 1000)}s`,
-            failure,
-          );
-        }
 
-        case "release": {
-          const topic = p.topic;
-          const key = p.key;
-          if (!topic || !key) return fail("release requires topic and key");
-          const resource = `${topic}/${key}`;
-          const held = store.claims.get(resource);
-          if (!held) return fail("unknown resource");
-          const before = store.seq;
-          if (held.holder !== agentId) {
-            // §4.1 — a reclaim against a stale claim is explicit and logged, never silent.
-            const reclaimed = reclaimIfStale(store, resource, Date.now());
-            if (reclaimed) {
-              const failure = await notifyRecipients(
-                pi,
-                ctx,
-                store,
-                appendedSince(store, before),
-                agentId,
-              );
-              return okWithDelivery(
-                { ok: true, op: "release" },
-                `room release ${safe(resource)} → reclaimed (was stale)`,
-                failure,
-              );
-            }
-            return fail(
-              `release ${resource} denied — not holder`,
-              held.holder,
-              held.acquiredAt + held.ttlMs,
+          case "read": {
+            const viewer = viewerStateFor(store, agentId);
+            const cursor = cursorFor(store, agentId);
+            const since = p.since ?? cursor;
+            const limit = clamp(p.limit ?? READ_LIMIT_DEFAULT, 1, READ_LIMIT_MAX);
+            const pending = store.records.filter((r) => r.seq > since);
+            // K20 — `read` is routed through the same per-turn K/B budget as the injection path.
+            const { injected } = selectT1(store, viewer, pending, {
+              spend: true,
+              limit,
+              caps: config,
+            });
+            const next = injected.length > 0 ? injected[injected.length - 1]!.seq : since;
+            bumpCursor(store, agentId, next);
+            const body = injected.map(recordLine).join("\n");
+            // The summary must name the resume point — the last delivered seq, not the pre-read
+            // cursor — or the caller would re-read the records it was just shown.
+            const remaining = pending.slice(injected.length);
+            const summary =
+              remaining.length > 0
+                ? moreLine(
+                    remaining.length,
+                    remaining.filter((r) => r.kind === "msg" && r.mention?.includes(agentId))
+                      .length,
+                    next,
+                  )
+                : null;
+            return ok(
+              {
+                ok: true,
+                op: "read",
+                records: injected,
+                cursor: next,
+                more: remaining.length > 0,
+              },
+              `room read → ${injected.length} record(s) since seq ${since}` +
+                (body ? `\n${body}` : "") +
+                (summary !== null ? `\n${summary}` : ""),
             );
           }
-          release(store, resource, agentId, "released");
-          const failure = await notifyRecipients(
-            pi,
-            ctx,
-            store,
-            appendedSince(store, before),
-            agentId,
-          );
-          return okWithDelivery(
-            { ok: true, op: "release" },
-            `room release ${safe(resource)} → released`,
-            failure,
-          );
-        }
 
-        case "board": {
-          const board = buildBoard(store, viewerStateFor(store, agentId));
-          return ok(
-            { ok: true, op: "board", board },
-            withRows(
-              `room board → ${board.claims.length} claim(s), ${board.roster.length} member(s), ${board.topics.length} topic(s)`,
-              boardLines(board),
-            ),
-          );
-        }
-
-        case "topics": {
-          const viewer = viewerStateFor(store, agentId);
-          const counts = unreadCounts(store, viewer);
-          const byTopic = new Map<string, TopicRow>();
-          const topics: TopicRow[] = [];
-          for (const record of store.records) {
-            if (record.kind !== "msg" && record.kind !== "note") continue;
-            let row = byTopic.get(record.topic);
-            if (!row) {
-              row = { topic: record.topic, lastSeq: record.seq, unread: 0 };
-              byTopic.set(record.topic, row);
-              topics.push(row);
+          case "post": {
+            const topic = p.topic;
+            if (!topic) return fail("post requires a topic");
+            const body = p.body;
+            if (body === undefined) return fail("post requires a body");
+            // K19 — the body cap is enforced here, before the record is drafted; never truncated silently.
+            const bytes = Buffer.byteLength(body, "utf-8");
+            if (bytes > config.maxBodyBytes) {
+              return fail(`body exceeds maxBodyBytes (${config.maxBodyBytes})`);
             }
-            row.lastSeq = record.seq;
-            row.unread = counts.get(record.topic) ?? 0;
+            // N7 — a body over the T1 token budget is truncated to a head + a read handle.
+            const { head, handle } = truncateOversized(body, config.maxT1Tokens);
+            const storedBody = handle !== "" ? `${head}${handle}` : head;
+            const viewer = viewerFor(store, agentId);
+            // §5.1 N1 — replying subscribes the poster to the thread: resolve the parent's root
+            // (or the parent itself when it starts the thread) and stamp it on the new record. An
+            // unknown replyTo is ignored, never a failure — the reply still posts.
+            const parent = p.replyTo ? store.byId.get(p.replyTo) : undefined;
+            const threadRoot =
+              parent?.kind === "msg" ? (parent.threadRoot ?? parent.id) : undefined;
+            const record = store.append({
+              kind: "msg",
+              from: agentId, // S4 — `from` is always the authenticated caller id
+              topic,
+              body: storedBody,
+              ...(p.mention ? { mention: p.mention } : {}),
+              ...(p.replyTo ? { replyTo: p.replyTo } : {}),
+              ...(threadRoot ? { threadRoot } : {}),
+              ...(p.performative ? { performative: p.performative } : {}),
+            });
+            viewer.lastMessageId = record.id;
+            viewer.topics.add(topic);
+            if (threadRoot) viewer.threadRoots.add(threadRoot);
+            const failure = await notifyRecipients(pi, ctx, store, [record], agentId);
+            return okWithDelivery(
+              {
+                ok: true,
+                op: "post",
+                id: record.id,
+                seq: record.seq,
+                tier: classify(record, viewer),
+              },
+              `room post → ${safe(topic)} · seq ${record.seq}`,
+              failure,
+            );
           }
-          return ok(
-            { ok: true, op: "topics", topics },
-            withRows(
-              `room topics → ${topics.length} topic(s)`,
-              topics.map(
-                (t) => `topic ${safe(t.topic)} · ${t.unread} unread · last seq ${t.lastSeq}`,
-              ),
-            ),
-          );
-        }
 
-        case "mute": {
-          if (p.topic === undefined) {
-            muteRoom(store, agentId);
-          } else {
-            muteTopic(store, agentId, p.topic);
-          }
-          return ok(
-            { ok: true, op: "mute" },
-            `room mute → ${p.topic !== undefined ? safe(p.topic) : "whole room"}`,
-          );
-        }
-
-        case "unmute": {
-          if (p.topic === undefined) {
-            unmuteRoom(store, agentId);
-          } else {
-            unmuteTopic(store, agentId, p.topic);
-          }
-          return ok(
-            { ok: true, op: "unmute" },
-            `room unmute → ${p.topic !== undefined ? safe(p.topic) : "whole room"}`,
-          );
-        }
-
-        case "tree": {
-          const n = store.records.length;
-          const tree = openTreeStore(store.treePath, n);
-          // F3 — the persisted view, loaded (and saved on first use), never rebuilt from the log.
-          // F5 — `loadView` tiles with a minimum block of 2, so no block covers a single message.
-          const tiling = loadView(store.treePath, n, COVER_BUDGET_LINES);
-          const blocks = tiling.map(([lo, hi]) => {
-            const size = hi - lo;
-            const raw = size <= RAW_MAX;
-            const summary = raw ? undefined : (tree.getNode(lo, hi) ?? undefined);
-            return { lo, hi, size, raw, ...(summary !== undefined ? { summary } : {}) };
-          });
-          return ok(
-            { ok: true, op: "tree", blocks },
-            withRows(
-              `room tree → ${blocks.length} block(s)`,
-              blocks.map(
-                (b) =>
-                  `[${b.lo},${b.hi}) size ${b.size} ${b.raw ? "raw" : "summary"}${b.summary !== undefined ? ` · "${safe(b.summary)}"` : ""}`,
-              ),
-            ),
-          );
-        }
-
-        case "zoom": {
-          const lo = p.lo;
-          const hi = p.hi;
-          if (lo === undefined || hi === undefined) return fail("zoom requires lo and hi");
-          const n = store.records.length;
-          const validation = validateZoomRange(lo, hi, n);
-          if (!validation.ok) return fail(validation.error);
-          const tree = openTreeStore(store.treePath, n);
-          const children = zoom(tree, lo, hi, (seq) => {
-            const record = store.records[seq];
-            return record !== undefined ? recordLine(record) : "";
-          });
-          return ok(
-            { ok: true, op: "zoom", children },
-            withRows(
-              `room zoom → ${children.length} child(ren)`,
-              children.map(
-                (c) =>
-                  `[${c.lo},${c.hi}) size ${c.size} ${c.raw ? "raw" : "summary"} · ${safe(c.text)}`,
-              ),
-            ),
-          );
-        }
-
-        case "recall": {
-          const pattern = p.pattern;
-          if (pattern === undefined) return fail("recall requires a pattern");
-          if (pattern.length > 200) return fail("pattern too long (max 200 chars)");
-          let regex: RegExp;
-          try {
-            regex = new RegExp(pattern);
-          } catch {
-            return fail("invalid regex pattern");
-          }
-          const deadline = Date.now() + 1000;
-          const matches: Array<{ seq: number; record: RoomRecord }> = [];
-          for (let i = store.records.length - 1; i >= 0; i--) {
-            if (Date.now() > deadline) return fail("recall timed out");
-            const record = store.records[i]!;
-            const text = recordLine(record);
-            if (regex.test(text)) {
-              matches.push({ seq: record.seq, record });
-              if (matches.length >= RECALL_LIMIT_MAX) break;
+          case "claim": {
+            const topic = p.topic;
+            const key = p.key;
+            if (!topic || !key) return fail("claim requires topic and key");
+            const resource = `${topic}/${key}`;
+            const viewer = viewerFor(store, agentId);
+            const ttlMs = clamp(p.ttl ?? config.claimTtlMs, CLAIM_TTL_MIN_MS, CLAIM_TTL_MAX_MS);
+            const before = store.seq;
+            const result = grant(store, resource, agentId, ttlMs);
+            if (!result.ok) {
+              return fail(
+                `claim ${resource} denied — held by ${result.holder}`,
+                result.holder,
+                result.expiresAt,
+              );
             }
+            viewer.heldTopics.add(topic);
+            const failure = await notifyRecipients(
+              pi,
+              ctx,
+              store,
+              appendedSince(store, before),
+              agentId,
+            );
+            return okWithDelivery(
+              {
+                ok: true,
+                op: "claim",
+                holder: result.claim.holder,
+                expiresAt: result.claim.acquiredAt + result.claim.ttlMs,
+              },
+              `room claim ${safe(resource)} → granted, expires in ${Math.round(ttlMs / 1000)}s`,
+              failure,
+            );
           }
-          return ok(
-            { ok: true, op: "recall", matches },
-            withRows(
-              `room recall → ${matches.length} match(es)`,
-              matches.map((m) => recordLine(m.record)),
-            ),
-          );
+
+          case "release": {
+            const topic = p.topic;
+            const key = p.key;
+            if (!topic || !key) return fail("release requires topic and key");
+            const resource = `${topic}/${key}`;
+            const held = store.claims.get(resource);
+            if (!held) return fail("unknown resource");
+            const before = store.seq;
+            if (held.holder !== agentId) {
+              // §4.1 — a reclaim against a stale claim is explicit and logged, never silent.
+              const outcome = reclaimIfStale(store, resource, Date.now());
+              if (outcome.reclaimed) {
+                const failure = await notifyRecipients(
+                  pi,
+                  ctx,
+                  store,
+                  appendedSince(store, before),
+                  agentId,
+                );
+                // The lease WAS freed — say so, and name the successor when a waiter took it.
+                const successor =
+                  outcome.holder === null ? " (lease dropped)" : ` → ${outcome.holder}`;
+                return okWithDelivery(
+                  { ok: true, op: "release" },
+                  `room release ${safe(resource)} → reclaimed (was stale)${successor}`,
+                  failure,
+                );
+              }
+              return fail(
+                `release ${resource} denied — not holder`,
+                held.holder,
+                held.acquiredAt + held.ttlMs,
+              );
+            }
+            release(store, resource, agentId, "released");
+            const failure = await notifyRecipients(
+              pi,
+              ctx,
+              store,
+              appendedSince(store, before),
+              agentId,
+            );
+            return okWithDelivery(
+              { ok: true, op: "release" },
+              `room release ${safe(resource)} → released`,
+              failure,
+            );
+          }
+
+          case "board": {
+            const board = buildBoard(store, viewerStateFor(store, agentId));
+            return ok(
+              { ok: true, op: "board", board },
+              withRows(
+                `room board → ${board.claims.length} claim(s), ${board.roster.length} member(s), ${board.topics.length} topic(s)`,
+                boardLines(board),
+              ),
+            );
+          }
+
+          case "topics": {
+            const viewer = viewerStateFor(store, agentId);
+            const counts = unreadCounts(store, viewer);
+            const byTopic = new Map<string, TopicRow>();
+            const topics: TopicRow[] = [];
+            for (const record of store.records) {
+              if (record.kind !== "msg" && record.kind !== "note") continue;
+              let row = byTopic.get(record.topic);
+              if (!row) {
+                row = { topic: record.topic, lastSeq: record.seq, unread: 0 };
+                byTopic.set(record.topic, row);
+                topics.push(row);
+              }
+              row.lastSeq = record.seq;
+              row.unread = counts.get(record.topic) ?? 0;
+            }
+            return ok(
+              { ok: true, op: "topics", topics },
+              withRows(
+                `room topics → ${topics.length} topic(s)`,
+                topics.map(
+                  (t) => `topic ${safe(t.topic)} · ${t.unread} unread · last seq ${t.lastSeq}`,
+                ),
+              ),
+            );
+          }
+
+          case "mute": {
+            if (p.topic === undefined) {
+              muteRoom(store, agentId);
+            } else {
+              muteTopic(store, agentId, p.topic);
+            }
+            return ok(
+              { ok: true, op: "mute" },
+              `room mute → ${p.topic !== undefined ? safe(p.topic) : "whole room"}`,
+            );
+          }
+
+          case "unmute": {
+            if (p.topic === undefined) {
+              unmuteRoom(store, agentId);
+            } else {
+              unmuteTopic(store, agentId, p.topic);
+            }
+            return ok(
+              { ok: true, op: "unmute" },
+              `room unmute → ${p.topic !== undefined ? safe(p.topic) : "whole room"}`,
+            );
+          }
+
+          case "tree": {
+            const n = store.records.length;
+            const tree = openTreeStore(store.treePath, n);
+            // F3 — the persisted view, loaded (and saved on first use), never rebuilt from the log.
+            // F5 — `loadView` tiles with a minimum block of 2, so no block covers a single message.
+            const tiling = loadView(store.treePath, n, COVER_BUDGET_LINES);
+            const blocks = tiling.map(([lo, hi]) => {
+              const size = hi - lo;
+              const raw = size <= RAW_MAX;
+              const summary = raw ? undefined : (tree.getNode(lo, hi) ?? undefined);
+              return { lo, hi, size, raw, ...(summary !== undefined ? { summary } : {}) };
+            });
+            return ok(
+              { ok: true, op: "tree", blocks },
+              withRows(
+                `room tree → ${blocks.length} block(s)`,
+                blocks.map(
+                  (b) =>
+                    `[${b.lo},${b.hi}) size ${b.size} ${b.raw ? "raw" : "summary"}${b.summary !== undefined ? ` · "${safe(b.summary)}"` : ""}`,
+                ),
+              ),
+            );
+          }
+
+          case "zoom": {
+            const lo = p.lo;
+            const hi = p.hi;
+            if (lo === undefined || hi === undefined) return fail("zoom requires lo and hi");
+            const n = store.records.length;
+            const validation = validateZoomRange(lo, hi, n);
+            if (!validation.ok) return fail(validation.error);
+            const tree = openTreeStore(store.treePath, n);
+            const children = zoom(tree, lo, hi, (seq) => {
+              const record = store.records[seq];
+              return record !== undefined ? recordLine(record) : "";
+            });
+            return ok(
+              { ok: true, op: "zoom", children },
+              withRows(
+                `room zoom → ${children.length} child(ren)`,
+                children.map(
+                  (c) =>
+                    `[${c.lo},${c.hi}) size ${c.size} ${c.raw ? "raw" : "summary"} · ${safe(c.text)}`,
+                ),
+              ),
+            );
+          }
+
+          case "recall": {
+            const pattern = p.pattern;
+            if (pattern === undefined) return fail("recall requires a pattern");
+            if (pattern.length > 200) return fail("pattern too long (max 200 chars)");
+            // Catastrophic backtracking: a quantifier over a group that itself contains a quantifier
+            // ((a+)+, (.*)*) is exponential on a non-matching input, and the scan deadline is only
+            // checked BETWEEN records — one such test can hang the tool for minutes. The shape is
+            // refused instead of run.
+            if (NESTED_QUANTIFIER.test(pattern)) {
+              return fail(
+                "pattern risks catastrophic backtracking (quantifier over a quantified group)",
+              );
+            }
+            let regex: RegExp;
+            try {
+              regex = new RegExp(pattern);
+            } catch {
+              return fail("invalid regex pattern");
+            }
+            const deadline = Date.now() + 1000;
+            const matches: Array<{ seq: number; record: RoomRecord }> = [];
+            for (let i = store.records.length - 1; i >= 0; i--) {
+              if (Date.now() > deadline) return fail("recall timed out");
+              const record = store.records[i]!;
+              const text = recordLine(record);
+              if (regex.test(text)) {
+                matches.push({ seq: record.seq, record });
+                if (matches.length >= RECALL_LIMIT_MAX) break;
+              }
+            }
+            return ok(
+              { ok: true, op: "recall", matches },
+              withRows(
+                `room recall → ${matches.length} match(es)`,
+                matches.map((m) => recordLine(m.record)),
+              ),
+            );
+          }
         }
+      } catch (error) {
+        // U6/K1 — a mutation that throws (the log write on a full disk, a corrupt tree) is a
+        // RESULT, never a throw out of `execute`: the host coerces a throwing tool into an
+        // error, and the room contract is a normal `{ok:false}`.
+        return fail(error instanceof Error ? error.message : "room operation failed");
       }
     },
   });

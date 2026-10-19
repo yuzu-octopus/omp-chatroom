@@ -21,8 +21,10 @@ import {
 import {
   disposeRoomSession,
   type RoomStore,
+  registerSweepNotifier,
   resetRoomStores,
   roomStoreFor,
+  roomTimers,
   storeFor,
 } from "../src/store/room-store";
 import { viewPath } from "../src/store/tree-store";
@@ -166,7 +168,8 @@ test("a parked/aborted holder's claim is reclaimable", () => {
   enqueueWaiter(s, "build/step", "B"); // the contender
 
   const claimed = reclaimIfStale(s, "build/step", Date.now());
-  expect(claimed?.holder).toBe("B"); // the waiter got the lease
+  expect(claimed.reclaimed).toBe(true);
+  expect(claimed.holder).toBe("B"); // the waiter got the lease
   expect(s.claims.get("build/step")?.holder).toBe("B");
 
   const rel = s.records.filter((r) => r.kind === "release").at(-1)!;
@@ -181,11 +184,17 @@ test("an aborted holder's claim is reclaimable and a fresh claim is not", () => 
   const s = newStore();
   grant(s, "build/step", "A", 3_600_000);
   registerAgent("A", "running");
-  expect(reclaimIfStale(s, "build/step", Date.now())).toBeNull(); // live + no waiter → untouched
+  // A live claim: nothing happens, and the outcome says so.
+  expect(reclaimIfStale(s, "build/step", Date.now())).toMatchObject({ reclaimed: false });
   expect(s.claims.get("build/step")?.holder).toBe("A");
 
   registerAgent("A", "aborted");
-  expect(reclaimIfStale(s, "build/step", Date.now())).toBeNull(); // no waiter → dropped, no successor
+  // An aborted holder's claim IS reclaimed even with a live TTL. The old API returned the
+  // promoted claim, so this case (no waiter → no successor) looked identical to "not stale" and
+  // the caller told the agent its release was denied.
+  const outcome = reclaimIfStale(s, "build/step", Date.now());
+  expect(outcome.reclaimed).toBe(true);
+  expect(outcome.holder).toBe(null); // no waiter → the lease is simply dropped
   expect(s.claims.has("build/step")).toBe(false);
 });
 
@@ -824,19 +833,17 @@ test("recall: pattern over 200 chars is rejected", async () => {
   expect(result.details?.error).toContain("too long");
 });
 
-// --- F1 security: recall ReDoS timeout guard ---
+// --- F1 security: recall ReDoS guard ---
 
-test("recall: a catastrophic regex is bounded by the scan deadline, not a hang", async () => {
+test("recall: a catastrophic regex is refused up front, never run", async () => {
   const { store, ctx } = newTestStore();
-  // The pattern must actually backtrack. `(a+)+$` against an all-`a` body MATCHES immediately (0 ms)
-  // — it only backtracks when the match fails, so each body needs a non-matching tail (`a…ab`).
-  // Measured: `(a+)+$` on 50 a's = 0 ms; on 50 a's + "b" = ~600 ms.
+  // `(a+)+$` is the classic exponential shape: it only backtracks when the match FAILS, so the
+  // bodies carry a non-matching tail. The shape is refused before any test runs, so the scan
+  // deadline never has to cover a single catastrophic `regex.test()`.
   for (let i = 0; i < 200; i++) {
     store.append({ kind: "msg", from: "AgentA", topic: "t", body: `${"a".repeat(50)}b` });
   }
   const start = Date.now();
-  // Race against a hard timeout: if the deadline guard regresses, this fails fast rather than
-  // hanging the suite.
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const result = await Promise.race([
@@ -845,15 +852,22 @@ test("recall: a catastrophic regex is bounded by the scan deadline, not a hang",
         timer = setTimeout(() => reject(new Error("recall hung — ReDoS regression")), 15_000);
       }),
     ]);
-    const elapsed = Date.now() - start;
-    // The deadline is checked BETWEEN records, so a single `regex.test()` can overrun it. Bound the
-    // whole call generously: the point is that it RETURNS, not that it is fast.
-    expect(elapsed).toBeLessThan(10_000);
+    expect(Date.now() - start).toBeLessThan(2_000);
     expect(result.details).toMatchObject({ ok: false });
-    expect(result.details?.error).toContain("timed out");
+    expect(result.details?.error).toContain("catastrophic backtracking");
   } finally {
     clearTimeout(timer);
   }
+});
+
+test("recall: an ordinary pattern still scans the log", async () => {
+  const { store, ctx } = newTestStore();
+  store.append({ kind: "msg", from: "AgentA", topic: "t", body: "needle in the haystack" });
+  store.append({ kind: "msg", from: "AgentA", topic: "t", body: "nothing here" });
+  const result = await invokeRoom(ctx, { op: "recall", pattern: "needle" });
+  expect(result.details).toMatchObject({ ok: true, op: "recall" });
+  const matches = (result.details as { matches: Array<{ record: { body?: string } }> }).matches;
+  expect(matches.length).toBe(1);
 });
 
 // --- F3/F5: the room tree op serves the persisted, no-whole-message view ---
@@ -1097,4 +1111,67 @@ test("post with an unknown replyTo still posts, with no threadRoot", async () =>
   const record = store.byId.get((res.details as unknown as { id: string }).id);
   if (record?.kind !== "msg") throw new Error("expected msg");
   expect(record.threadRoot).toBeUndefined();
+});
+
+// --- the review fixes: expiry notice, hook guard, throw-to-result -----------
+
+test("the claim sweep hands the expiry to the registered notifier", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "room-tool-"));
+  const store = roomStoreFor(fakeCtx(root, "AgentA"));
+  // A stale lease: a TTL of zero means it is already past.
+  store.append({ kind: "claim", from: "AgentA", resource: "build/step", ttlMs: 0 });
+  const seen: string[] = [];
+  registerSweepNotifier(store.root, (expired) => {
+    for (const claim of expired) seen.push(`${claim.resource}:${claim.prev}`);
+  });
+  // The sweep is the second interval the store schedules; capture it and run it.
+  const intervals: Array<() => unknown> = [];
+  const ctx = {
+    ...fakeCtx(root, "AgentA"),
+    setInterval: (cb: () => unknown) => {
+      intervals.push(cb);
+      return 0 as unknown as Timer;
+    },
+  } as unknown as ExtensionContext;
+  roomTimers.stop(store.root);
+  roomTimers.start(store.root, ctx);
+  expect(intervals.length).toBe(2);
+  await intervals[1]!();
+  expect(seen.length).toBe(1);
+  expect(seen[0]).toContain("build/step:AgentA");
+  // The expiry is a durable record, not just a notification.
+  const release = store.records.filter((r) => r.kind === "release").at(-1);
+  expect(release?.kind).toBe("release");
+  if (release?.kind === "release") expect(release.reason).toBe("expired");
+});
+
+test("a release of a stale claim held by someone else reports the reclaim, not a denial", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "room-tool-"));
+  const ctx = fakeCtx(root, "AgentB");
+  const store = roomStoreFor(ctx);
+  registerAgent("AgentA", "running");
+  store.append({ kind: "claim", from: "AgentA", resource: "build/step", ttlMs: 0 });
+  const res = await invokeRoom(ctx, { op: "release", topic: "build", key: "step" });
+  expect(res.details).toMatchObject({ ok: true, op: "release" });
+  expect(String(res.content[0]?.text)).toContain("reclaimed");
+  expect(String(res.content[0]?.text)).not.toContain("denied");
+});
+
+test("a throwing mutation is a result, never a throw out of the tool", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "room-tool-"));
+  const ctx = fakeCtx(root, "AgentA");
+  const store = roomStoreFor(ctx);
+  // A full disk (ENOSPC) on the log write.
+  const original = store.append;
+  (store as { append: typeof store.append }).append = (() => {
+    throw new Error("ENOSPC: no space left on device");
+  }) as typeof store.append;
+  try {
+    const res = await invokeRoom(ctx, { op: "post", topic: "t", body: "hello" });
+    expect(res.details).toMatchObject({ ok: false });
+    expect(String(res.details?.error)).toContain("ENOSPC");
+    expect(res.content[0]?.text).toContain("ENOSPC");
+  } finally {
+    (store as { append: typeof store.append }).append = original;
+  }
 });

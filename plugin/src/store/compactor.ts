@@ -33,21 +33,37 @@ const SUMMARY_MAX_TOKENS = TREE_REC;
 
 // --- spend: a RATE per UTC day (K4/T5) ------------------------------------
 
-let spendDay = "";
-let spendToday = 0;
+// I2 — no session-scoped module state: the daily budget and the write mutex are keyed by the
+// room ROOT, not shared across the process. Two projects in one omp process must not share one
+// compaction budget (a busy room would starve the other) or one mutex.
+interface Spend {
+  day: string;
+  today: number;
+}
+const SPEND = globalMap<string, Spend>("__roomCompactionSpend");
 
-function rollSpendDay(): void {
+function spendFor(root: string): Spend {
+  let spend = SPEND.get(root);
+  if (spend === undefined) {
+    spend = { day: "", today: 0 };
+    SPEND.set(root, spend);
+  }
+  return spend;
+}
+
+function rollSpendDay(spend: Spend): void {
   const day = new Date().toISOString().slice(0, 10);
-  if (spendDay !== day) {
-    spendDay = day;
-    spendToday = 0;
+  if (spend.day !== day) {
+    spend.day = day;
+    spend.today = 0;
   }
 }
 
-/** T5 cap probe: calls spent so far today. */
-export function compactionSpendToday(): number {
-  rollSpendDay();
-  return spendToday;
+/** T5 cap probe: calls spent so far today by this room. */
+export function compactionSpendToday(root: string): number {
+  const spend = spendFor(root);
+  rollSpendDay(spend);
+  return spend.today;
 }
 
 /**
@@ -55,9 +71,10 @@ export function compactionSpendToday(): number {
  * accepts any finite number, so the call sites clamp to >= 1: a knob set to 0 must mean
  * "compact ~nothing", never "unlimited" and never a crash.
  */
-function atCap(limit: number = COMPACT_MAX_CALLS_PER_DAY): boolean {
-  rollSpendDay();
-  return spendToday >= limit;
+function atCap(root: string, limit: number = COMPACT_MAX_CALLS_PER_DAY): boolean {
+  const spend = spendFor(root);
+  rollSpendDay(spend);
+  return spend.today >= limit;
 }
 
 /** The configured daily cap, floored at 1 (see atCap). */
@@ -67,29 +84,42 @@ function configuredCap(store: RoomStore): number {
 
 // [invented] test seam (the `__roomTest` precedent, §2.1.1 M-4): put the counter at the cap
 // without making 20 000 real calls. No production caller.
-export const __compactTest: { resetSpend(): void; setSpendToday(n: number): void } = {
-  resetSpend(): void {
-    spendDay = "";
-    spendToday = 0;
+export const __compactTest: {
+  resetSpend(root?: string): void;
+  setSpendToday(root: string, n: number): void;
+} = {
+  // No root → clear every room's counter (a between-test cleanup).
+  resetSpend(root?: string): void {
+    if (root === undefined) {
+      SPEND.clear();
+      return;
+    }
+    SPEND.set(root, { day: "", today: 0 });
   },
-  setSpendToday(n: number): void {
-    rollSpendDay();
-    spendToday = n;
+  setSpendToday(root: string, n: number): void {
+    const spend = spendFor(root);
+    rollSpendDay(spend);
+    spend.today = n;
   },
 };
 
 // --- the write mutex (§3.6 T2, verbatim) -----------------------------------
 
 // A promise chain, not a lock: `streamSimple` awaits between the CAS check and the write, so the
-// check-and-write sequence must be serialised explicitly or two streams interleave.
-let queue: Promise<void> = Promise.resolve();
+// check-and-write sequence must be serialised explicitly or two streams interleave. One chain
+// per room root (I2).
+const MUTEX = globalMap<string, Promise<void>>("__roomCompactionMutex");
 
-export function withWriteMutex<T>(criticalSection: () => Promise<T>): Promise<T> {
+export function withWriteMutex<T>(root: string, criticalSection: () => Promise<T>): Promise<T> {
+  const queue = MUTEX.get(root) ?? Promise.resolve();
   const result = queue.then(criticalSection);
-  queue = result.then(
-    () => undefined,
-    () => undefined,
-  ); // keep the chain alive on error
+  MUTEX.set(
+    root,
+    result.then(
+      () => undefined,
+      () => undefined,
+    ), // keep the chain alive on error
+  );
   return result;
 }
 
@@ -223,11 +253,11 @@ export async function compactOnce(
   const [lo, hi] = block;
   const tree = openTreeStore(store.treePath, store.records.length);
   if (tree.getNode(lo, hi) !== null) return false; // T4 — one node per range
-  if (atCap(configuredCap(store))) return false; // T5 — the rate cap, checked before spending
-  return withWriteMutex(async () => {
+  if (atCap(store.root, configuredCap(store))) return false; // T5 — the rate cap, before spending
+  return withWriteMutex(store.root, async () => {
     if (tree.getNode(lo, hi) !== null) return false; // re-check inside the critical section
-    if (atCap(configuredCap(store))) return false;
-    spendToday++; // one logical compaction = one call
+    if (atCap(store.root, configuredCap(store))) return false;
+    spendFor(store.root).today++; // one logical compaction = one call
     const summary = await summarizeBlock(ctx, store, lo, hi);
     if (summary === "") return false; // skipped; the raw log is the fallback (T2/T3)
     return tree.putNode(lo, hi, summary);
@@ -245,7 +275,7 @@ export async function compactOnce(
 async function runJobs(store: RoomStore, ctx: ExtensionContext): Promise<void> {
   const tree = openTreeStore(store.treePath, store.records.length);
   for (const block of tree.ready(COMPACT_JOBS)) {
-    if (atCap(configuredCap(store))) return;
+    if (atCap(store.root, configuredCap(store))) return;
     await compactOnce(store, ctx, block);
   }
 }
@@ -276,9 +306,11 @@ export function startCompactor(store: RoomStore, ctx: ExtensionContext): void {
   // Capture the bound clearer up front; `ctx` may be unusable by the time we stop.
   const clearTimer = ctx.clearTimer?.bind(ctx);
   if (clearTimer === undefined) return; // no timer API → no job (never a raw timer; I4)
-  const handle = ctx.setInterval(() => {
-    void runJobs(store, ctx);
-  }, COMPACT_INTERVAL_MS);
+  // The callback RETURNS the promise: the host's ManagedTimers isolates a rejected promise only
+  // when the callback hands it back (`result instanceof Promise`), so `void runJobs(...)` would
+  // let a throw inside the compactor (ENOSPC on a tree write, say) escape as an unhandled
+  // rejection — outside the extension error channel, where it can take the process down.
+  const handle = ctx.setInterval(() => runJobs(store, ctx), COMPACT_INTERVAL_MS);
   COMPACTORS.set(store.root, { clearTimer, handle });
 }
 

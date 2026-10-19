@@ -7,6 +7,7 @@ import { type ClaimState, expireStale, hydrateClaims } from "./claims";
 import { startCompactor, stopCompactor } from "./compactor";
 import { loadRoomConfig, type RoomConfig, resolveRoomId } from "./config";
 import { appendLine, closeRoomLog, openRoomLog, replay } from "./log";
+import { legacyRoomRoot, migrateLegacyRoom, roomRootFor } from "./room-root";
 import type { RoomRecord, RoomRecordDraft } from "./schema";
 import { invalidateTree } from "./tree-store";
 
@@ -226,20 +227,20 @@ export function storeFor(root: string, roomId: string): RoomStore {
 
 function rootOf(ctx: ExtensionContext): string {
   // The room MUST be one per project, shared by the main session and every subagent it spawns.
-  //
-  // `ctx.localProtocolOptions` is per-SESSION: a subagent's artifacts dir is its own session file
-  // minus `.jsonl` (`artifactsDirectoryFor`), so deriving the room from it gave every agent a
-  // private room — the claim board coordinated nobody. Verified live: main resolved
-  // `<session>/local` while its subagent resolved `<session>/Task1/local`.
-  //
   // `ctx.cwd` is the project directory and is inherited by subagents, so it is the only stable
-  // per-tree key. The `local://` protocol root is deliberately NOT used for the room.
-  return `${ctx.cwd}/.omp-room`;
+  // per-tree key — the `local://` protocol root is per-SESSION and would give every agent a
+  // private room. See `roomRootFor` for where that key is stored (the global omp session store,
+  // or project-local for temp roots).
+  return roomRootFor(ctx);
 }
 
 export function roomStoreFor(ctx: ExtensionContext): RoomStore {
   // [invented] R10
   const root = rootOf(ctx);
+  // One-time move of a legacy project-local room into the global store. It runs on the FIRST
+  // open of the root only (the store is cached per root afterwards) and is a no-op once the
+  // global room holds a log.
+  if (!STORES.has(root)) migrateLegacyRoom(legacyRoomRoot(ctx.cwd), root);
   const agentId = ctx.agent.id;
   const live = SESSIONS.get(root);
   // One ref per session: a repeat call from the same agent must not bump the refcount again.
@@ -281,6 +282,29 @@ export function resetRoomStores(): void {
 
 // §3.6 S5 pruning job — in-memory records array ONLY; the JSONL file is never truncated (K19).
 export const PRUNE_INTERVAL_MS = 60_000; // [invented]
+
+/**
+ * A claim that just expired on the sweep.
+ *
+ * The sweep runs in the store layer, which cannot import the delivery layer (delivery imports the
+ * store — a cycle). So the sweep hands the expiry to a notifier registered by the session that
+ * opened the room, and the notifier delivers the promised T0 notice ("your lease expired") to the
+ * displaced holder.
+ */
+export interface ExpiredClaim {
+  resource: string;
+  prev: string;
+  next?: string;
+  record: RoomRecord;
+}
+export type SweepNotifier = (expired: readonly ExpiredClaim[]) => void | Promise<void>;
+
+/** Notifiers, one per room root (I2: keyed by root, in a globalThis map). */
+const SWEEP_NOTIFIERS = globalMap<string, SweepNotifier>("__roomSweepNotifiers");
+
+export function registerSweepNotifier(root: string, notifier: SweepNotifier): void {
+  SWEEP_NOTIFIERS.set(root, notifier);
+}
 export function enforceRetention(store: RoomStore, now: number): RoomRecord | null {
   const cutoff = now - store.config.logMaxAgeMs;
   let dropped = 0;
@@ -336,7 +360,13 @@ export const roomTimers: RoomTimerRegistry = {
           enforceRetention(store, Date.now());
         }, PRUNE_INTERVAL_MS),
         ctx.setInterval(() => {
-          expireStale(store, Date.now());
+          const expired = expireStale(store, Date.now());
+          if (expired.length === 0) return;
+          const notifier = SWEEP_NOTIFIERS.get(root);
+          if (notifier === undefined) return;
+          // The promise is RETURNED so the host's ManagedTimers isolates a rejection from the
+          // delivery (a dead session's send) instead of letting it escape unhandled.
+          return notifier(expired);
         }, store.config.claimSweepMs),
       ],
     });
