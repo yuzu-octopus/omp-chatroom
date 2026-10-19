@@ -3,6 +3,11 @@ export function roomIdFor(root: string): string {
   // K7/X1 — ROOT-STABLE, never a session id
   return `r${crypto.createHash("sha256").update(root).digest("hex").slice(0, 16)}`;
 }
+export function roomDirNameFor(cwd: string): string {
+  // The global room directory leaf: 16 hex chars of the project path. Distinct from the room id
+  // (minted from the room ROOT), so the directory name and the id never have to agree.
+  return crypto.createHash("sha256").update(cwd).digest("hex").slice(0, 16);
+}
 export function logPathFor(root: string, roomId: string): string {
   // K14 — the ONE log filename
   return `${root}/room/${roomId}.jsonl`;
