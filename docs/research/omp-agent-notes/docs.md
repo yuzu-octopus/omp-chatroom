@@ -23,20 +23,22 @@ ones only via their `file:line` anchors below.
 | `brief.md` | 224 lines | the original research brief + Addendum A (hybrid) + Addendum B (tree). |
 | `PROBES.md` | 1.6 KB | host-surface probe results. |
 | `P6-swarm-verified.md` | 2.6 KB | live 3-gate verification of the built plugin. |
+| `room-vs-native.md` | — | the room-vs-native-substrate comparison, written after the build. |
 | `findings/F*.md` | — | per-angle evidence. |
 | `findings/raw/M*.md` | — | raw worker probes behind the findings. |
-| `review/` … `review6/` | — | 6 rounds of adversarial review. |
+| `review/` … `review6/`, `review8/` | — | 7 rounds of adversarial review. There is **no `review7/`** — do not cite it. |
 
 ### `docs/research/optmem-2026-10-08/` — the tree/summariser side-research
 
 `CONCLUSION.md` (6.8 KB) is the entry point; `A-merge-order-verification.md` is the document that
-stops a specific regression; `optchat-2026-10-08.md` (474 lines) is the saved source spec
-UniiChat, renamed from OptChat) (`optmem-2026-10-08/C-spec-delta.md:1-5`).
+stops a specific regression; `E-mistakes-crosscheck.md` is the cross-check of the other track's
+mistakes; `optchat-2026-10-08.md` (474 lines) is the saved source spec (UniiChat, renamed from
+OptChat) (`optmem-2026-10-08/C-spec-delta.md:1-5`).
 
 ### `docs/research/embeddings/` — the retrieval side-research
 
 `CONCLUSION.md` (5.0 KB) is the entry point; `REPORT.md` (345 lines, 53 sources)
-(`embeddings/CONCLUSION.md:93`); `findings/E1`–`E7`, `F1`–`F15`.
+(`embeddings/CONCLUSION.md:93`); `brief.md`; `findings/E1`–`E7`, `F1`–`F15`.
 
 ---
 
@@ -143,22 +145,34 @@ installed source … quote the plan line before refuting it, or it is not a find
 
 ## 5. How to tell which is current
 
+> ⚠️ **The addenda are themselves now one version behind the code.** `PLAN-build.md` still says
+> the host is 18.8.0 and that the room root is `<project cwd>/.omp-room`. Both are superseded:
+> the pin is now **18.12.3** and the room root is the **global omp session store**
+> (`getSessionsDir()/rooms/<16 hex of the project path>`), with a temp-dir project staying
+> project-local and a legacy project-local room migrated once. The plan was not re-edited; the
+> **code** and the rewritten root `AGENTS.md` (`AGENTS.md:96-128`) are the authority. Do not quote
+> the plan's room-root or host-version lines as current.
+
 Three mechanisms, in order of authority:
 
 1. **Dated addenda at the top of `PLAN-build.md`** (`:8-62`). These are declarations of deliberate
-   post-build change and they name the code sites:
+   post-build change and they name the code sites — but see the warning above, they have since
+   been overtaken:
    - `:8-16` — **host moved 18.7.0 → 18.8.0**; `engines`/`peerDependencies`, `HOST_VERSION_PIN` and
-     `tests/drift.test.ts` moved (commit `7e82134`).
+     `tests/drift.test.ts` moved (commit `7e82134`). Since then the host moved again — twice —
+     to **18.12.3**, and the pin moved with it (`AGENTS.md:160-170`).
    - `:18-62` — **five constants and one formula changed after the build**. A reader who trusts the
      body over the code on any of these will be wrong (`:20-21`):
      1. `TREE_REC` 288 → **512** (`plugin/src/store/tree-store.ts:29`)
      2. `COMPACT_MAX_RETRIES` 3 → **5**, with a byte ruler in the prompt
         (`plugin/src/store/compactor.ts:12`, `:20`, `:178`)
      3. the compactor no longer sends its own system prompt (`compactor.ts:26-28`, `:117-124`, `:176`)
-     4. the room root is `<project cwd>/.omp-room`, **not** the `local://` root
-        (`plugin/src/store/room-store.ts:206-217`)
+     4. the room root is **not** the `local://` root — and is no longer `<project cwd>/.omp-room`
+        either: it is the **global omp session store**, with a temp-dir exception and a one-time
+        legacy migration (`plugin/src/store/room-root.ts:30-32, 54-57, 77-146`; the plan's
+        `:46-49` describes the superseded intermediate state)
      5. the digest rides `BeforeAgentStartEventResult.message`, not the system prompt
-        (`plugin/src/onboarding/hook.ts:63-72`)
+        (`plugin/src/onboarding/hook.ts:41-48, 100-108`)
      6. merge age stays `T - lo` — the spec's fix was verified and **rejected** (§6.2)
    - `:55-62` — what was corrected **in place** versus what was left as historical record. The §5.2
      `TREE_REC` row now reads 512 (`:1500-1501`); the other superseded numbers (§3.6 `:571`,
@@ -176,8 +190,15 @@ Three mechanisms, in order of authority:
 **Dates, as the fastest currency check:** R1/R2/R3 = 2026-10-06 (`REPORT.md:331`, `brief.md:3`);
 round 4 = 2026-10-07 (`review4/CONSOLIDATED.md:3`); `HANDOFF.md` = 2026-10-07 (`:3`);
 embeddings = 2026-10-07 (`embeddings/CONCLUSION.md:3`); optmem revision = 2026-10-09
-(`optmem-2026-10-08/CONCLUSION.md:3`). The **last** substantive change to the delivered code is the
-2026-10-09 addendum (`PLAN-build.md:18`).
+(`optmem-2026-10-08/CONCLUSION.md:3`). The 2026-10-09 addendum (`PLAN-build.md:18`) was the last
+substantive change **recorded in the plan** — it is **not** the last change to the delivered code.
+Since then the plugin moved to host **18.12.3**, the room root moved into the **global omp
+session store** (with a temp-dir exception and a one-time legacy migration), a **single-writer
+lockfile** was added, every delivery send became **bounded** (250 ms) because the host's send
+resolves at the end of the target's turn, a **cursor floor** was applied to every cursor bump, the
+sweep's expiry notice was handed to a **notifier** the main session registers, and the tool's op
+switch gained a throw-to-result guard. The rewritten root `AGENTS.md` records all of it
+(`AGENTS.md:96-232`); the plan does not.
 
 ---
 
@@ -251,55 +272,59 @@ Two further optmem conclusions an assistant should not contradict:
   cache blocks and per-day log split are inapplicable.
 ---
 
-## 7. The existing root `AGENTS.md`, and how it differs from a guidelines doc
+## 7. The root `AGENTS.md` — what it used to say, and what it says now
 
-The root file is *titled* "Repository Guidelines" (`AGENTS.md:1`) and is laid out like one, but its
-content is a **design summary**, and several of its "current state" claims are now false. Both
-facts matter for the rewrite.
+> **This section is now a historical record.** The root file was *titled* "Repository Guidelines"
+> (`AGENTS.md:1`) but was a **design summary** whose "current state" claims were false. It has
+> since been **rewritten into a real guidelines document** (233 lines): it now carries the
+> authority order, the development commands, the invariants I1-I11, the room-root rules, the
+> single-writer lock, the host pin and a live-verification table (`AGENTS.md:1-232`). The table in
+> §7.1 is kept as the record of **what was wrong**; the "Current truth" column is the code as it
+> stands today, not the file as it stood then.
 
-### 7.1 What it says that is no longer true
+### 7.1 What it used to say that was false, and what is true now
 
-| `AGENTS.md` claim | Line | Current truth |
+| `AGENTS.md` claim (pre-rewrite) | Line (pre-rewrite) | Current truth |
 |---|---|---|
-| "**Current state: documentation only.** There is no `src/`, no `tests/`, no `package.json`, and no build." | `:15-17` | `plugin/src/**` exists — 33 `.ts` files across `store/`, `attention/`, `tools/`, `panel/`, `cards/`, `onboarding/`, `commands/` plus `index.ts`, `version.ts`, `globals.ts`, `ids.ts` — plus 11 test files. "Option B is built, tested, and verified live" (`HANDOFF.md:3`). |
+| "**Current state: documentation only.** There is no `src/`, no `tests/`, no `package.json`, and no build." | `:15-17` | `plugin/src/**` exists — **35** `.ts` files across `store/`, `attention/`, `tools/`, `panel/`, `cards/`, `onboarding/`, `commands/` plus `index.ts`, `version.ts`, `globals.ts`, `ids.ts` — plus **15** test files. "Option B is built, tested, and verified live" (`HANDOFF.md:3`). |
 | "Planned layout, from `PLAN-build.md` §2.1 — **none of it exists yet**." | `:73-75` | Same: the layout exists. |
-| "**Host: omp 18.6.1**" | `:153` | Superseded twice. 18.7.0 (`PLAN-build.md:3`; the 18.6.1 label was a false claim, `review4/D2-host-integration.md:6-9`), then **18.8.0** (`PLAN-build.md:8-16`). |
-| "There is no build, lint, or format step, and none is specified." | `:92-93` | `plugin/biome.json` exists and the gates run `bunx --bun @biomejs/biome check src tests` → 0 errors, 0 warnings (`HANDOFF.md:33`). |
+| "**Host: omp 18.6.1**" | `:153` | Superseded three times: 18.7.0 (`PLAN-build.md:3`; the 18.6.1 label was a false claim, `review4/D2-host-integration.md:6-9`), then 18.8.0 (`PLAN-build.md:8-16`), and now the live host and the pin are **18.12.3** (`AGENTS.md:160-166`). |
+| "There is no build, lint, or format step, and none is specified." | `:92-93` | `plugin/biome.json` exists and the gates run `bunx --bun @biomejs/biome check src tests` → clean (`AGENTS.md:74-82`). |
 | "Framework: `bun:test`. **No linter or formatter is configured.**" | `:163` | Same contradiction. |
-| "**State**: one module-level store keyed by the `local://` root" | `:122-123` | Superseded: the room root is `<project cwd>/.omp-room`, deliberately **not** the `local://` root, which is per-session (`PLAN-build.md:46-49`, citing `plugin/src/store/room-store.ts:206-217`). |
-| "**Path resolution**: `ctx.localProtocolOptions` when present, else derive from `sessionManager`." | `:126-127` | Superseded by the same addendum item 4. |
+| "**State**: one module-level store keyed by the `local://` root" | `:122-123` | Superseded twice: first the room root became `<project cwd>/.omp-room`, then the **global omp session store** — `getSessionsDir()/rooms/<16 hex of the project path>` — with a temp-dir exception and a one-time legacy migration (`AGENTS.md:96-116`). |
+| "**Path resolution**: `ctx.localProtocolOptions` when present, else derive from `sessionManager`." | `:126-127` | Superseded by the same change. The room is keyed on `ctx.cwd` and **stored** in the global store; the `local://` root is only the *artifacts* dir. |
 | "**Not yet specified** in the plan: `engines`, `dependencies`, `scripts`, `tsconfig.json` contents, CI." | `:154-155` | Specified: manifest at `PLAN-build.md` §2.2 (`:439-519`), `tsconfig.json` at §2.3 (`:520-547`); `plugin/package.json` and `plugin/tsconfig.json` exist. |
 | Verdict-history row for R3: "10 phases (P0–P8 + P1b)" | `:21-26` | The plan has **11** phases: P-1, P0, P1, P2, P1b, P3, P4, P5, P6, P7, P8 (`PLAN-build.md:2110-2313`). A8 audited exactly this mismatch (`review/A8-consistency.md:145-154`), and `review2/CONSOLIDATED.md:50-52` records a reviewer's false negative on the same point. |
-| "Tool names … separate names, **not one op-dispatched tool**" | `:109-110` | Half-wrong: the three **wait** tools are separate precisely because they are not op-dispatched (`PLAN-build.md:1056-1059`); the **`room`** tool *is* op-dispatched over 12 ops (`PLAN-build.md:1152-1155`). |
+| "Tool names … separate names, **not one op-dispatched tool**" | `:109-110` | Half-wrong: the three **wait** tools are separate precisely because they are not op-dispatched (`PLAN-build.md:1056-1059`); the **`room`** tool *is* op-dispatched over 11 ops (`PLAN-build.md:1152-1155`). |
 
-### 7.2 What it gets right and should be carried forward
+### 7.2 What it got right, and what the rewrite carried forward
 
-- The motivation paragraph and the mermaid data-flow diagram (`AGENTS.md:5-13`, `:28-49`) — an
-  accurate one-screen summary of the architecture.
-- The three-tier attention table and the caps line (`AGENTS.md:51-62`) — matches
-  `PLAN-build.md` §5.1/§5.2.
+- The motivation paragraph and the mermaid data-flow diagram — an accurate one-screen summary of
+  the architecture. Still in the file (`AGENTS.md:20-44`).
+- The three-tier attention table and the caps line — matches `PLAN-build.md` §5.1/§5.2.
 - The `customType` namespace, the `<topic>/<key>` resource form, `loadMode:"essential"`, the
   `interruptible` caveat, the `execute` signature, and the K1 result contract with `useless: true`
-  (`AGENTS.md:111-129`) — all still correct and operationally useful.
-- **The probes section, including the `pi_natives` gotcha and the K1-coercion limit**
-  (`AGENTS.md:173-194`). This is the single most expensive-to-rediscover content in the repo and
-  is not superseded by anything: the K1 coercion lives in the agent loop, so a probe that calls
-  `execute()` directly cannot observe it (`PROBES.md:25-27`; `PLAN-build.md:2408-2411`).
-- The "Open Questions" list (`AGENTS.md:196-224`) — matches the corpus's own unmeasured list and
-  should be extended with the two optmem items (`optmem-2026-10-08/CONCLUSION.md:105-110`: whether
-  the view should be byte-budgeted rather than line-budgeted, and whether a 30k-char tool-output
-  bound is right).
+  — all still correct and operationally useful (`AGENTS.md:160-172`).
+- **The probes gotcha and the K1-coercion limit.** This is the single most expensive-to-rediscover
+  content in the repo and is not superseded by anything: the K1 coercion lives in the agent loop,
+  so a probe that calls `execute()` directly cannot observe it (`PROBES.md:25-27`;
+  `PLAN-build.md:2408-2411`).
+- The "Open Questions" list — matches the corpus's own unmeasured list and was extended with the
+  two optmem items (`optmem-2026-10-08/CONCLUSION.md:105-110`: whether the view should be
+  byte-budgeted rather than line-budgeted, and whether a 30k-char tool-output bound is right).
 
-### 7.3 How a guidelines doc differs from this
+### 7.3 The rewrite that has since happened
 
-A guidelines doc answers **"what do I do and not do while editing this repo"**: commands, gates,
-file ownership, invariants, and a do-not-re-litigate list. The root `AGENTS.md` today is a
-*design narrative*: it explains why the plugin exists, shows the intended architecture, and states
-conventions — but it carries no gates, no test commands that work, no per-area ownership, and no
-list of settled decisions that must not be reopened. The practical consequence of that mix is
-that its "current state" claims rot silently, because they are assertions rather than pointers.
+The root `AGENTS.md` today **is** a guidelines document — it answers "what do I do and not do
+while editing this repo": commands, gates, file ownership, invariants, and a do-not-re-litigate
+list (`AGENTS.md:1-232`). It carries the authority order (`AGENTS.md:11-15`), the working
+commands (`AGENTS.md:74-82`), the invariants **I1-I11** in a table with enforcement sites
+(`AGENTS.md:126-158`), the room-root rules including the temp-dir exception and the legacy
+migration (`AGENTS.md:96-116`), the single-writer lock (`AGENTS.md:118-128`), the host pin and
+the load-time drift warning (`AGENTS.md:160-170`), the four still-unverified items
+(`AGENTS.md:196-199`) and a **live-verification table** against omp 18.12.3 (`AGENTS.md:204-232`).
 
-A correct replacement should therefore:
+What a future rewrite must still do:
 
 1. Point at `HANDOFF.md` for current state instead of asserting it.
 2. Point at `PLAN-build.md` §4.1 (`:1152-1258`) and §5.2 (`:1483-1543`) for the normative tables
@@ -308,7 +333,8 @@ A correct replacement should therefore:
    sections plus the two side-research conclusions in §6 above.
 4. Keep the probes gotchas verbatim.
 5. Be explicit that the plan body is a historical build record and that the dated addenda
-   (`PLAN-build.md:8-62`) win where they conflict.
+   (`PLAN-build.md:8-62`) win where they conflict — **and** that the addenda themselves are now
+   one version behind the code (§5).
 
 ---
 
@@ -333,8 +359,8 @@ A correct replacement should therefore:
    called by nothing; both are now fixed (`HANDOFF.md:57-62`,
    `review6/wiring.md:523-533`, `review6/host.md:9-19`).
    The audit is dated 2026-10-07 (`review6/wiring.md:2`) and states it read "all 24 `.ts` files"
-   (`review6/wiring.md:4`); `plugin/src/` now holds 33 `.ts` files, so treat the table as a dated
-   snapshot and re-run it for anything added since.
+   (`review6/wiring.md:4`); `plugin/src/` now holds **35** `.ts` files, so treat the table as a
+   dated snapshot and re-run it for anything added since.
 5. **Every review round keeps a "do not act on these" list.** Before changing a design decision,
    check: `review/CONSOLIDATED.md:6-12` (3 refuted), `review4/CONSOLIDATED.md:47-67` (X3/X4/X5 —
    three of the orchestrator's own fixes were wrong), `optmem-2026-10-08/CONCLUSION.md:30-62`
@@ -355,17 +381,21 @@ A correct replacement should therefore:
    as `event` → cut the wait tools), A3 tree worth (<1 read per 10 sessions or >$5/day → cut the
    tree), A4 board value (no claim in a 20-subagent run → cut the board). A tripped criterion is
    recorded in the README's status section, not absorbed silently (`:2129`).
-10. **Known limits that carry forward** (`HANDOFF.md:84-92`): mute and topic-follow are
-    session-scoped and live only in `MemberState` (only the read cursor persists, via
-    `pi.appendEntry`); the room is in-process only (a second writer would tear lines); `ctx.signal`
-    does not exist, so the panel aborts on `session_shutdown`; the room is **not** a token-cost win
-    — its value is correctness; and room message volume has no study behind it, so the design caps
+10. **Known limits that carry forward** (`HANDOFF.md:84-92`, plus what has since changed): mute and
+    topic-follow are session-scoped and live only in `MemberState` (only the read cursor persists,
+    via `pi.appendEntry`); the room is **one per project** and **one omp PROCESS per project** —
+    a second process on the same project now fails loudly with `room file locked by pid N` rather
+    than tearing lines (`AGENTS.md:118-128`; `plugin/src/store/log.ts:25-63`); `ctx.signal` does
+    not exist, so the panel aborts on `session_shutdown`; the room is **not** a token-cost win —
+    its value is correctness; and room message volume has no study behind it, so the design caps
     it rather than proving it helps.
 11. **Host citations carry drift, not error.** The 18.7.0→18.8.0 move was verified: all ten deep
     specifiers resolve and the two `.d.ts` deltas are additive; the 18.7.0 citations remain valid
     as *line-number* evidence with +5..+10 drift (`PLAN-build.md:8-16`, and the same note in
-    `SCAFFOLD.md:60-66`). Verify a cited line before relying on its number.
-12. **Never present these as settled** (`AGENTS.md:196-224`,
+    `SCAFFOLD.md:60-66`). Since then the host moved to **18.12.3** and the list shrank to **nine**
+    deep specifiers (`plugin/src/version.ts:17-27` — `pi-tui/overlays/agent-hub-renderer` is no
+    longer imported). Verify a cited line before relying on its number.
+12. **Never present these as settled** (`AGENTS.md:196-201`,
     `optmem-2026-10-08/CONCLUSION.md:105-110`): room message volume as an independent variable,
     whether an agent uses a bounded blocking wait productively, whether a multi-writer log should be
     compressed hierarchically at all, byte- vs line-budgeting the view, and the 30k-char
@@ -380,11 +410,16 @@ The research record is a six-round build argument (brief → R1 gap analysis →
 hardened by three review rounds → R4 two-region tree with eight lens reviews → live build) plus
 two post-build side-research tracks that each produced one binding conclusion. The plan
 (`PLAN-build.md`) is normative for the tool surface and the numbers, but it is a **historical
-build record** whose dated addenda at `:8-62` override it in six places; the code is normative for
-behaviour. Review round "refuted" lists and the two side conclusions — embeddings are **deferred**
-with a stated trigger (`embeddings/CONCLUSION.md:7`, `:34-35`), and the spec's merge-age formula
-change was measured and **rejected** (`optmem-2026-10-08/A-merge-order-verification.md:8-12`,
-recorded at `PLAN-build.md:53-60`) — must not be re-litigated. The root `AGENTS.md` is a design
-narrative whose "documentation only" state claim (`AGENTS.md:15-17`) and 18.6.1 host pin
-(`AGENTS.md:153`) are both stale; a guidelines doc should point at `HANDOFF.md` for current state
-and at `PLAN-build.md` §4.1/§5.2 for the normative tables rather than restate them.
+build record** whose dated addenda at `:8-62` override it in six places — and those addenda are
+themselves now one version behind the code (§5); the code is normative for behaviour. Review round
+"refuted" lists and the two side conclusions — embeddings are **deferred** with a stated trigger
+(`embeddings/CONCLUSION.md:7`, `:34-35`), and the spec's merge-age formula change was measured and
+**rejected** (`optmem-2026-10-08/A-merge-order-verification.md:8-12`, recorded at
+`PLAN-build.md:53-60`) — must not be re-litigated. The root `AGENTS.md` has since been **rewritten
+into a real guidelines document** (233 lines): its "documentation only" state claim and its 18.6.1
+host pin are gone, and it now carries the authority order, the working commands, the invariants
+I1-I11, the **global** room root (with its temp-dir exception and one-time legacy migration), the
+**single-writer lockfile**, the **18.12.3** host pin with its load-time warning, the four
+still-unverified items, and a live-verification table (`AGENTS.md:1-232`). A future guidelines doc
+should still point at `HANDOFF.md` for current state and at `PLAN-build.md` §4.1/§5.2 for the
+normative tables rather than restate them.
