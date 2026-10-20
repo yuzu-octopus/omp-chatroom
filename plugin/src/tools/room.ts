@@ -25,7 +25,7 @@ import {
 import { globalMap } from "../globals";
 import { buildDigest, DIGEST_CLAIMS_CAP, ROSTER_CAP } from "../onboarding/digest";
 import { safeRoomText } from "../onboarding/escape";
-import { contended, grant, reclaimIfStale, release, renew } from "../store/claims";
+import { contended, grant, reclaimIfStale, release, renew, staleGen } from "../store/claims";
 import { type RoomConfig, resolveRoomConfig } from "../store/config";
 import { bumpCursor, cursorFor, deliveredT0s, initCursor, lagFor } from "../store/cursors";
 import { idemIndexKey, type MemberState, type RoomStore, roomStoreFor } from "../store/room-store";
@@ -83,6 +83,8 @@ export interface RoomParams {
   performative?: Performative;
   idemKey?: string;
   key?: string;
+  /** R1 — the fencing token: the generation of the grant this call belongs to. */
+  gen?: number;
   /** R3 — the resources that must be free before this claim can start. */
   dependsOn?: string[];
   ttl?: number;
@@ -107,7 +109,15 @@ export type RoomToolDetails =
       idempotent?: boolean;
       deliveryError?: string;
     }
-  | { ok: true; op: "claim"; holder: string; expiresAt: number; deliveryError?: string }
+  | {
+      ok: true;
+      op: "claim";
+      holder: string;
+      expiresAt: number;
+      /** R1 — the generation of this grant; pass it back to fence a later write. */
+      gen?: number;
+      deliveryError?: string;
+    }
   | { ok: true; op: "release"; deliveryError?: string }
   | { ok: true; op: "board"; board: BoardResult }
   | { ok: true; op: "topics"; topics: TopicRow[] }
@@ -656,6 +666,14 @@ export function registerRoomTool(pi: ExtensionAPI): void {
       .describe(
         'Second half of a claim resource, e.g. "src/auth". The full resource is "<topic>/<key>".',
       ),
+    gen: z
+      .number()
+      .optional()
+      .describe(
+        "The fencing token: the generation of the grant this call belongs to. A claim whose " +
+          "generation is stale - the resource was granted again since - is refused, and a post " +
+          "into a topic you claim must carry that claim's current generation.",
+      ),
     dependsOn: z
       .array(z.string())
       .optional()
@@ -793,6 +811,23 @@ export function registerRoomTool(pi: ExtensionAPI): void {
             const { head, handle } = truncateOversized(body, config.maxT1Tokens);
             const storedBody = handle !== "" ? `${head}${handle}` : head;
             const viewer = viewerFor(store, agentId);
+            // R1 — the write-path fence. A post into a topic the poster CLAIMS must carry that
+            // claim's current generation: a holder whose lease was reclaimed and re-granted is
+            // behind, and its late write is refused instead of landing on top of the new holder's
+            // work. The room can fence its own operations; it cannot fence a raw `edit` on a file
+            // (agents write files outside the room), so this is the enforcement point, not a
+            // complete one.
+            if (p.gen !== undefined) {
+              const stale = [...store.claims.values()].find(
+                (claim) => claim.holder === agentId && claim.resource.startsWith(`${topic}/`),
+              );
+              if (stale !== undefined && stale.gen !== p.gen) {
+                return fail(
+                  `post refused — your claim on ${stale.resource} is at generation ${stale.gen}, ` +
+                    `not ${p.gen}`,
+                );
+              }
+            }
             // R7 — idempotency. A retry with the same key returns the FIRST post instead of
             // appending a second: a retried post would double-wake every mentioned peer, and a T0
             // is a wake+steer. Stripe's contract, copyable: the saved response is returned, and a
@@ -860,6 +895,15 @@ export function registerRoomTool(pi: ExtensionAPI): void {
             const viewer = viewerFor(store, agentId);
             const ttlMs = clamp(p.ttl ?? config.claimTtlMs, CLAIM_TTL_MIN_MS, CLAIM_TTL_MAX_MS);
             const before = store.seq;
+            // R1 — the fencing token. A caller that was displaced (its lease was reclaimed) still
+            // holds the generation it was given; presenting it says "I am a zombie". The fence is
+            // opt-in: a claim without a generation is the ordinary path.
+            if (staleGen(store, resource, p.gen)) {
+              return fail(
+                `claim ${resource} refused — your generation ${p.gen} is stale (the resource has ` +
+                  `moved on)`,
+              );
+            }
             const result = grant(store, resource, agentId, ttlMs, p.dependsOn);
             if (!result.ok) {
               // R3 — the claim depends on a resource that is still held. Say WHO holds it, so the
@@ -935,6 +979,7 @@ export function registerRoomTool(pi: ExtensionAPI): void {
                 op: "claim",
                 holder: result.claim.holder,
                 expiresAt: result.claim.acquiredAt + result.claim.ttlMs,
+                gen: result.claim.gen,
               },
               `room claim ${safe(resource)} → granted, expires in ${Math.round(ttlMs / 1000)}s`,
               failure,

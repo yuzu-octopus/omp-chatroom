@@ -35,6 +35,11 @@ export interface RoomStore {
   seq: number;
   byId: Map<string, RoomRecord>;
   claims: Map<string, ClaimState>;
+  /**
+   * R1 — the generation counter per resource (the fencing token). It lives BESIDE the claim map,
+   * not inside it: a released resource keeps its generation, so a re-grant never reuses one.
+   */
+  claimGens: Map<string, number>;
   cursors: Map<string, number>;
   members: Map<string, MemberState>;
   // [invented] §4.4 — the in-store condition variable for wait_for_claim: resource → FIFO waiter ids.
@@ -120,12 +125,20 @@ function project(store: RoomStore, record: RoomRecord): void {
     return;
   }
   if (record.kind === "claim") {
+    // R1 — the generation is recomputed HERE, so a replay reproduces it exactly: it rises when
+    // ownership changes and stays put on a renewal by the same holder.
+    const current = store.claimGens.get(record.resource) ?? 0;
+    const previous = store.claims.get(record.resource);
+    const ownershipChanges = previous === undefined || previous.holder !== record.from;
+    const gen = ownershipChanges ? current + 1 : Math.max(current, 1);
+    store.claimGens.set(record.resource, gen);
     store.claims.set(record.resource, {
       resource: record.resource,
       holder: record.from,
       ttlMs: record.ttlMs,
       acquiredAt: record.ts,
       seq: record.seq,
+      gen,
     });
 
     // Plan 002 — the mirror of the release prune: every grant path (direct claim AND waiter
@@ -169,6 +182,7 @@ function createStore(root: string, roomId: string): RoomStore {
     records: [],
     byId: new Map(),
     claims: new Map(),
+    claimGens: new Map(),
     cursors: new Map(),
     members: new Map(),
     waiters: new Map(),

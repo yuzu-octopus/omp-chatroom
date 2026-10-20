@@ -8,13 +8,20 @@ export interface ClaimState {
   ttlMs: number;
   acquiredAt: number;
   seq: number;
+  /** R1 — the generation of this grant (per resource); it rises when ownership changes. */
+  gen: number;
 }
 
 export type GrantResult =
   | { ok: true; claim: ClaimState }
   | { ok: false; holder: string; expiresAt: number }
   /** R3 — the claim was refused because a dependency is still held. */
-  | { ok: false; holder: string; expiresAt: number; blockedBy: { resource: string; holder: string }[] };
+  | {
+      ok: false;
+      holder: string;
+      expiresAt: number;
+      blockedBy: { resource: string; holder: string }[];
+    };
 
 // §3.2 defines the release-reason union inside RoomRecord; alias it rather than redeclare.
 export type ReleaseReason = Extract<RoomRecord, { kind: "release" }>["reason"];
@@ -70,9 +77,46 @@ export function grant(
     from: holder,
     resource,
     ttlMs,
+    gen: nextGen(store, resource, holder),
     ...(dependsOn !== undefined && dependsOn.length > 0 ? { dependsOn: [...dependsOn] } : {}),
   });
   return { ok: true, claim: store.claims.get(resource)! };
+}
+
+/**
+ * R1 — the generation of a grant, per resource.
+ *
+ * It rises when OWNERSHIP changes: a fresh grant, or one that takes the resource from a previous
+ * holder, gets the next generation; a RENEWAL by the same holder keeps it, because a renewal
+ * changes nothing about who owns the resource. The counter survives the release (it lives beside
+ * the claim map, not inside it), so a resource that is granted, released and granted again never
+ * reuses a generation.
+ */
+function nextGen(store: RoomStore, resource: string, holder: string): number {
+  const current = store.claimGens.get(resource) ?? 0;
+  const previous = store.claims.get(resource);
+  const ownershipChanges = previous === undefined || previous.holder !== holder;
+  const gen = ownershipChanges ? current + 1 : Math.max(current, 1);
+  store.claimGens.set(resource, gen);
+  return gen;
+}
+
+/**
+ * R1 — the generation a caller claims to hold, and whether it is stale.
+ *
+ * A caller that was displaced (its lease was reclaimed) still holds the generation it was given.
+ * Presenting it is how the room learns that the caller is a zombie: the generation is behind the
+ * resource's current one.
+ */
+export function staleGen(
+  store: RoomStore,
+  resource: string,
+  presented: number | undefined,
+): boolean {
+  if (presented === undefined) return false; // the fence is opt-in
+  const current = store.claimGens.get(resource);
+  if (current === undefined) return false; // the resource was never granted
+  return presented < current;
 }
 
 // M11 — `prevHolder` is required on the record: for a reclaim it is the displaced holder; a plain
@@ -204,12 +248,19 @@ export function expireStale(
 export function hydrateClaims(store: RoomStore, records: readonly RoomRecord[]): void {
   for (const record of records) {
     if (record.kind === "claim") {
+      // R1 — the same rule the projection applies, so a replay reproduces the generations.
+      const current = store.claimGens.get(record.resource) ?? 0;
+      const previous = store.claims.get(record.resource);
+      const ownershipChanges = previous === undefined || previous.holder !== record.from;
+      const gen = ownershipChanges ? current + 1 : Math.max(current, 1);
+      store.claimGens.set(record.resource, gen);
       store.claims.set(record.resource, {
         resource: record.resource,
         holder: record.from,
         ttlMs: record.ttlMs,
         acquiredAt: record.ts,
         seq: record.seq,
+        gen,
       });
     } else if (record.kind === "release") {
       store.claims.delete(record.resource);

@@ -57,6 +57,9 @@ Rules that are not optional:
   it frees. Use it when the next step needs another's result; do not use it for ordering you can
   simply wait for.
 - **Release when done.** Holding a lease you no longer need blocks everyone queued behind you.
+- **Keep the generation your claim was granted under.** A claim returns a `gen`; pass it back on
+  the posts you make into that topic. If your lease was reclaimed and the resource granted again,
+  the room refuses your late write instead of letting it land on top of the new holder's work.
 - `wait_for_claim` never fails on a lost race: if another agent takes the resource first you are
   **re-queued**, not rejected. It returns `acquired:false` only on timeout.
 - **If you are blocked on someone else, say so in the room** — a `post` naming what you need and

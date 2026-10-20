@@ -108,6 +108,37 @@ test("renew: a non-holder cannot renew somebody else's lease", () => {
   expect(s.seq).toBe(seqBefore);
 });
 
+test("R1: a displaced agent's late write is fenced out by its stale generation", async () => {
+  const { store, ctx } = newTestStore();
+
+  const first = await invokeRoom(ctx, { op: "claim", topic: "build", key: "step" });
+  expect(first.details).toMatchObject({ ok: true, op: "claim", holder: "AgentA" });
+  const gen = first.details?.gen as number;
+  expect(gen).toBeGreaterThan(0);
+
+  // A is displaced: the lease is reclaimed and the resource granted again, so the generation moves.
+  expect(release(store, "build/step", "AgentA", "released")).toBe(true);
+  const second = await invokeRoom(ctx, { op: "claim", topic: "build", key: "step" });
+  expect(second.details?.gen as number).toBeGreaterThan(gen);
+
+  // A comes back with its old generation: a claim is refused, and so is a post into the topic.
+  const staleClaim = await invokeRoom(ctx, {
+    op: "claim",
+    topic: "build",
+    key: "step",
+    gen,
+  });
+  expect(staleClaim.details).toMatchObject({ ok: false });
+
+  const stalePost = await invokeRoom(ctx, {
+    op: "post",
+    topic: "build",
+    body: "late write",
+    gen,
+  });
+  expect(stalePost.details).toMatchObject({ ok: false });
+});
+
 test("R3: a claim whose dependency is still held is refused, and the refusal names the blocker", async () => {
   const { store, ctx } = newTestStore();
 
