@@ -16,7 +16,10 @@ export type BoardRow = ClaimRow & { state: "held" | "expired" | "released" }; //
  * (`priority` 0 < 1 < 2), and the state column never truncates a word the user needs.
  */
 export const BOARD_COLUMNS: readonly TableColumn[] = [
-  { width: 28, minWidth: 8, align: "left", overflow: "truncate", priority: 2 },
+  // The resource column carries the resource AND what it waits on (R9), and a real path plus a
+  // dependency is ~26 cells — so it needs the room. It has the highest priority (2), which means
+  // it shrinks LAST when the pane is narrow.
+  { width: 36, minWidth: 8, align: "left", overflow: "truncate", priority: 2 },
   { width: 18, minWidth: 6, align: "left", overflow: "truncate", priority: 0 },
   { width: 7, minWidth: 4, align: "right", overflow: "truncate", priority: 1 },
   { width: 6, minWidth: 4, align: "left", overflow: "truncate", priority: 1 },
@@ -48,6 +51,20 @@ function ttlCell(
 
 function holderText(row: BoardRow): string {
   return row.waiting.length > 0 ? `${row.holder} +${row.waiting.length} waiting` : row.holder;
+}
+
+/**
+ * R9 — what the claim is waiting on, in the resource cell: `build/step ← build/schema`.
+ *
+ * The arrow is the theme's own `nav.back` (the card uses it for "room ⟵"), not a hardcoded glyph.
+ * Only the first dependency fits the column; the rest are counted.
+ */
+function resourceText(row: BoardRow, theme: Theme): string {
+  const name = sanitizeText(row.resource);
+  if (row.dependsOn.length === 0) return name;
+  const first = sanitizeText(row.dependsOn[0]!);
+  const more = row.dependsOn.length > 1 ? ` +${row.dependsOn.length - 1}` : "";
+  return `${name} ${theme.nav.back} ${first}${more}`;
 }
 
 /**
@@ -85,7 +102,7 @@ export function projectClaims(
         // The cursor marker: the row `r`/`o` will act on is the row the user can see. The glyph is
         // the THEME's own "selected" symbol (nav.selected) — the house rule is that every row
         // element comes from the theme, and the plugin's fallback theme defines nav.selected.
-        text: `${marked ? theme.nav.selected : " "}${sanitizeText(row.resource)}`,
+        text: `${marked ? theme.nav.selected : " "}${resourceText(row, theme)}`,
         style: dim ? (text) => theme.fg("muted", text) : undefined,
       },
       {

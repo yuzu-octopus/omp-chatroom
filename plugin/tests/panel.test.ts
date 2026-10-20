@@ -59,6 +59,27 @@ function msg(seq: number, body: string, from = "AgentA", topic = "build"): RoomR
   return { v: 1, seq, ts: 1_000_000 + seq, kind: "msg", id: `m${seq}`, from, topic, body };
 }
 
+/** R6 — a message carrying the topic's status ledger. */
+function ledgerMsg(seq: number, isInLoop: "yes" | "no"): RoomRecord {
+  return {
+    v: 1,
+    seq,
+    ts: 1_000_000 + seq,
+    kind: "msg",
+    id: `m${seq}`,
+    from: "AgentA",
+    topic: "build",
+    body: "status",
+    status: {
+      is_request_satisfied: { reason: "the parser is green", answer: "no" },
+      is_in_loop: { reason: "the same edit, again", answer: isInLoop },
+      is_progress_being_made: { reason: "the last commit changed the parser", answer: "yes" },
+      next_speaker: { reason: "the parser needs the schema", answer: "AgentB" },
+      instruction_or_question: { reason: "AgentB must publish the schema", answer: "publish it" },
+    },
+  };
+}
+
 function viewer(agentId = "Viewer"): MemberState {
   return {
     agentId,
@@ -801,6 +822,42 @@ test("the focused pane is visible in the rendered panel", () => {
     panel.dispose();
     store.reset();
   }
+});
+
+test("R9: the board row shows what the claim is waiting on", () => {
+  const now = Date.now();
+  const rows: BoardRow[] = [
+    {
+      resource: "build/parser",
+      holder: "AgentA",
+      ttlMs: 60_000,
+      expiresAt: now + 30_000,
+      acquiredAt: now,
+      waiting: ["AgentB", "AgentC"],
+      dependsOn: ["build/schema", "build/types"],
+      state: "held",
+    },
+  ];
+  const text = projectClaims(rows, 100, theme).join("\n");
+  // the dependency, and the count of the rest
+  expect(text).toContain("build/schema");
+  expect(text).toContain("+1");
+});
+
+test("R6: the chat pane shows the topic's status ledger", () => {
+  const root = tempRoot();
+  const store = storeFor(root, roomIdFor(root));
+  store.append(ledgerMsg(1, "yes"));
+  const looping = panelRows(store, theme, 120).join("\n");
+  expect(looping).toContain("looping");
+  expect(looping).toContain("AgentB");
+
+  const root2 = tempRoot();
+  const store2 = storeFor(root2, roomIdFor(root2));
+  store2.append(ledgerMsg(1, "no"));
+  const healthy = panelRows(store2, theme, 120).join("\n");
+  expect(healthy).not.toContain("looping");
+  expect(healthy).toContain("AgentB");
 });
 
 test("the selected row is marked in the board pane", () => {

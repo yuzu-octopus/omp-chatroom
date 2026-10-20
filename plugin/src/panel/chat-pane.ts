@@ -8,7 +8,7 @@ import {
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { classify, type Tier } from "../attention/tiers";
 import type { MemberState } from "../store/room-store";
-import type { RoomRecord } from "../store/schema";
+import type { RoomRecord, StatusObject } from "../store/schema";
 
 export interface ChatRow {
   // [invented]
@@ -21,6 +21,8 @@ export interface ChatRow {
   mention: boolean;
   unread: boolean;
   threadDepth: number;
+  /** R6 — the topic's status ledger, when the message carries one. */
+  status?: StatusObject;
 }
 
 // §6.3 — the per-row tier badge: error T0, warning T1, muted T2. (`info` is a status GLYPH in the
@@ -82,6 +84,7 @@ export function projectChatRows(
       mention: record.kind === "msg" && (record.mention?.includes(viewer.agentId) ?? false),
       unread: record.seq > cursor,
       threadDepth: record.kind === "msg" ? threadDepthOf(record, byId) : 0,
+      ...(record.kind === "msg" && record.status !== undefined ? { status: record.status } : {}),
     });
   }
   return rows;
@@ -119,6 +122,9 @@ export function renderChatRows(
     const indent =
       row.threadDepth > 0 ? theme.tree.vertical.repeat(row.threadDepth) + theme.tree.branch : "";
     const body = truncateToWidth(row.body.replace(/[\r\n]+/g, " "), Math.max(1, width - 32));
+    // R6 — the topic's status ledger, as the human sees it: is this topic looping, and who is next.
+    // A ledger the panel cannot show is a ledger nobody reads.
+    const status = row.status === undefined ? "" : statusLine(row.status, theme);
     // The visible cursor: the row the panel's actions address is the row the user can see. The
     // glyph is the THEME's own "selected" symbol (nav.selected) — the house rule is that every
     // row element comes from the theme, and the fallback theme defines nav.selected.
@@ -128,9 +134,28 @@ export function renderChatRows(
     // author and topic is `nav.selected`, a SymbolKey, not a hardcoded "›".
     const head =
       `${marker}${unread}${badge} ${time} ${indent}${author}${theme.sep.dot}` +
-      `${theme.fg("muted", sanitizeText(row.topic))}${theme.nav.selected}${body}`;
+      `${theme.fg("muted", sanitizeText(row.topic))}${theme.nav.selected}${body}${status}`;
     return padOrTrim(head, width);
   });
+}
+
+/**
+ * R6 — the ledger in one line: `looping · next AgentB · needs: publish the schema`.
+ *
+ * Only the parts a human watching the panel needs: the loop flag (the failure it prevents), the next
+ * actor, and the instruction. The rest of the ledger is the agent's business.
+ */
+function statusLine(status: StatusObject, theme: Theme): string {
+  const parts: string[] = [];
+  if (status.is_in_loop.answer.toLowerCase() === "yes") {
+    parts.push(theme.fg("error", "looping"));
+  }
+  const next = status.next_speaker.answer.trim();
+  if (next !== "") parts.push(`next ${next}`);
+  const instruction = status.instruction_or_question.answer.trim();
+  if (instruction !== "") parts.push(instruction);
+  if (parts.length === 0) return "";
+  return ` ${theme.sep.dot} ${theme.fg("muted", sanitizeText(parts.join(" · ")))}`;
 }
 
 /**
