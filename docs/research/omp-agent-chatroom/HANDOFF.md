@@ -194,12 +194,38 @@ one a real LLM call (`@smol` → the session's own model).
   shown only for blocks of size ≥ 32). Below that the summaries are already on disk and readable
   with `room{op:"zoom"}`.
 
+### `wait_for_agent` under a real model — VERIFIED
+
+A real model spawned a real peer and waited for it:
+
+```
+tool_execution_end  wait_for_agent
+  result.content[0].text = "wait_for_agent [Peer:idle] → event after 30767ms"
+  result.details     = {"ok":true,"outcome":"event","agents":[{"id":"Peer","status":"idle"}]}
+```
+
+- The wait really BLOCKED: the `tool_execution_start` is at `09:11:08.707Z`, the result at
+  `09:11:39.503Z` (30.8 s, 73 heartbeats), and the peer's own transcript shows its last action
+  (`DONE`) at `09:11:39.346Z` — the `running → idle` transition falls inside the window and
+  satisfies the wait.
+- The peer is a real agent with its own transcript, so the plugin can only see it through the host's
+  `AgentRegistry`.
+- **One nuance worth knowing:** `wait_for_agent` declares `interruptible: true` (like
+  `wait_for_message`; `wait_for_claim` does not, because a claim wait is bounded by the lease). A
+  queued background-job completion notice therefore aborts an interruptible wait early, so a wait for
+  a name that never changes can return `outcome: "aborted"` instead of `"timeout"` when a notice
+  happens to be queued. The abort path is well-formed (`ok: true`, `useless: true`, no throw) — it
+  is the host's interrupt, not a plugin defect.
+
 ### Still unverified — do not claim these
 
-- **`wait_for_agent`'s happy `event` path under a real model.** `wait_for_message` and
-  `wait_for_claim` were driven to their `outcome: "event"` path by a real model (a spawned
-  subagent's mention satisfied the wait; a release promoted a waiter); `wait_for_agent`'s happy
-  path is still only unit-tested.
+- **The panel's focus/selection indicators and the board-only release, in a real terminal.** The
+  code is unit-tested (the release reaches the store, the focus is marked, the selected row carries
+  the theme's glyph) and the previous pty run verified the OLD behaviour, but the new indicators
+  landed after it.
+- **The compactor's word-boundary cut and the degenerate-merge floor, against a live model.** Both
+  are unit-tested and came out of the live summarisation run that found them; the fixed behaviour
+  has not been re-run against a real model.
 
 Everything else that was on this list is now measured — see "Live verification (2026-10-20)"
 above for the discovery rate, the cards in a real transcript, and the coordination checks.
