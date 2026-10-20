@@ -16,6 +16,7 @@ import {
 import { resolveRoomConfig } from "../store/config";
 import { type RoomStore, roomStoreFor } from "../store/room-store";
 import type { RoomRecord } from "../store/schema";
+import { clearWaitEdges, findWaitCycle, setWaitEdges } from "../store/wait-graph";
 import { viewerFor } from "../tools/room";
 
 export const WAIT_FOR_CLAIM_NAME = "wait_for_claim";
@@ -42,6 +43,8 @@ export interface WaitForClaimParams {
 export interface WaitForClaimDetails {
   ok: boolean;
   outcome: WaitOutcome;
+  /** R4 — the agents in the wait cycle this wait would have closed. */
+  cycle?: string[];
   acquired: boolean;
   claim?: ClaimState;
   error?: string;
@@ -155,6 +158,34 @@ async function waitForClaim(
     recordWait("event");
     return eventResult(resource, held);
   }
+  // R4 — refuse a wait that would close a cycle. A cycle is a deadlock: every agent in it waits
+  // for something another one of them holds, so nothing unblocks it and nothing says so — the
+  // swarm burns the full wait timeout with every agent reporting "running".
+  const cycle = findWaitCycle(
+    store.root,
+    agentId,
+    [{ kind: "resource", resource }],
+    (r) => store.claims.get(r)?.holder,
+  );
+  if (cycle !== null) {
+    recordWait("aborted");
+    return {
+      content: [
+        {
+          type: "text",
+          text: `wait_for_claim ${safe(resource)} → refused: wait cycle ${cycle.join(" → ")}`,
+        },
+      ],
+      details: {
+        ok: false,
+        outcome: "aborted",
+        acquired: false,
+        error: `wait cycle: ${cycle.join(" → ")}`,
+        cycle,
+      },
+      isError: true,
+    };
+  }
   // M-8 — mark this agent as waiting on the resource so classify returns T1 for claim/release.
   const viewer = viewerFor(store, agentId);
   viewer.waitedResource = resource;
@@ -204,10 +235,13 @@ async function waitForClaim(
   try {
     // Queue first, then let the arbiter promote us when the resource is free (FIFO).
     enqueueWaiter(store, resource, agentId);
+    // R4 — the wait edge goes in as the wait starts, so another agent's wait can see it.
+    setWaitEdges(store.root, agentId, [{ kind: "resource", resource }]);
     const granted = resolveWaiters(store, resource, ttlMs);
     if (granted?.holder === agentId) finish(eventResult(resource, granted));
     return await done;
   } finally {
+    clearWaitEdges(store.root, agentId);
     unsubscribe();
     dequeueWaiter(store, resource, agentId);
     ctx.clearTimer(timer);

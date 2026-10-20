@@ -134,6 +134,57 @@ test(
   WAIT_TIMEOUT_MS,
 );
 test(
+  "R4: a wait that would close a cycle is refused, naming the cycle",
+  async () => {
+    const root = freshRoot();
+    const bus = new EventBus();
+    const registry = new AgentRegistry();
+    const a = await newSession(bus, registry, root, "AgentA");
+    const b = await newSession(bus, registry, root, "AgentB");
+    try {
+      const roomA = toolOf(a, "room");
+      const roomB = toolOf(b, "room");
+      const waitA = toolOf(a, "wait_for_claim");
+      const waitB = toolOf(b, "wait_for_claim");
+
+      // A holds build/one and waits for build/two; B holds build/two and waits for build/one.
+      await roomA.execute("c-a1", { op: "claim", topic: "build", key: "one", ttl: 300_000 });
+      await roomB.execute("c-b2", { op: "claim", topic: "build", key: "two", ttl: 300_000 });
+
+      const waitAP = waitA.execute("c-wa", {
+        resource: "build/two",
+        ttl: 300_000,
+        timeout: 1_000,
+      });
+      // Give A's wait a moment to register its edge.
+      await Bun.sleep(50);
+      const waitBP = waitB.execute("c-wb", {
+        resource: "build/one",
+        ttl: 300_000,
+        timeout: 1_000,
+      });
+      const refused = await Promise.race([waitBP, Bun.sleep(2_000).then(() => null)]);
+      expect(refused).not.toBeNull();
+      expect(refused!.details).toMatchObject({ ok: false, outcome: "aborted" });
+      const cycle = (refused!.details as { cycle?: string[] }).cycle ?? [];
+      expect(cycle.length).toBeGreaterThan(1);
+      expect(cycle[0]).toBe("AgentB");
+
+      // A's wait is still waiting (it was not the one that closed the cycle).
+      const stillWaiting = await Promise.race([
+        waitAP.then(() => "settled"),
+        Bun.sleep(50).then(() => "waiting"),
+      ]);
+      expect(stillWaiting).toBe("waiting");
+    } finally {
+      await a.dispose();
+      await b.dispose();
+    }
+  },
+  WAIT_TIMEOUT_MS,
+);
+
+test(
   "R5: a resolved wait is recorded, so wait productivity is measurable",
   async () => {
     const root = freshRoot();

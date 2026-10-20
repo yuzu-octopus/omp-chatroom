@@ -14,6 +14,7 @@ import {
 import { safeRoomText } from "../onboarding/escape";
 import { type RoomStore, roomStoreFor } from "../store/room-store";
 import type { RoomRecord } from "../store/schema";
+import { clearWaitEdges, findWaitCycle, setWaitEdges } from "../store/wait-graph";
 import {
   WAIT_DEFAULT_TIMEOUT_MS,
   WAIT_HEARTBEAT_MS,
@@ -42,6 +43,8 @@ export interface WaitForMessageParams {
 export interface WaitForMessageDetails {
   ok: boolean;
   outcome: WaitOutcome;
+  /** R4 — the agents in the wait cycle this wait would have closed. */
+  cycle?: string[];
   message?: RoomRecord;
   error?: string;
 }
@@ -161,6 +164,39 @@ async function waitForMessage(
   }
 
   const startedAt = Date.now();
+  // R4 — refuse a wait that would close a cycle. A wait for a message from an agent is a
+  // wait for THAT agent, so it can close a cycle with the other two mechanisms.
+  const cycle = findWaitCycle(
+    store.root,
+    agentId,
+    from === undefined ? [] : [{ kind: "message", from }],
+    (resource) => store.claims.get(resource)?.holder,
+  );
+  if (cycle !== null) {
+    store.append({
+      kind: "wait",
+      from: agentId,
+      waited: "message",
+      target: waitTarget,
+      outcome: "aborted",
+      enqueuedAt: startedAt,
+    });
+    return {
+      content: [
+        {
+          type: "text",
+          text: `wait_for_message → refused: wait cycle ${cycle.join(" → ")}`,
+        },
+      ],
+      details: {
+        ok: false,
+        outcome: "aborted",
+        error: `wait cycle: ${cycle.join(" → ")}`,
+        cycle,
+      },
+      isError: true,
+    };
+  }
   // R5 — a wait that is not recorded cannot be measured: the wait's outcome is the room's only
   // evidence that a blocked agent was blocked rather than idle.
   const recordWait = (outcome: WaitOutcome): void => {
@@ -201,6 +237,9 @@ async function waitForMessage(
     details: { ok: true, outcome: "event", message: record },
   });
 
+  // R4 — the wait edge goes in as the wait starts, so another agent's wait can see it.
+  if (from !== undefined) setWaitEdges(store.root, agentId, [{ kind: "message", from }]);
+
   const unsubscribe = store.addListener((record) => {
     if (matches(record)) finish(eventResult(record));
   });
@@ -226,6 +265,7 @@ async function waitForMessage(
   try {
     return await done;
   } finally {
+    clearWaitEdges(store.root, agentId);
     unsubscribe();
     ctx.clearTimer(timer);
     if (heartbeat !== undefined) ctx.clearTimer(heartbeat);

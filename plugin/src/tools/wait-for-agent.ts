@@ -15,7 +15,8 @@ import {
   renderWaitCall,
   renderWaitResult,
 } from "../cards/tool-cards";
-import { roomStoreFor } from "../store/room-store";
+import { type RoomStore, roomStoreFor } from "../store/room-store";
+import { clearWaitEdges, findWaitCycle, setWaitEdges } from "../store/wait-graph";
 import type { WaitOutcome } from "./wait-for-claim"; // K11 — declared once, there
 
 export const WAIT_FOR_AGENT_NAME = "wait_for_agent";
@@ -42,6 +43,8 @@ export interface WaitForAgentParams {
 export interface WaitForAgentDetails {
   ok: boolean;
   outcome: WaitOutcome;
+  /** R4 — the agents in the wait cycle this wait would have closed. */
+  cycle?: string[];
   agents: Array<{ id: string; status: AgentStatus; activity?: string }>;
   error?: string;
 }
@@ -133,24 +136,58 @@ async function waitForAgent(
   // evidence that a blocked agent was blocked rather than idle. This tool waits on the PROCESS's
   // agent registry, not on the room, so the room is opened best-effort: if it cannot be opened the
   // wait still works, it is just not recorded.
+  let store: RoomStore | undefined;
+  try {
+    store = roomStoreFor(ctx);
+  } catch {
+    store = undefined;
+  }
   const recordWait = (outcome: WaitOutcome): void => {
-    try {
-      roomStoreFor(ctx).append({
-        kind: "wait",
-        from: agentId,
-        waited: "agent",
-        target: ids.join(","),
-        outcome,
-        enqueuedAt: startedAt,
-      });
-    } catch {
-      // The room is optional here — the wait itself does not depend on it.
-    }
+    store?.append({
+      kind: "wait",
+      from: agentId,
+      waited: "agent",
+      target: ids.join(","),
+      outcome,
+      enqueuedAt: startedAt,
+    });
   };
 
   if (signal?.aborted) {
     recordWait("aborted");
     return abortResult(snapshot(registry, ids));
+  }
+
+  // R4 — refuse a wait that would close a cycle. A cycle can span mechanisms: an agent waiting
+  // for a claim while another waits for a message from the first is just as deadlocked as two
+  // agents waiting for each other's claims, and a per-mechanism check would miss it.
+  const cycle =
+    store === undefined
+      ? null
+      : findWaitCycle(
+          store.root,
+          agentId,
+          ids.map((id) => ({ kind: "agent", agentId: id }) as const),
+          (resource) => store!.claims.get(resource)?.holder,
+        );
+  if (cycle !== null) {
+    recordWait("aborted");
+    return {
+      content: [
+        {
+          type: "text",
+          text: `wait_for_agent → refused: wait cycle ${cycle.join(" → ")}`,
+        },
+      ],
+      details: {
+        ok: false,
+        outcome: "aborted",
+        agents: [],
+        error: `wait cycle: ${cycle.join(" → ")}`,
+        cycle,
+      },
+      isError: true,
+    };
   }
 
   let settle!: (result: WaitForAgentResult) => void;
@@ -172,6 +209,15 @@ async function waitForAgent(
   const baseline = new Map(ids.map((id) => [id, registry.get(id)?.status]));
   const changed = (id: string): boolean => registry.get(id)?.status !== baseline.get(id);
   const satisfied = (): boolean => (require === "all" ? ids.every(changed) : ids.some(changed));
+
+  // R4 — the wait edge goes in as the wait starts, so another agent's wait can see it.
+  if (store !== undefined) {
+    setWaitEdges(
+      store.root,
+      agentId,
+      ids.map((id) => ({ kind: "agent", agentId: id }) as const),
+    );
+  }
 
   const unsubscribe = registry.onChange((event) => {
     if (event.type !== "status_changed" && event.type !== "removed") return;
@@ -206,6 +252,7 @@ async function waitForAgent(
     if (satisfied()) finish(eventResult(registry, ids, startedAt));
     return await done;
   } finally {
+    if (store !== undefined) clearWaitEdges(store.root, agentId);
     unsubscribe();
     ctx.clearTimer(timer);
     if (heartbeat !== undefined) ctx.clearTimer(heartbeat);

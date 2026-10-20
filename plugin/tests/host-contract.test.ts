@@ -63,23 +63,35 @@ test("the host theme exposes a working fg and string-valued sep/nav/status", () 
   expect(typeof theme.status.error).toBe("string");
 });
 
-test("the plugin loads against the installed host with no extension errors", async () => {
-  // The one that would have caught theme.fg from outside the TUI: a real session, no model, no UI.
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "room-host-contract-"));
-  const { session, extensionsResult } = await createAgentSession({
-    agentId: "HostContract",
-    sessionManager: SessionManager.inMemory(root),
-    localProtocolOptions: { getArtifactsDir: () => root, getSessionId: () => "HostContract" },
-    extensions: [roomExtension],
-    disableExtensionDiscovery: true,
-    enableMCP: false,
-    enableLsp: false,
-    hasUI: false,
-  });
-  expect(extensionsResult?.errors ?? []).toEqual([]);
-  for (const name of ["room", "wait_for_claim", "wait_for_agent", "wait_for_message"]) {
-    expect(session.getToolByName(name), `${name} must register`).toBeDefined();
-  }
-  await session.dispose();
-  fs.rmSync(root, { recursive: true, force: true });
-});
+// A real session against the installed host takes ~5 s on its own, which is exactly bun's
+// default per-test budget — so this test only failed when another file was loading the machine.
+// The budget is widened to the repo's own convention for tests that touch the real host.
+const HOST_CONTRACT_TIMEOUT_MS = 30_000;
+
+test(
+  "the plugin loads against the installed host with no extension errors",
+  async () => {
+    // The one that would have caught theme.fg from outside the TUI: a real session, no model, no UI.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "room-host-contract-"));
+    const { session, extensionsResult } = await createAgentSession({
+      agentId: "HostContract",
+      sessionManager: SessionManager.inMemory(root),
+      localProtocolOptions: { getArtifactsDir: () => root, getSessionId: () => "HostContract" },
+      extensions: [roomExtension],
+      disableExtensionDiscovery: true,
+      enableMCP: false,
+      enableLsp: false,
+      hasUI: false,
+    });
+    try {
+      expect(extensionsResult?.errors ?? []).toEqual([]);
+      for (const name of ["room", "wait_for_claim", "wait_for_agent", "wait_for_message"]) {
+        expect(session.getToolByName(name), `${name} must register`).toBeDefined();
+      }
+    } finally {
+      await session.dispose();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  },
+  HOST_CONTRACT_TIMEOUT_MS,
+);
