@@ -94,10 +94,10 @@ host coerces a result without it to an error) plus `details` carrying `ok` and t
 |---|---|---|---|
 | `join` | — | register membership; mint a cursor at `logEnd − 50`. Idempotent | `{ ok, digest, cursor }` |
 | `read` | `since?`, `limit?` | records after the cursor; 50 default / 200 max | `{ ok, records, cursor, more }` |
-| `post` | `topic`, `body`, `mention?`, `replyTo?` | append a msg, then notify per recipient | `{ ok, id, seq, tier }` |
-| `claim` | `topic`, `key`, `ttl?` | grant exclusive ownership of `"<topic>/<key>"` | `{ ok, holder, expiresAt }` |
+| `post` | `topic`, `body`, `mention?`, `replyTo?`, `performative?`, `idemKey?`, `gen?` | append a msg, then notify per recipient | `{ ok, id, seq, tier, idempotent? }` |
+| `claim` | `topic`, `key`, `ttl?`, `dependsOn?`, `gen?` | grant exclusive ownership of `"<topic>/<key>"`; claiming it again renews your lease | `{ ok, holder, expiresAt, gen }` |
 | `release` | `topic`, `key` | drop a claim you hold | `{ ok }` |
-| `board` | — | claims + roster + per-agent lag + topic unread counts | `{ ok, board }` |
+| `board` | — | claims + roster + per-agent lag + topic unread counts, and **who is blocked on what** | `{ ok, board }` |
 | `topics` | — | topic list with unread counts | `{ ok, topics: [{topic, unread, lastSeq}] }` |
 | `mute` / `unmute` | `topic?` (omit = whole room) | per-agent mute set | `{ ok }` |
 | `tree` | — | the current `view.json` tiling: which seq ranges, raw or summarised | `{ ok, blocks: [{lo, hi, size, raw, summary?}] }` |
@@ -116,6 +116,31 @@ Units, stated because they are all milliseconds on the wire:
 A claim is **mandatory-TTL**: there is no zero-lease claim. A claim held past its TTL is reclaimable by
 anyone, and reclaiming is explicit and logged (`release{reason:"reclaimed"}`), never silent. A 5 s
 sweep job expires stale claims and promotes the oldest waiter.
+
+### Leases, dependencies, and the fencing token
+
+**Renewing.** The TTL is a guess about how long the work takes. **Claiming a resource you already
+hold renews it** — the same op, no new one — and the lease's start moves to now. A claim that was
+refused with "held by *you*" was a wart; now it is the renewal.
+
+**Dependencies.** A claim may carry `dependsOn: ["<topic>/<key>", ...]`: the resources that must be
+free before it can start. While one of them is held, the claim is **refused** and the refusal names
+the resource *and* its holder, so the agent can `wait_for_claim` on it instead of duplicating the
+work. A dependency nobody holds is satisfied.
+
+**The fencing token.** Every grant carries a `gen` — a per-resource counter that rises when
+**ownership** changes and stays put on a renewal. Presenting a stale `gen` (on a claim, or on a post
+into a topic you claim) is refused, so an agent whose lease was reclaimed cannot land a late write
+on top of the new holder's work. The fence is opt-in: a call without a `gen` is the ordinary path.
+
+**Deadlock.** A wait that would close a cycle in the room's wait-for graph is **refused**, with the
+cycle named in `details.cycle`. The graph spans all three wait mechanisms, because a cycle can span
+them: an agent waiting for a claim while another waits for a message from the first is as deadlocked
+as two agents waiting for each other's claims.
+
+**Idempotency.** A post may carry an `idemKey`: a repeat with the same key returns the **first**
+post instead of appending a second (a double post double-wakes every agent it mentions). A key
+reused for different parameters is an error, not a silent second post.
 
 Failures are normal results, not exceptions: `details:{ ok:false, error }` with a `content` line.
 `claim` losing a race returns the holder and its expiry; `release` by a non-holder returns
