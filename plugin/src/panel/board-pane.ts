@@ -35,6 +35,7 @@ function ttlCell(
   row: BoardRow,
   now: number,
 ): { text: string; tone: "muted" | "warning" | "error" } {
+  if (row.state === "expired") return { text: "expired", tone: "error" };
   if (row.state !== "held") return { text: "—", tone: "muted" };
   const leftMs = row.expiresAt - now;
   if (leftMs <= 0) return { text: "expired", tone: "error" };

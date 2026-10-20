@@ -838,3 +838,50 @@ test("the selected row is marked in the board pane", () => {
     store.reset();
   }
 });
+
+test("the board keeps an ended claim visible, dimmed (it does not vanish mid-frame)", () => {
+  // §6.4 — a row moves to the bottom, dimmed, rather than vanishing: a board whose claims blink
+  // out as they expire is unreadable. A RELEASED claim is not in the store's live claim map, so
+  // the panel finds it in the log's tail.
+  const store = fixtureStore();
+  store.append({
+    kind: "release",
+    from: "AgentB",
+    resource: "build/step",
+    reason: "released",
+    prevHolder: "AgentB",
+  });
+  const panel = makePanel(store);
+  try {
+    const screen = panel.render(100).join("\n");
+    // The ended claim is still listed — not gone (before the fix the board said "no claims",
+    // because the store's claim map only holds live leases).
+    expect(screen).toContain("build/step");
+    expect(screen).not.toContain("no claims");
+  } finally {
+    panel.dispose();
+    store.reset();
+  }
+});
+
+test("`r` on a claim that already ended releases nothing", () => {
+  const store = fixtureStore();
+  store.append({
+    kind: "release",
+    from: "AgentB",
+    resource: "build/step",
+    reason: "released",
+    prevHolder: "AgentB",
+  });
+  const released: string[] = [];
+  const panel = makePanel(store, 30, { onReleaseClaim: (resource) => released.push(resource) });
+  try {
+    panel.handleInput("2");
+    panel.handleInput("r");
+    // The only claim on the board has ended, so there is nothing to release.
+    expect(released).toEqual([]);
+  } finally {
+    panel.dispose();
+    store.reset();
+  }
+});

@@ -60,6 +60,9 @@ const HINTS = [
 
 const BORDER = "│";
 
+/** How many log records the board scans for the claims that just ended. */
+const PANEL_RELEASED_TAIL = 200;
+
 /**
  * §6.2 Layout A — frame top, `chat | board` split, divider, hint row, frame bottom. Only the visible
  * window is rendered (plain styled string rows via the pane projections), never one component per
@@ -223,7 +226,9 @@ export class RoomPanel implements Component {
         // selected a claim, and the old shared index released an arbitrary one.
         if (this.#focus !== "board") break;
         const row = this.#boardAt(this.#boardSelected);
-        if (row !== undefined) this.#options.onReleaseClaim(row.resource);
+        // An ended claim (expired or already released) is on the board for context, not to be
+        // released again.
+        if (row !== undefined && row.state === "held") this.#options.onReleaseClaim(row.resource);
         break;
       }
       case "focus-agent": {
@@ -272,10 +277,19 @@ export class RoomPanel implements Component {
     };
   }
 
-  /** §6.4 — live leases, oldest first. Expired/released rows are the store's concern, not the pane's. */
+  /**
+   * §6.4 — the board's rows: live leases oldest first, plus the ones that just ENDED.
+   *
+   * A claim whose TTL has passed is marked `expired` rather than shown as held, and a claim that
+   * was released stays on the board, dimmed: §6.4's rule is that a row moves to the bottom rather
+   * than vanishing mid-frame — a board whose claims blink out as they expire is unreadable.
+   */
   #projectBoard(store: RoomStore): BoardRow[] {
+    const now = Date.now();
     const rows: BoardRow[] = [];
+    const live = new Set<string>();
     for (const claim of store.claims.values()) {
+      live.add(claim.resource);
       const row: ClaimRow = {
         resource: claim.resource,
         holder: claim.holder,
@@ -284,7 +298,26 @@ export class RoomPanel implements Component {
         acquiredAt: claim.acquiredAt,
         contended: contended(store, claim.resource).length,
       };
-      rows.push({ ...row, state: "held" });
+      rows.push({ ...row, state: claim.acquiredAt + claim.ttlMs <= now ? "expired" : "held" });
+    }
+    // The recently ended claims, from the log's tail. The store's claim map only holds live leases,
+    // so this is where a release (by anyone) becomes visible.
+    const released = new Map<string, { holder: string; ts: number }>();
+    for (const record of store.records.slice(-PANEL_RELEASED_TAIL)) {
+      if (record.kind !== "release") continue;
+      if (live.has(record.resource)) continue;
+      released.set(record.resource, { holder: record.prevHolder, ts: record.ts });
+    }
+    for (const [resource, ended] of released) {
+      rows.push({
+        resource,
+        holder: ended.holder,
+        ttlMs: 0,
+        expiresAt: 0,
+        acquiredAt: ended.ts,
+        contended: 0,
+        state: "released",
+      });
     }
     rows.sort((a, b) => a.acquiredAt - b.acquiredAt);
     return rows;
