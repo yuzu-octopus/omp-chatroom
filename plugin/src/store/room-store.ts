@@ -6,6 +6,7 @@ import { logPathFor, newMessageId, topicOf } from "../ids";
 import { type ClaimState, expireStale, hydrateClaims } from "./claims";
 import { startCompactor, stopCompactor } from "./compactor";
 import { loadRoomConfig, type RoomConfig, resolveRoomId } from "./config";
+import { forgetDeliveredT0 } from "./cursors";
 import { appendLine, closeRoomLog, openRoomLog, replay } from "./log";
 import { legacyRoomRoot, openMigratedRoom, roomRootFor } from "./room-root";
 import type { RoomRecord, RoomRecordDraft } from "./schema";
@@ -317,6 +318,9 @@ export function disposeRoomSession(ctx: ExtensionContext): void {
   if (set === undefined || !set.delete(ctx.agent.id)) return;
   if (set.size === 0) SESSIONS.delete(root);
   STORES.get(root)?.dispose();
+  // The delivered-T0 registry lives in a globalThis map keyed by root: without this it grew a
+  // key per project for the life of the process.
+  forgetDeliveredT0(root);
 }
 
 export function resetRoomStores(): void {
@@ -325,6 +329,7 @@ export function resetRoomStores(): void {
     roomTimers.stop(root);
     stopCompactor(root);
     closeRoomLog(root, store.roomId);
+    forgetDeliveredT0(root);
   }
   STORES.clear();
   REFS.clear();

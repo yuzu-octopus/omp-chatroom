@@ -233,16 +233,19 @@ export function migrateLegacyRoom(legacyRoot: string, targetRoot: string): boole
   let copied: LegacyCopy | null = null;
   try {
     copied = copyLegacyRoom(legacyRoot, targetRoot, legacyRoomDir, targetRoomDir);
+    // The copy is in place: the legacy room goes, so nothing lingers in the project tree.
+    //
+    // The removal happens WHILE WE STILL HOLD THE LEGACY LOCK. Releasing first would open a
+    // window in which another process could take the legacy room and append records — and the
+    // removal would then delete those records. The lock file lives inside the legacy room
+    // directory, so the removal takes it with it; `releaseRoomLock` only unlinks a lock file
+    // that still holds OUR pid, so it can never remove another process's fresh lock.
+    if (copied !== null) removeLegacyRoom(legacyRoot, legacyRoomDir, targetRoot, copied);
   } finally {
-    // The legacy lock is released BEFORE the removal below: the lock file lives inside the
-    // legacy room directory, and the removal must not race another process for that room.
     releaseRoomLock(legacyRoot);
   }
   // Skipped or failed: the legacy room stays exactly as it was.
-  if (copied === null) return false;
-  // The copy is in place: the legacy room goes, so nothing lingers in the project tree.
-  removeLegacyRoom(legacyRoot, legacyRoomDir, targetRoot, copied);
-  return true;
+  return copied !== null;
 }
 
 /**

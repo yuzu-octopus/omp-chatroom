@@ -9,6 +9,7 @@ import { stopCompactor } from "../store/compactor";
 import {
   bumpCursor,
   cursorFor,
+  deliveredT0s,
   initCursor,
   persistOwnCursor,
   restoreOwnCursor,
@@ -75,12 +76,19 @@ export function registerHooks(pi: ExtensionAPI): void {
           // transport rejection) must not swallow the rest of the batch, and the rejection must
           // never escape the notifier (the sweep timer would see an unhandled rejection).
           try {
+            // The delivery pass may already have sent this notice as a T0 (a release is a T0 for
+            // its previous holder). A T0 is a wake+steer, so sending it twice is an interrupt
+            // storm — and the registry is exactly the "delivered once" record the pass consults.
+            if (deliveredT0s(store.root, claim.prev).has(claim.record.seq)) continue;
             // The notice is a T0 at the room head. An uncapped cursor bump would carry the
             // holder's cursor over every record it had not read yet — those records would fall
             // below the cursor and `room{op:"read"}` could never return them. So the bump is
             // capped at the floor of what the holder still owes (the notice's own record
             // excluded: it is being delivered, not owed).
-            const floor = owedFloorFor(store, claim.prev, claim.record.seq);
+            //
+            // The gaps COUNT here: this path is not a delivery pass, so nothing else carries
+            // them, and a cursor bump past a gap would lose the notice that records were skipped.
+            const floor = owedFloorFor(store, claim.prev, claim.record.seq, { gapsOwed: true });
             const cap = floor === null ? undefined : floor - 1;
             await deliver(pi, ctx, claim.prev, claim.record, "T0", [], cap);
           } catch (error) {

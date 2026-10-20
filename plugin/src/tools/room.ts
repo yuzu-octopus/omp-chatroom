@@ -567,15 +567,22 @@ async function deliverToTarget(
  *
  * `exceptSeq` excludes the record being delivered (the notice's own release record).
  */
-export function owedFloorFor(store: RoomStore, target: string, exceptSeq?: number): number | null {
+export function owedFloorFor(
+  store: RoomStore,
+  target: string,
+  exceptSeq?: number,
+  options: { gapsOwed?: boolean } = {},
+): number | null {
   const viewer = viewerStateFor(store, target);
   const cursor = store.cursors.get(target) ?? 0;
   const owed = store.records.filter(
     (r) =>
       r.seq > cursor &&
       r.seq !== exceptSeq &&
-      // A `gap` is CARRIED by the next pass, not owed (see `deliverToTarget`).
-      r.kind !== "gap" &&
+      // A `gap` is CARRIED by the next pass, not owed (see `deliverToTarget`) — unless the caller
+      // is NOT a delivery pass. The sweep's expiry notice is not one: nothing carries the gap, so
+      // a cursor bump past it would lose the notice that records were skipped.
+      (r.kind !== "gap" || options.gapsOwed === true) &&
       !isMuted(store, viewer, r) &&
       classify(r, viewer) !== "T2",
   );
