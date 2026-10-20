@@ -49,6 +49,12 @@ export interface RoomStore {
    * its cost is noise next to the send it precedes.
    */
   deliveries: { T0: number; T1: number; T2: number };
+  /**
+   * R7 — the idempotency index: `<agent>+<key>` → the seq of the record that key produced. A
+   * repeat of a post with the same key returns that record instead of appending a second one:
+   * a retried post would otherwise double-wake every mentioned peer, and a T0 is a wake+steer.
+   */
+  idemKeys: Map<string, number>;
 
   // K15 — the ONLY write path: mint seq/ts/v/id, append the line, project, notify listeners.
   // Without it every writer module would import this module at runtime and close a cycle.
@@ -85,11 +91,25 @@ function newMember(agentId: string, joinedAtSeq: number): MemberState {
   };
 }
 
+/** R7 — the idempotency index key: the poster's id and their key, so two agents can pick the
+ * same key string without colliding (Stripe scopes its keys per account). */
+export function idemIndexKey(agentId: string, key: string): string {
+  // Length-prefixed, so the two halves cannot be confused for one another: an agent id and a
+  // caller-chosen key are joined without a separator that either could contain.
+  return `${agentId.length}:${agentId}${key}`;
+}
+
 // The record projection (K15 "append … projects"): a live `member` record updates the roster map
 // and a `claim`/`release` record updates the claim map. Claim state is projected HERE, before
 // listeners run, so a listener woken by a promotion sees the grant it is reacting to (claims.ts
 // owns the arbiter's rules — TTL/staleness/waiter promotion — not this projection).
+
 function project(store: RoomStore, record: RoomRecord): void {
+  // R7 — the idempotency index is projected HERE, so a replay rebuilds it: a retry after a restart
+  // must still find the record its key produced.
+  if (record.kind === "msg" && record.idemKey !== undefined) {
+    store.idemKeys.set(idemIndexKey(record.from, record.idemKey), record.seq);
+  }
   if (record.kind === "member") {
     if (record.action === "join") {
       if (!store.members.has(record.from))
@@ -107,6 +127,7 @@ function project(store: RoomStore, record: RoomRecord): void {
       acquiredAt: record.ts,
       seq: record.seq,
     });
+
     // Plan 002 — the mirror of the release prune: every grant path (direct claim AND waiter
     // promotion via resolveWaiters) funnels through here, so the holder's topics stay correct
     // no matter which path granted the lease. Idempotent: Set.add on re-grant is a no-op.
@@ -153,6 +174,7 @@ function createStore(root: string, roomId: string): RoomStore {
     waiters: new Map(),
     listeners: new Set(),
     deliveries: { T0: 0, T1: 0, T2: 0 },
+    idemKeys: new Map(),
     seq: 0,
 
     append(draft: RoomRecordDraft): RoomRecord {
@@ -338,6 +360,11 @@ export function enforceRetention(store: RoomStore, now: number): RoomRecord | nu
   ) {
     const record = store.records.shift()!;
     store.byId.delete(record.id);
+    // R7 — an idempotency key whose record was pruned must go with it: the key's promise is
+    // "this post happened once", and the post it referred to no longer exists.
+    if (record.kind === "msg" && record.idemKey !== undefined) {
+      store.idemKeys.delete(idemIndexKey(record.from, record.idemKey));
+    }
     dropped++;
   }
   if (dropped === 0) return null;

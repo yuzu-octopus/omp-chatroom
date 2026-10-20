@@ -28,7 +28,7 @@ import { safeRoomText } from "../onboarding/escape";
 import { contended, grant, reclaimIfStale, release, renew } from "../store/claims";
 import { type RoomConfig, resolveRoomConfig } from "../store/config";
 import { bumpCursor, cursorFor, deliveredT0s, initCursor, lagFor } from "../store/cursors";
-import { type MemberState, type RoomStore, roomStoreFor } from "../store/room-store";
+import { idemIndexKey, type MemberState, type RoomStore, roomStoreFor } from "../store/room-store";
 import type { BoardResult, Performative, RoomRecord, TopicRow } from "../store/schema";
 import {
   COVER_BUDGET_LINES,
@@ -81,6 +81,7 @@ export interface RoomParams {
   mention?: string[];
   replyTo?: string;
   performative?: Performative;
+  idemKey?: string;
   key?: string;
   ttl?: number;
   since?: number;
@@ -94,7 +95,16 @@ export interface RoomParams {
 export type RoomToolDetails =
   | { ok: true; op: "join"; digest: string; cursor: number }
   | { ok: true; op: "read"; records: RoomRecord[]; cursor: number; more: boolean }
-  | { ok: true; op: "post"; id: string; seq: number; tier: Tier; deliveryError?: string }
+  | {
+      ok: true;
+      op: "post";
+      id: string;
+      seq: number;
+      tier: Tier;
+      /** R7 — this post was a retry: the original record was returned, nothing was appended. */
+      idempotent?: boolean;
+      deliveryError?: string;
+    }
   | { ok: true; op: "claim"; holder: string; expiresAt: number; deliveryError?: string }
   | { ok: true; op: "release"; deliveryError?: string }
   | { ok: true; op: "board"; board: BoardResult }
@@ -630,6 +640,14 @@ export function registerRoomTool(pi: ExtensionAPI): void {
       .describe(
         "Speech act, carried through to cards: inform · request · propose · accept · reject · query · failure.",
       ),
+    idemKey: z
+      .string()
+      .optional()
+      .describe(
+        "Retry key: a repeat of this post with the same key returns the first one instead of " +
+          "posting twice. Use it when a post may be retried — a double post double-wakes every " +
+          "mentioned agent.",
+      ),
     key: z
       .string()
       .optional()
@@ -766,6 +784,31 @@ export function registerRoomTool(pi: ExtensionAPI): void {
             const { head, handle } = truncateOversized(body, config.maxT1Tokens);
             const storedBody = handle !== "" ? `${head}${handle}` : head;
             const viewer = viewerFor(store, agentId);
+            // R7 — idempotency. A retry with the same key returns the FIRST post instead of
+            // appending a second: a retried post would double-wake every mentioned peer, and a T0
+            // is a wake+steer. Stripe's contract, copyable: the saved response is returned, and a
+            // key reused for DIFFERENT parameters is an error rather than a silent second post.
+            if (p.idemKey !== undefined) {
+              const priorSeq = store.idemKeys.get(idemIndexKey(agentId, p.idemKey));
+              const prior =
+                priorSeq === undefined ? undefined : store.records.find((r) => r.seq === priorSeq);
+              if (prior !== undefined && prior.kind === "msg") {
+                if (prior.topic !== topic || prior.body !== storedBody) {
+                  return fail(`idemKey ${p.idemKey} was already used for a different post`);
+                }
+                return okWithDelivery(
+                  {
+                    ok: true,
+                    op: "post",
+                    id: prior.id,
+                    seq: prior.seq,
+                    tier: classify(prior, viewer),
+                    idempotent: true,
+                  },
+                  `room post ${safe(topic)} → already posted (seq ${prior.seq})`,
+                );
+              }
+            }
             // §5.1 N1 — replying subscribes the poster to the thread: resolve the parent's root
             // (or the parent itself when it starts the thread) and stamp it on the new record. An
             // unknown replyTo is ignored, never a failure — the reply still posts.
@@ -781,6 +824,7 @@ export function registerRoomTool(pi: ExtensionAPI): void {
               ...(p.replyTo ? { replyTo: p.replyTo } : {}),
               ...(threadRoot ? { threadRoot } : {}),
               ...(p.performative ? { performative: p.performative } : {}),
+              ...(p.idemKey !== undefined ? { idemKey: p.idemKey } : {}),
             });
             viewer.lastMessageId = record.id;
             viewer.topics.add(topic);

@@ -278,6 +278,7 @@ const STRING_FIELDS = [
   "target",
   "outcome",
   "tier",
+  "idemKey",
 ] as const;
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

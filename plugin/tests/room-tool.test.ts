@@ -108,6 +108,41 @@ test("renew: a non-holder cannot renew somebody else's lease", () => {
   expect(s.seq).toBe(seqBefore);
 });
 
+test("R7: a retried post with the same key returns the first one instead of posting twice", async () => {
+  const { store, ctx } = newTestStore();
+
+  const first = await invokeRoom(ctx, {
+    op: "post",
+    topic: "build",
+    body: "the finding",
+    idemKey: "finding-1",
+  });
+  expect(first.details).toMatchObject({ ok: true, op: "post" });
+  const seqAfterFirst = store.seq;
+
+  const retry = await invokeRoom(ctx, {
+    op: "post",
+    topic: "build",
+    body: "the finding",
+    idemKey: "finding-1",
+  });
+  expect(retry.details).toMatchObject({ ok: true, op: "post", idempotent: true });
+  expect(retry.details?.seq).toBe(first.details?.seq);
+  // nothing was appended: a double post double-wakes every mentioned peer
+  expect(store.seq).toBe(seqAfterFirst);
+  expect(store.records.filter((r) => r.kind === "msg")).toHaveLength(1);
+
+  // the same key with DIFFERENT parameters is an error, not a silent second post
+  const mismatch = await invokeRoom(ctx, {
+    op: "post",
+    topic: "build",
+    body: "a different finding",
+    idemKey: "finding-1",
+  });
+  expect(mismatch.details).toMatchObject({ ok: false });
+  expect(store.seq).toBe(seqAfterFirst);
+});
+
 test("R5: a lost claim is recorded, so contention is measurable", async () => {
   const { store, ctx } = newTestStore();
   expect(grant(store, "build/step", "AgentB", 60_000).ok).toBe(true);

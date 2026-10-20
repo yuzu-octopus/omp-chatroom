@@ -16,6 +16,8 @@ export type RoomRecord =
       performative?: Performative;
       replyWith?: string;
       replyBy?: string;
+      /** R7 — a retry key: a repeat with the same key returns THIS record instead of a new one. */
+      idemKey?: string;
     }
   | {
       v: 1;
