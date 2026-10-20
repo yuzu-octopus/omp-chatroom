@@ -212,8 +212,12 @@ the suite cannot do for itself.
 
 - **Mute and topic-follow are session-scoped.** They live in the in-memory `MemberState` and are not
   written to the log. Only the read cursor persists (`pi.appendEntry`).
-- **In-process only.** One omp process per room root (the global store's `rooms/<hash>` directory);
-  a second writer would tear lines.
+- **In-process only.** One omp process per room root (the global store's `rooms/<hash>` directory).
+  A swarm of subagents is fine — they live in the same process and share one room and one lock — but
+  a SECOND omp process on the same project now fails LOUDLY (`room file locked by pid N`) instead of
+  tearing lines: the lockfile (`<root>/room/.lock`, owner pid, stale pids reaped) makes the second
+  writer fail, because two writers were measured minting 10 duplicate seqs over 40 records without
+  ever seeing each other's records.
 - **`ctx.signal` does not exist.** The panel aborts via `pi.on("session_shutdown", …)`.
 - **The room is not a token-cost win.** Its value is correctness, not efficiency.
 - **Room message volume has no study behind it** — the design caps it rather than proving it helps.

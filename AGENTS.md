@@ -113,6 +113,13 @@ per-session — a subagent's artifacts dir is its own session file minus `.jsonl
 there gave every agent a private room. The directory leaf is a hash of the *project path*, while
 the room **id** is minted from the room *root*, so the two differ by design.
 
+**One omp PROCESS per project.** The room has a single-writer lockfile (`<root>/room/.lock`, the
+owner's pid, stale pids reaped). Subagents run *inside* the same process, so a whole swarm shares
+one room and one lock — the lock is taken once per process per root. A SECOND omp process on the
+same project (a second window, a cron-driven session) fails LOUDLY with `room file locked by pid
+N` instead of silently minting colliding seqs: two writers were measured producing 10 duplicate
+seqs over 40 records, and neither ever saw the other's records.
+
 **Result contract (K1).** Every tool returns `content: [{type:"text", text}]` — always present; a
 result without it is coerced to an error by the host — plus `details` with `ok`. The payload lives in
 `details`, never as a bare object. Timeouts are **normal outcomes**:
