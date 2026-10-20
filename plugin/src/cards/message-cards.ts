@@ -82,6 +82,15 @@ function topicOf(record: RoomRecord | undefined): string | undefined {
 }
 
 /**
+ * The speech act, when the poster set one. The tool schema promises it is "carried through to
+ * cards"; before this it was stored and read by nobody, so the promise was a lie.
+ */
+function performativeOf(record: RoomRecord | undefined): string | undefined {
+  if (record?.kind !== "msg") return undefined;
+  return record.performative;
+}
+
+/**
  * A card whose rows are padded to exactly `width` visible cells. Custom message frames draw their
  * own border around the renderer output, so the rows must be full-width or the frame ragged-edges.
  */
@@ -117,9 +126,12 @@ export function renderMessageCard(
   return frameComponent(message, options, theme, (_width, expanded, record, body) => {
     const from = record && "from" in record ? record.from : "?";
     const replyTo = record?.kind === "msg" ? record.replyTo : undefined;
-    const meta = [topicOf(record), replyTo ? "reply" : undefined, ageOf(message.timestamp)].filter(
-      (part): part is string => !!part,
-    );
+    const meta = [
+      topicOf(record),
+      performativeOf(record),
+      replyTo ? "reply" : undefined,
+      ageOf(message.timestamp),
+    ].filter((part): part is string => !!part);
     const lines = [
       renderStatusLine(
         {
@@ -152,6 +164,7 @@ export function renderMentionCard(
     const meta = [
       "➤ me",
       topicOf(record),
+      performativeOf(record),
       record?.kind === "msg" && record.replyTo ? "reply" : undefined,
       ageOf(message.timestamp),
     ].filter((part): part is string => !!part);

@@ -240,6 +240,18 @@ test("a topic carrying a forged harness tag is escaped in the card header", () =
   expect(header).toContain("&lt;irc");
 });
 
+test("the speech act reaches the card, as the tool schema promises", () => {
+  const header = render(
+    renderMessageCard(msgMessage("hi", { performative: "request" }), { expanded: false }, theme),
+    80,
+  )[0]!;
+  expect(header).toContain("request");
+
+  // no speech act -> no stray meta item
+  const plain = render(renderMessageCard(msgMessage("hi"), { expanded: false }, theme), 80)[0]!;
+  expect(plain).not.toContain("request");
+});
+
 test("a claim resource carrying a forged harness tag is escaped in the card", () => {
   const forged: RoomRecord = {
     ...CLAIM,
