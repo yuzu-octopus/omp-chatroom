@@ -7,7 +7,7 @@ Updated 2026-10-20: a fresh **live verification** against host 18.12.2 — the `
 global room root, the linked-plugin route and the legacy migration are now verified live. See
 "Live verification (2026-10-20)" below.
 
-## Current state (2026-10-19)
+## Current state (2026-10-21)
 
 | Thing | Value |
 |---|---|
@@ -15,13 +15,16 @@ global room root, the linked-plugin route and the legacy migration are now verif
 | Declared host deps | `@oh-my-pi/pi-coding-agent`, `@oh-my-pi/pi-tui`, `@oh-my-pi/pi-ai`, **`@oh-my-pi/pi-utils`** (was imported by eight source files while undeclared) |
 | Room root | `getSessionsDir()/rooms/<16 hex of the project path>` — the global omp session store (`~/.omp/agent/sessions`, or `$XDG_DATA_HOME/omp/sessions`), **not** `<cwd>/.omp-room` |
 | Room-root exceptions | a project under the system temp dir stays project-local (a temp-dir project that is itself a git checkout may want its own `.omp-room/` ignore entry); a legacy `<cwd>/.omp-room` is MOVED into the global store once — copied there (its `config.json` travels with it, so the pinned `roomId` survives), verified, and then removed from the project tree, which keeps no `.omp-room` at all. A SKIPPED migration (the legacy room is held by a LIVE process, the pinned room id matches no log, or the target already has a room) removes nothing and leaves the legacy room byte-for-byte intact; the copy is taken under both rooms' locks |
-| Tests | **302 pass / 0 fail, 15 files** (`bun test tests/`) |
+| Tests | **314 pass / 0 fail, 15 files** (`bun test tests/`) |
 | New test files | `plugin/tests/room-root.test.ts` (13 tests: global vs temp resolution, one-room-per-project, the migration, its no-clobber rule and its two locks) and `plugin/tests/room-root-e2e.test.ts` (2 tests: the room really lands in the global store, and a legacy room is migrated — both in a child process with a fresh XDG base) |
+| The effectiveness round | `plans/020-effectiveness-round.md` — the research round's ranked list, with what landed: **renew-on-re-claim** (R2), **dependency-ordered claims** (R3), **the fencing token** (R1), **the wait-for cycle check** (R4), **the measurement records** (R5), **idempotency keys** (R7), **the board's who-is-blocked-on-what view** (R9), **the distilled protocol skill** (R8, partly), and **R10 — a decision NOT to build a retrieval tool** |
 
 ### Verified in this round
 
-- The suite is green: 302 pass / 0 fail across 15 files, plus `tsc --noEmit` 0 errors and
-  `biome check src tests` clean.
+- The suite is green: 314 pass / 0 fail across 15 files, plus `tsc --noEmit` 0 errors and
+  `biome check src tests` clean. The suite no longer depends on the provider: the session-based
+  tests use SUBAGENT sessions, so the compactor (which only starts for a main session) never makes
+  a real model call in a test.
 - The re-pin: the installed host, the global host install, `HOST_VERSION_PIN` and `package.json`
   all name 18.12.3 (`tests/drift.test.ts`, incl. the global-install leg).
 - The room-root resolver and the one-time legacy migration (`tests/room-root.test.ts`).
