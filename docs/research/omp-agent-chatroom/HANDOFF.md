@@ -15,12 +15,12 @@ global room root, the linked-plugin route and the legacy migration are now verif
 | Declared host deps | `@oh-my-pi/pi-coding-agent`, `@oh-my-pi/pi-tui`, `@oh-my-pi/pi-ai`, **`@oh-my-pi/pi-utils`** (was imported by eight source files while undeclared) |
 | Room root | `getSessionsDir()/rooms/<16 hex of the project path>` — the global omp session store (`~/.omp/agent/sessions`, or `$XDG_DATA_HOME/omp/sessions`), **not** `<cwd>/.omp-room` |
 | Room-root exceptions | a project under the system temp dir stays project-local (a temp-dir project that is itself a git checkout may want its own `.omp-room/` ignore entry); a legacy `<cwd>/.omp-room` is MOVED into the global store once — copied there (its `config.json` travels with it, so the pinned `roomId` survives), verified, and then removed from the project tree, which keeps no `.omp-room` at all. A SKIPPED migration (the legacy room is held by a LIVE process, the pinned room id matches no log, or the target already has a room) removes nothing and leaves the legacy room byte-for-byte intact; the copy is taken under both rooms' locks |
-| Tests | **294 pass / 0 fail, 15 files** (`bun test tests/`) |
+| Tests | **302 pass / 0 fail, 15 files** (`bun test tests/`) |
 | New test files | `plugin/tests/room-root.test.ts` (13 tests: global vs temp resolution, one-room-per-project, the migration, its no-clobber rule and its two locks) and `plugin/tests/room-root-e2e.test.ts` (2 tests: the room really lands in the global store, and a legacy room is migrated — both in a child process with a fresh XDG base) |
 
 ### Verified in this round
 
-- The suite is green: 294 pass / 0 fail across 15 files, plus `tsc --noEmit` 0 errors and
+- The suite is green: 302 pass / 0 fail across 15 files, plus `tsc --noEmit` 0 errors and
   `biome check src tests` clean.
 - The re-pin: the installed host, the global host install, `HOST_VERSION_PIN` and `package.json`
   all name 18.12.3 (`tests/drift.test.ts`, incl. the global-install leg).
@@ -309,8 +309,9 @@ nothing and leaves the legacy room byte-for-byte intact.
 | Gate | Result |
 |---|---|
 | `bunx --bun tsc --noEmit -p tsconfig.json` | **0 errors** |
-| `bun test tests/` | **294 pass / 0 fail**, 15 files (as of 2026-10-20; the plan-008 skew pin is gone — retention now invalidates the tree) |
-| `bunx --bun @biomejs/biome check src tests` | **0 errors, 0 warnings** |
+| `bun check` (Bun's own typecheck, the fast gate) | **0 errors in 50 files** |
+| `bun test tests/` | **302 pass / 0 fail**, 15 files (as of 2026-10-20; the plan-008 skew pin is gone — retention now invalidates the tree) |
+| `bunx --bun @biomejs/biome check src tests` | **0 errors** (exit 0 over 51 files; HEAD did not pass this until the 2026-10-20 lint fix) |
 | Remaining `not implemented` stubs | **0** |
 | Plugin loads in a real session | **0 extension errors**, all 4 tools + `/room` registered |
 | Governor delivery | **verified live** — a mention reaches the target as a T0 steer |

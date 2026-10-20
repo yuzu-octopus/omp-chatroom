@@ -107,7 +107,7 @@ Gates, all green:
 
 | Gate | Result |
 |---|---|
-| `bun test tests/` | **294 pass / 0 fail**, 15 files |
+| `bun test tests/` | **302 pass / 0 fail**, 15 files |
 | `bunx --bun tsc --noEmit -p tsconfig.json` | **0 errors** |
 | `bunx --bun @biomejs/biome check src tests` | **0 errors, 0 warnings** |
 | Remaining `not implemented` stubs | **0** |
