@@ -144,7 +144,10 @@ export interface ClaimRow {
   ttlMs: number;
   expiresAt: number;
   acquiredAt: number;
-  contended: number;
+  /** R9 — the agent ids waiting for this resource (the old count, as names). */
+  waiting: string[];
+  /** R9 — the resources this claim waits on (its `dependsOn`). */
+  dependsOn: string[];
 }
 export interface RosterRow {
   agentId: string;

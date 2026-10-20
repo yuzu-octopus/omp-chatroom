@@ -237,8 +237,14 @@ function boardLines(board: BoardResult): string[] {
   const claims = board.claims.slice(0, DIGEST_CLAIMS_CAP);
   for (const claim of claims) {
     const left = Math.max(0, Math.round((claim.expiresAt - Date.now()) / 1000));
-    const waiting = claim.contended > 0 ? ` · ${claim.contended} waiting` : "";
-    lines.push(`claim ${safe(claim.resource)} · ${safe(claim.holder)} · ${left}s left${waiting}`);
+    // R9 — who is blocked on what: the waiters, and what this claim itself waits on.
+    const waiting =
+      claim.waiting.length > 0 ? ` · waiting: ${claim.waiting.map(safe).join(", ")}` : "";
+    const depends =
+      claim.dependsOn.length > 0 ? ` · needs ${claim.dependsOn.map(safe).join(", ")}` : "";
+    lines.push(
+      `claim ${safe(claim.resource)} · ${safe(claim.holder)} · ${left}s left${waiting}${depends}`,
+    );
   }
   if (board.claims.length > claims.length)
     lines.push(`… +${board.claims.length - claims.length} more claim(s)`);
@@ -270,7 +276,10 @@ function buildBoard(store: RoomStore, viewer: MemberState): BoardResult {
     ttlMs: claim.ttlMs,
     expiresAt: claim.acquiredAt + claim.ttlMs,
     acquiredAt: claim.acquiredAt,
-    contended: contended(store, claim.resource).length,
+    // R9 — who is blocked on what: the agent ids waiting for this resource, and the resources
+    // this claim itself waits on.
+    waiting: contended(store, claim.resource),
+    dependsOn: claim.dependsOn ?? [],
   }));
   const roster = [...store.members.values()].map((member) => ({
     agentId: member.agentId,

@@ -108,6 +108,27 @@ test("renew: a non-holder cannot renew somebody else's lease", () => {
   expect(s.seq).toBe(seqBefore);
 });
 
+test("R9: the board says who is blocked on what", async () => {
+  const { store, ctx } = newTestStore();
+
+  // A claims build/step, depending on build/schema (which nobody holds).
+  const claimed = await invokeRoom(ctx, {
+    op: "claim",
+    topic: "build",
+    key: "step",
+    dependsOn: ["build/schema"],
+  });
+  expect(claimed.details).toMatchObject({ ok: true, op: "claim" });
+
+  // B waits for it.
+  enqueueWaiter(store, "build/step", "AgentB");
+
+  const board = await invokeRoom(ctx, { op: "board" });
+  const text = board.content.map((c) => c.text ?? "").join("\n");
+  expect(text).toContain("waiting: AgentB"); // who waits on it
+  expect(text).toContain("needs build/schema"); // what it waits on
+});
+
 test("R1: a displaced agent's late write is fenced out by its stale generation", async () => {
   const { store, ctx } = newTestStore();
 

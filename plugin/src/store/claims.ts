@@ -10,6 +10,8 @@ export interface ClaimState {
   seq: number;
   /** R1 — the generation of this grant (per resource); it rises when ownership changes. */
   gen: number;
+  /** R3 — the resources this claim waits on. */
+  dependsOn: string[];
 }
 
 export type GrantResult =
@@ -261,6 +263,7 @@ export function hydrateClaims(store: RoomStore, records: readonly RoomRecord[]):
         acquiredAt: record.ts,
         seq: record.seq,
         gen,
+        dependsOn: record.dependsOn ?? [],
       });
     } else if (record.kind === "release") {
       store.claims.delete(record.resource);

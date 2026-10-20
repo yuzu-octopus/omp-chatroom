@@ -139,6 +139,7 @@ function project(store: RoomStore, record: RoomRecord): void {
       acquiredAt: record.ts,
       seq: record.seq,
       gen,
+      dependsOn: record.dependsOn ?? [],
     });
 
     // Plan 002 — the mirror of the release prune: every grant path (direct claim AND waiter

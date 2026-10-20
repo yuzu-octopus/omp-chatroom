@@ -296,7 +296,8 @@ export class RoomPanel implements Component {
         ttlMs: claim.ttlMs,
         expiresAt: claim.acquiredAt + claim.ttlMs,
         acquiredAt: claim.acquiredAt,
-        contended: contended(store, claim.resource).length,
+        waiting: contended(store, claim.resource),
+        dependsOn: claim.dependsOn ?? [],
       };
       rows.push({ ...row, state: claim.acquiredAt + claim.ttlMs <= now ? "expired" : "held" });
     }
@@ -315,7 +316,8 @@ export class RoomPanel implements Component {
         ttlMs: 0,
         expiresAt: 0,
         acquiredAt: ended.ts,
-        contended: 0,
+        waiting: [],
+        dependsOn: [],
         state: "released",
       });
     }

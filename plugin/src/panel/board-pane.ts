@@ -47,7 +47,7 @@ function ttlCell(
 }
 
 function holderText(row: BoardRow): string {
-  return row.contended > 0 ? `${row.holder} +${row.contended} waiting` : row.holder;
+  return row.waiting.length > 0 ? `${row.holder} +${row.waiting.length} waiting` : row.holder;
 }
 
 /**
@@ -90,7 +90,8 @@ export function projectClaims(
       },
       {
         text: sanitizeText(holderText(row)),
-        style: (text) => theme.fg(row.contended > 0 ? "warning" : dim ? "muted" : "text", text),
+        style: (text) =>
+          theme.fg(row.waiting.length > 0 ? "warning" : dim ? "muted" : "text", text),
       },
       { text: ttl.text, style: (text) => theme.fg(ttl.tone, text) },
       { text: row.state, style: (text) => theme.fg(STATE_TONE[row.state], text) },

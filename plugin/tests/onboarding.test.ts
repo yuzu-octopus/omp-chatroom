@@ -101,6 +101,7 @@ test("truncation drops the raw-tail backlog first and never drops the cursor/lag
     acquiredAt: Date.now(),
     seq: store.seq,
     gen: 1,
+    dependsOn: [],
   });
 
   const full = buildDigest(store, viewer("AgentA"));
@@ -299,6 +300,7 @@ test("the digest advertises the active caps and honours the roster/claim caps", 
       acquiredAt: Date.now(),
       seq: store.seq,
       gen: 1,
+      dependsOn: [],
     });
   }
 
@@ -513,6 +515,7 @@ test("the digest is append-only: an agent going idle changes exactly one line (Â
     acquiredAt: Date.now(),
     seq: store.seq,
     gen: 1,
+    dependsOn: [],
   });
 
   const first = buildDigest(store, viewer("AgentA"));
@@ -600,6 +603,7 @@ test("a claim's TTL is bucketed coarsely, so a render one second later is byte-i
       acquiredAt: at,
       seq: store.seq,
       gen: 1,
+      dependsOn: [],
     });
 
     const first = buildDigest(store, viewer("AgentA"));
@@ -642,6 +646,7 @@ test("the digest still fits its token budget and the routing rule is still not c
     acquiredAt: Date.now(),
     seq: store.seq,
     gen: 1,
+    dependsOn: [],
   });
 
   const digest = buildDigest(store, viewer("AgentA"));
