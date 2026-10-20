@@ -71,6 +71,33 @@ bunx --bun @biomejs/biome check src tests --write   # apply fixes
 routes reach `plugin/src/index.ts`: the project shim `.omp/extensions/chatroom.ts` (what this repo
 uses, auto-discovered) and `omp plugin link .` (packaged, verified with `omp plugin doctor`).
 
+## Agent hygiene: scratch, cleanup, and how we verify
+
+**Scratch goes in the ledger, never in a glob.** Every scratch dir or file you create is recorded
+first, and cleanup deletes only recorded paths:
+
+```sh
+~/.omp/agent/scratch.sh new /tmp/<name>     # create it and record it
+~/.omp/agent/scratch.sh clean --dry         # show what would go
+~/.omp/agent/scratch.sh clean               # delete it, plus its omp session dir
+```
+
+- Never glob `/tmp` or the omp session store, and never `rm -rf` a path you did not create. A
+  name pattern over a shared root is not an ownership check: `-tmp*` in
+  `~/.omp/agent/sessions` matches the base `/tmp` session dir (`-tmp`) as well as the projects
+  under it, and the base one belongs to the human.
+- Off limits, always: `/tmp` itself, `~/.omp/agent/sessions`, `~/.omp/agent/sessions/-tmp`, and
+  the human's own files. `trash` (recoverable) over `rm` for anything you created.
+- The omp session dir for a scratch project is derived from the recorded path, so a recorded
+  project under `/tmp/` can only ever map to a `-tmp-<project>` slug — never the base one.
+
+**Verification: the test suite is the oracle, the human does the live runs.** Do not spawn omp
+processes to probe the plugin — no `--mode json`/`text` runs, no pty harnesses, no live room-tool
+probes, no scratch trees of fake session stores. `bun test tests/` plus `bun check` is what you
+gate on. When a behaviour can only be seen in a real terminal or a real model, write it down as
+**needs the human's live check** (in the handoff, with the exact steps) instead of probing it
+yourself. The human has the machine and will run it.
+
 ## Code Conventions & Common Patterns
 
 **Runtime is Bun. Never Node, npm, or npx.** There is no root `package.json` and no workspace.
