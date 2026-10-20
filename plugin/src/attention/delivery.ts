@@ -44,10 +44,16 @@ export async function sendBounded(
     (error: unknown) => ({ ok: false, error }),
   );
   // A ctx without the host's timer API has no deadline — and a raw timer is forbidden (I4).
-  // The host always provides `ctx.setTimeout`; a test double that does not gets the unbounded wait.
+  // The host ALWAYS provides `ctx.setTimeout`; a test double that does not must not get the
+  // unbounded wait either (that is the deadlock the bound exists to prevent), so the send is
+  // issued and NOT awaited: the outcome is still observed (`settled` carries both handlers) but
+  // the caller does not block on the target's turn.
   const timers = ctx as Partial<Pick<ExtensionContext, "setTimeout" | "clearTimer">>;
   const schedule = timers.setTimeout?.bind(ctx);
-  if (schedule === undefined) return settled;
+  if (schedule === undefined) {
+    void settled;
+    return { ok: true };
+  }
   let timer: Timer | undefined;
   try {
     return await Promise.race([

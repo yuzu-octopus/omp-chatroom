@@ -238,6 +238,11 @@ function fakeCtx(agentId: string): ExtensionContext {
     // The real ExtensionContext always provides these; the room jobs start from the main session
     // (R11/R28), so the double must complete the timer API.
     setInterval: () => 0 as unknown as Timer,
+    // The real ExtensionContext always provides the timer API (the host declares setTimeout and
+    // clearTimer as required members). A double without it would take the delivery's
+    // no-deadline fallback, which never awaits the send — so a transport failure would be
+    // swallowed instead of reported.
+    setTimeout: () => 0 as unknown as Timer,
     clearTimer: () => {},
   } as unknown as ExtensionContext;
 }
@@ -840,4 +845,26 @@ test("the expiry notice does not carry the holder's cursor over its unread recor
   const cursor = store.cursors.get("Holder") ?? 0;
   const unread = store.records.filter((r) => r.kind === "msg" && r.seq > cursor);
   expect(unread.length).toBe(2);
+});
+
+test("the room jobs restart after the main session's shutdown (F6)", async () => {
+  // The host clears the main session's timers when it shuts down, but the room's timer REGISTRY
+  // survived: the sweep/retention/compactor jobs were dead while the registry still claimed they
+  // ran, so a later main session's start returned early and the room never expired a claim or
+  // pruned its log again.
+  const { pi, fire } = fakePi();
+  registerHooks(pi);
+  const ctx = fakeCtx("AgentA");
+  await fire(
+    "before_agent_start",
+    { type: "before_agent_start", prompt: "hi", systemPrompt: [] },
+    ctx,
+  );
+  // While the main session lives, the sweep is scheduled.
+  expect(captureSweep(store.root).length).toBe(2);
+  // The main session dies: the host clears its timers.
+  await fire("session_shutdown", { type: "session_shutdown" }, ctx);
+  // The registry must be empty now, so a new main session schedules the jobs again.
+  const restarted = captureSweep(store.root);
+  expect(restarted.length).toBe(2);
 });

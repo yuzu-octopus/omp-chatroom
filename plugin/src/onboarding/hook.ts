@@ -5,6 +5,7 @@ import type {
 } from "@oh-my-pi/pi-coding-agent";
 import { deliver } from "../attention/delivery";
 import { resetTurnBudget } from "../attention/governor";
+import { stopCompactor } from "../store/compactor";
 import {
   bumpCursor,
   cursorFor,
@@ -19,6 +20,7 @@ import {
   type RoomStore,
   registerSweepNotifier,
   roomStoreFor,
+  roomTimers,
   unregisterSweepNotifier,
 } from "../store/room-store";
 import { owedFloorFor } from "../tools/room";
@@ -122,7 +124,17 @@ export function registerHooks(pi: ExtensionAPI): void {
   pi.on("session_shutdown", (_event, ctx) => {
     // F4 — a dead session's notifier must not fire later: the sweep would deliver the T0 notice
     // through a disposed session. Only the main session registers one, so only it unregisters.
-    if (ctx.agent.kind === "main") unregisterSweepNotifier(roomRootFor(ctx));
+    if (ctx.agent.kind === "main") {
+      unregisterSweepNotifier(roomRootFor(ctx));
+      // F6 — the host clears this session's timers when it shuts down, but the room's timer
+      // REGISTRY survived: the sweep/retention/compactor jobs were dead while the registry still
+      // claimed they ran, so a later main session's `start` returned early and the room never
+      // expired a claim or pruned its log again. Drop the registry entries so the next main
+      // session restarts them.
+      const root = roomRootFor(ctx);
+      roomTimers.stop(root);
+      stopCompactor(root);
+    }
     disposeRoomSession(ctx);
   });
 

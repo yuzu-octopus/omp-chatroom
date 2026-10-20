@@ -1272,3 +1272,45 @@ test("a T0 is not re-delivered while an older refused record pins the cursor", a
   const mentions = bCalls.filter((c) => String(c.payload.content).includes("over to you"));
   expect(mentions.length).toBe(1);
 });
+
+test("a ctx without the timer API still does not wait for the target's turn (F8)", async () => {
+  // The host ALWAYS provides ctx.setTimeout, so the no-deadline fallback is a test-double path.
+  // It must not become the unbounded wait the bound exists to prevent: the send is issued and
+  // NOT awaited, so the delivery returns while the target's turn is still running.
+  const root = tempRoot();
+  const b = `attn-notimer-${Date.now()}`;
+  let settle: (() => void) | undefined;
+  const targetTurn = new Promise<void>((resolve) => {
+    settle = resolve;
+  });
+  AgentRegistry.global().register({
+    id: b,
+    displayName: b,
+    kind: "sub",
+    status: "running",
+    session: {
+      // The send only settles when the target's turn ends — never in this test.
+      async sendCustomMessage(): Promise<boolean> {
+        await targetTurn;
+        return true;
+      },
+    } as never,
+  });
+
+  // A ctx WITHOUT the timer API.
+  const ctx = {
+    agent: { id: "A", kind: "sub", name: "sub", depth: 0 },
+    cwd: root,
+    localProtocolOptions: { getArtifactsDir: () => root, getSessionId: () => "A" },
+    setInterval: () => 0 as unknown as Timer,
+    clearTimer: () => {},
+  } as unknown as ExtensionContext;
+  const store = roomStoreFor(ctx);
+  const record = store.append({ kind: "msg", from: "X", topic: "build", body: "hi" });
+
+  const { pi } = fakePi();
+  const started = Date.now();
+  await deliver(pi, ctx, b, record, "T0");
+  expect(Date.now() - started).toBeLessThan(2_000);
+  settle?.();
+});
