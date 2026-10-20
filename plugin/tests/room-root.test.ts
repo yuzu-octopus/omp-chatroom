@@ -127,7 +127,7 @@ test("a successful migration is a MOVE: the legacy room is gone from the project
   expect(resolveRoomId(target)).toBe(legacyId);
 });
 
-test("a successful migration moves the tree cache along with the log", () => {
+test("a successful migration leaves the tree cache behind: the target rebuilds it", () => {
   const legacy = tempRoot();
   const target = tempRoot();
   const legacyRoomDir = path.join(legacy, "room");
@@ -137,10 +137,13 @@ test("a successful migration moves the tree cache along with the log", () => {
   fs.writeFileSync(path.join(legacyRoomDir, "tree", "64"), "tree-cache-bytes");
 
   expect(migrateLegacyRoom(legacy, target)).toBe(true);
-  // The cache travelled, and the legacy one is gone with the room.
-  expect(fs.readFileSync(path.join(target, "room", "tree", "64"), "utf-8")).toBe(
-    "tree-cache-bytes",
-  );
+  // The cache did NOT travel: its nodes are indexed by dense positions into the legacy's records
+  // array, which (after a retention prune) is shorter than the file the target replays - so a
+  // copied cache would describe the WRONG records, and the dense-prefix CAS would keep the
+  // compactor from ever rebuilding them. A cold cache costs one rebuild; a wrong one costs the
+  // truth.
+  expect(fs.existsSync(path.join(target, "room", "tree"))).toBe(false);
+  // The legacy cache went with the room.
   expect(fs.existsSync(path.join(legacy, "room", "tree"))).toBe(false);
   expect(fs.existsSync(legacy)).toBe(false);
 });

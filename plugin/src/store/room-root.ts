@@ -4,7 +4,7 @@ import * as path from "node:path";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { getSessionsDir } from "@oh-my-pi/pi-utils";
 import { roomDirNameFor, roomIdFor } from "../ids";
-import { isValidRoomId, loadRoomConfig } from "./config";
+import { configPath, isValidRoomId, loadRoomConfig } from "./config";
 import { acquireRoomLock, holdsRoomLock, releaseRoomLock, reserveRoomLock } from "./log";
 
 /**
@@ -315,7 +315,18 @@ function copyLegacyRoom(
   // The id the LEGACY room resolves for itself — its own log is the file the migration
   // copies (the one the legacy room would have opened).
   const legacyId = pinnedValid ? pinned : roomIdFor(legacyRoot);
-  const targetId = pinnedValid ? pinned : roomIdFor(targetRoot);
+  // The id the TARGET resolves AFTER the copy: its own config wins if it has one (the config is
+  // never clobbered), otherwise the legacy's pin travels with the room and keeps its identity.
+  const targetHasConfig = fs.existsSync(configPath(targetRoot));
+  const targetPin = targetHasConfig ? loadRoomConfig(targetRoot).roomId : "";
+  const targetPinValid = targetPin !== "" && isValidRoomId(targetPin);
+  const targetId = targetHasConfig
+    ? targetPinValid
+      ? targetPin
+      : roomIdFor(targetRoot)
+    : pinnedValid
+      ? pinned
+      : roomIdFor(targetRoot);
   const source = pickSourceLog(logs, legacyId);
   if (source === null) {
     // Ambiguous: the legacy dir holds several logs and none of them is the log the legacy
@@ -345,7 +356,11 @@ function copyLegacyRoom(
     const staged: StagedCopy[] = [];
     const configSrc = path.join(legacyRoomDir, "config.json");
     const configDest = path.join(targetRoomDir, "config.json");
-    if (fs.existsSync(configSrc)) {
+    // The target's OWN config is never clobbered: it is the configuration the target's room has
+    // been running with. It only travels when the target has none - then the legacy's pin moves
+    // with the room, so the migrated history keeps its identity.
+    const targetHasConfig = fs.existsSync(configPath(targetRoot));
+    if (!targetHasConfig && fs.existsSync(configSrc)) {
       staged.push({ src: configSrc, tmp: migrationTempPath(configDest), dest: configDest });
     }
     const primaryDest = path.join(targetRoomDir, `${targetId}.jsonl`);
@@ -382,28 +397,14 @@ function copyLegacyRoom(
       }
     };
     if (!copyStaged(staged, restoreConfig)) return null;
-    // The tree is a rebuildable cache over the log — copy it so the first read after the move is
-    // warm instead of rebuilding the summaries from scratch. Staged and renamed like the log:
-    // a half-copied cache would be worse than none.
+    // The tree is NOT copied. It is a rebuildable cache over the log, but its nodes are indexed
+    // by DENSE POSITIONS into the records array: the legacy's tree describes the positions of
+    // the legacy's array, which (after a retention prune) is shorter than the file the target
+    // replays. A copied tree therefore describes the WRONG records, and the dense-prefix CAS
+    // would make the compactor believe those blocks are already built - so the wrong summaries
+    // would persist. A cold cache costs one rebuild; a wrong one costs the truth.
     const legacyTree = path.join(legacyRoomDir, "tree");
-    let tree: string | null = null;
-    if (fs.existsSync(legacyTree)) {
-      const treeDest = path.join(targetRoomDir, "tree");
-      const treeTmp = migrationTempPath(treeDest);
-      try {
-        // Recursive: a staging name left by a crashed run is a directory.
-        fs.rmSync(treeTmp, { recursive: true, force: true });
-        fs.cpSync(legacyTree, treeTmp, { recursive: true });
-        fs.renameSync(treeTmp, treeDest);
-        tree = legacyTree;
-      } catch {
-        try {
-          fs.rmSync(treeTmp, { recursive: true, force: true });
-        } catch {
-          // Best-effort: the cache rebuilds from the log.
-        }
-      }
-    }
+    const tree: string | null = fs.existsSync(legacyTree) ? legacyTree : null;
     // The copy is in place: these are the legacy paths that may now go.
     return { files: staged.map((item) => item.src), tree };
   } finally {
