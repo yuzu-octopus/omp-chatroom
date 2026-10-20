@@ -56,7 +56,7 @@ wake+steer, so use it only when you really need to interrupt) · claim/release (
 tree/zoom (cold summary over older records) · recall (regex over the raw log).`;
 export const ROOM_LOAD_MODE = "essential"; // RISK R3
 
-// §4.1 — all 11 ops: join/read/post/claim/release/board/topics/mute/unmute/tree/zoom/recall
+// §4.1 — all 12 ops: join/read/post/claim/release/board/topics/mute/unmute/tree/zoom/recall
 export type RoomOp =
   | "join"
   | "read"

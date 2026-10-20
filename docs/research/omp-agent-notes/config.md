@@ -102,7 +102,7 @@ quoted in `docs/research/omp-agent-chatroom/findings/F15-plugin-packaging-devtoo
 
 | Feature | What it actually enables (all from `src/index.ts`) |
 |---|---|
-| `room` | `RoomStore`, claim board, and the `room` tool (11 ops) |
+| `room` | `RoomStore`, claim board, and the `room` tool (12 ops) |
 | `wait-tools` | the three blocking tools `wait_for_claim`, `wait_for_agent`, `wait_for_message` |
 | `panel` | the TUI `/room` overlay, its subcommands, and the board view |
 

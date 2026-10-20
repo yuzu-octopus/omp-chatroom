@@ -295,7 +295,7 @@ Two further optmem conclusions an assistant should not contradict:
 | "**Path resolution**: `ctx.localProtocolOptions` when present, else derive from `sessionManager`." | `:126-127` | Superseded by the same change. The room is keyed on `ctx.cwd` and **stored** in the global store; the `local://` root is only the *artifacts* dir. |
 | "**Not yet specified** in the plan: `engines`, `dependencies`, `scripts`, `tsconfig.json` contents, CI." | `:154-155` | Specified: manifest at `PLAN-build.md` §2.2 (`:439-519`), `tsconfig.json` at §2.3 (`:520-547`); `plugin/package.json` and `plugin/tsconfig.json` exist. |
 | Verdict-history row for R3: "10 phases (P0–P8 + P1b)" | `:21-26` | The plan has **11** phases: P-1, P0, P1, P2, P1b, P3, P4, P5, P6, P7, P8 (`PLAN-build.md:2110-2313`). A8 audited exactly this mismatch (`review/A8-consistency.md:145-154`), and `review2/CONSOLIDATED.md:50-52` records a reviewer's false negative on the same point. |
-| "Tool names … separate names, **not one op-dispatched tool**" | `:109-110` | Half-wrong: the three **wait** tools are separate precisely because they are not op-dispatched (`PLAN-build.md:1056-1059`); the **`room`** tool *is* op-dispatched over 11 ops (`PLAN-build.md:1152-1155`). |
+| "Tool names … separate names, **not one op-dispatched tool**" | `:109-110` | Half-wrong: the three **wait** tools are separate precisely because they are not op-dispatched (`PLAN-build.md:1056-1059`); the **`room`** tool *is* op-dispatched over 12 ops (`PLAN-build.md:1152-1155`). |
 
 ### 7.2 What it got right, and what the rewrite carried forward
 

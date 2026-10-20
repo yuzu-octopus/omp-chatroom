@@ -53,7 +53,7 @@ Cross-module identity rules that the code states explicitly:
 export default function roomExtension(pi: ExtensionAPI): void {   // index.ts:18
   warnOnHostDrift(pi);       // version.ts gate — WARNS, never throws (index.ts:40-47)
   registerRoomFlags(pi);        // store/config.ts   — --room-panel-key (the ONLY flag)
-  registerRoomTool(pi);         // tools/room.ts     — the `room` tool, 11 ops
+  registerRoomTool(pi);         // tools/room.ts     — the `room` tool, 12 ops
   registerWaitForClaim(pi);     // tools/wait-for-claim.ts
   registerWaitForAgent(pi);     // tools/wait-for-agent.ts
   registerWaitForMessage(pi);   // tools/wait-for-message.ts
@@ -401,7 +401,7 @@ throw-free — a throw there would surface as an unhandled rejection in the TUI
     **`18.12.3`** (`src/version.ts:3`); `bun test tests/drift.test.ts` is the gate — see
     `docs/research/omp-agent-notes/config.md` §4.
 
-## 8. The `room` tool's 11 ops
+## 8. The `room` tool's 12 ops
 
 `RoomOp` (`tools/room.ts:60-72`), dispatched on `p.op` at `tools/room.ts:657`:
 `join`, `read`, `post`, `claim`, `release`, `board`, `topics`, `mute`, `unmute`, `tree`, `zoom`,
