@@ -60,7 +60,7 @@ advanced on delivery into context, never on send.
 
 ```sh
 cd plugin
-bun test tests/                                 # the whole suite (260 pass, 14 files)
+bun test tests/                                 # the whole suite (274 pass, 15 files)
 bunx --bun tsc --noEmit -p tsconfig.json        # typecheck only; Bun executes the TS
 bunx --bun @biomejs/biome check src tests       # lint + format
 bunx --bun @biomejs/biome check src tests --write   # apply fixes
@@ -74,7 +74,7 @@ uses, auto-discovered) and `omp plugin link .` (packaged, verified with `omp plu
 
 **Runtime is Bun. Never Node, npm, or npx.** There is no root `package.json` and no workspace.
 
-**Invariants that must hold when editing** (I1–I10):
+**Invariants that must hold when editing** (I1–I11):
 
 | # | Rule | Enforced at |
 |---|---|---|
@@ -86,8 +86,9 @@ uses, auto-discovered) and `omp plugin link .` (packaged, verified with `omp plu
 | I6 | every wait promise settles — signal, timeout and promotion all `finish()` | `tools/wait-for-claim.ts:147-190` and both siblings |
 | I7 | the compactor's daily spend cap **and** its write mutex are per room root — never process-global, or a busy room starves the other | `store/compactor.ts:36-52`, `store/compactor.ts:106-122` |
 | I8 | delivery is serialised per room root — two concurrent posts reach a recipient in seq order | `tools/room.ts:357-376` |
-| I9 | a recipient's cursor never advances past a record it has not seen — the owed floor is passed to `deliver()` | `attention/delivery.ts:35-45`, `tools/room.ts:435-441` |
+| I9 | a recipient's cursor never advances past a record it has not seen — the owed floor is applied to **every** cursor bump in `deliver()` (the T0/T1 path included, not only the T2 one) | `attention/delivery.ts:78-83`, `tools/room.ts:450-457` |
 | I10 | the load-time host-drift check **warns**, it never throws — a working room beats a plugin that refuses to load | `index.ts:31-47` |
+| I11 | a delivery never waits for the recipient's whole turn — the host's send resolves at the end of the **target's** turn, so every send is bounded (250 ms); a rejection inside the bound still surfaces as `deliveryError`, and the per-recipient deliveries run concurrently so one slow recipient cannot hold up the others | `attention/delivery.ts:25`, `attention/delivery.ts:38-63`, `attention/delivery.ts:145-153`, `tools/room.ts:333-337` |
 
 **The room lives in the global omp session store, not in the project tree.** The room root is
 `getSessionsDir()/rooms/<16 hex chars of the project path>` — i.e. `~/.omp/agent/sessions/rooms/<hash>`
@@ -100,9 +101,11 @@ Two rules, both deliberate:
 - **A project under the system temp dir stays project-local** (`<cwd>/.omp-room`). A test, a
   scratch task or a throwaway worktree must never write into the user's real room store.
 - **A legacy `<project>/.omp-room` is copied into the global store once**, on the first open of
-  target root (`migrateLegacyRoom`, `store/room-root.ts:69-105`). The legacy `config.json`
-  travels with the log, so the pinned `roomId` survives the move; the old directory is left in
-  place and is inert.
+  target root (`migrateLegacyRoom`, `store/room-root.ts`). The legacy `config.json` travels with
+  the log, and the copied log is named after the id the TARGET resolves, so the pinned `roomId`
+  survives the move; the old directory is left in place and is inert. The copy takes BOTH locks:
+  a legacy room held by a LIVE process belongs to that process and is left alone (no migration),
+  and the target's lock keeps two omp processes from copying into the same room.
 
 The room is still ONE per project, shared by the main session and every subagent it spawns:
 `ctx.cwd` is inherited by subagents and is the one stable per-tree key. `localProtocolOptions` is
@@ -147,7 +150,7 @@ Detailed conventions and the not-covered list: `docs/research/omp-agent-notes/te
 ## Runtime/Tooling Preferences
 
 - **Bun only** — `bun` 1.4.3. Package manager, runner, and runtime. No `node`, `npm`, or `npx`.
-- **Host: omp 18.12.2.** The plugin pins it exactly in both `peerDependencies` and
+- **Host: omp 18.12.3.** The plugin pins it exactly in both `peerDependencies` and
   `devDependencies` — `@oh-my-pi/pi-coding-agent`, `@oh-my-pi/pi-tui`, `@oh-my-pi/pi-ai` and
   `@oh-my-pi/pi-utils` — because the nine deep subpath imports (`DEEP_SPECIFIERS`) are
   wildcard-only, not public API. `@oh-my-pi/pi-utils` was imported by eight source files while
@@ -191,13 +194,20 @@ verified live — see "Live verification" below.)
   rejected change matches Taelin's `push` **worse** (8/400 vs 140/400).
   `docs/research/optmem-2026-10-08/A-merge-age-verification.md`.
 
-## Live Verification (omp 18.12.2)
+## Live Verification (omp 18.12.3)
 
-The plugin was verified **live** against omp **18.12.2** — the exact version the plugin pins
-(`omp --version` → `omp/18.12.2`; `plugin/package.json` peer + dev deps and `plugin/node_modules`
-all 18.12.2). The packaged/linked route works: `omp plugin list` shows
+The plugin was verified **live** against omp **18.12.3** — the exact version the plugin pins
+(`omp --version` → `omp/18.12.3`; `plugin/package.json` peer + dev deps and `plugin/node_modules`
+all 18.12.3). The packaged/linked route works: `omp plugin list` shows
 `omp-agent-chatroom@0.1.0  Available: [room, wait-tools, panel]`, linked at
 `~/.omp/plugins/node_modules/omp-agent-chatroom -> /home/yuzu/projects/omp-chatroom/plugin`.
+
+The full set of checks below was run on **18.12.2**; the host then moved to 18.12.3 mid-round (the
+drift gate caught it, and the pin moved with it), and the essential checks were re-run on
+**18.12.3**: the room tool in a real model turn (`room join → rc1b11bca8146aa11 … cursor 0`,
+`room post → t1 · seq 2`), the legacy migration keeping its room id (`room join →
+rLEGACYFFFFGGGG`), and the `/room` panel opening and rendering (`Room #r9ee775e0aa4fd033 ·
+chat|board · 1 running`, `no claims` in the board pane).
 
 | Check | Live result |
 |---|---|
@@ -208,7 +218,7 @@ all 18.12.2). The packaged/linked route works: `omp plugin list` shows
 | XDG branch of `getSessionsDir()` | with `XDG_DATA_HOME` set **and** `$XDG_DATA_HOME/omp` existing, it resolves to `$XDG_DATA_HOME/omp/sessions`; without that app dir it falls back to `~/.omp/agent/sessions` |
 | Legacy migration | a project-local `.omp-room/room/<id>.jsonl` + `config.json` was copied into the global room with the **same room id**, the legacy record preserved as seq 1, and the legacy directory left in place. A project genuinely under `os.tmpdir()` stays project-local and creates no global room |
 | `/room` panel in a real terminal | **renders** — `tmux` is not installed on this machine, so a raw pty was used (python `pty.fork()` + `TIOCSWINSZ` 120x40, writing `/room` to the master fd). The panel showed the live room: the posted message in the chat pane, the held claim in the board pane, and the room id in the title matched the id in the global store file. The plugin's own panel trace shows `boxRound=object` (the field that used to crash it with `theme.boxRound` undefined) and `RoomPanel ctor: theme=object fg=function`, with no `FAILED` line and no `Room panel unavailable` notification |
-| Noise | the plugin produced **no** errors, warnings or stack traces across all runs (plugin stderr 0 bytes; no matching entries in `~/.omp/logs/`) |
+| Noise | the plugin produced **no** errors, warnings or stack traces across all runs (the plugin's own stderr was empty; the only stderr was host-level noise — slow-startup notices and MCP server timeouts — and no matching entries in `~/.omp/logs/`) |
 
 **The check is not vacuous.** The same harness was run against a deliberately broken extension,
 which produced `Failed to load extension ...: NEGATIVE-CONTROL deliberate extension failure` — so

@@ -11,19 +11,19 @@ global room root, the linked-plugin route and the legacy migration are now verif
 
 | Thing | Value |
 |---|---|
-| Host pin | **18.12.2** — `HOST_VERSION_PIN` (`plugin/src/version.ts`), `plugin/package.json` (peer + dev), `plugin/bun.lock` |
+| Host pin | **18.12.3** — `HOST_VERSION_PIN` (`plugin/src/version.ts`), `plugin/package.json` (peer + dev), `plugin/bun.lock` |
 | Declared host deps | `@oh-my-pi/pi-coding-agent`, `@oh-my-pi/pi-tui`, `@oh-my-pi/pi-ai`, **`@oh-my-pi/pi-utils`** (was imported by eight source files while undeclared) |
 | Room root | `getSessionsDir()/rooms/<16 hex of the project path>` — the global omp session store (`~/.omp/agent/sessions`, or `$XDG_DATA_HOME/omp/sessions`), **not** `<cwd>/.omp-room` |
-| Room-root exceptions | a project under the system temp dir stays project-local; a legacy `<cwd>/.omp-room` is copied into the global store once (its `config.json` travels with it, so the pinned `roomId` survives) |
-| Tests | **260 pass / 0 fail, 3325 assertions, 14 files** (`bun test tests/`) |
-| New test file | `plugin/tests/room-root.test.ts` (8 tests: global vs temp resolution, one-room-per-project, the migration and its no-clobber rule) |
+| Room-root exceptions | a project under the system temp dir stays project-local; a legacy `<cwd>/.omp-room` is copied into the global store once (its `config.json` travels with it, so the pinned `roomId` survives) — but a legacy room held by a LIVE process is left alone, and the copy is taken under both rooms' locks |
+| Tests | **274 pass / 0 fail, 3398 assertions, 15 files** (`bun test tests/`) |
+| New test files | `plugin/tests/room-root.test.ts` (13 tests: global vs temp resolution, one-room-per-project, the migration, its no-clobber rule and its two locks) and `plugin/tests/room-root-e2e.test.ts` (2 tests: the room really lands in the global store, and a legacy room is migrated — both in a child process with a fresh XDG base) |
 
 ### Verified in this round
 
-- The suite is green: 260 pass / 0 fail across 14 files, plus `tsc --noEmit` 0 errors and
+- The suite is green: 274 pass / 0 fail across 15 files, plus `tsc --noEmit` 0 errors and
   `biome check src tests` clean.
 - The re-pin: the installed host, the global host install, `HOST_VERSION_PIN` and `package.json`
-  all name 18.12.2 (`tests/drift.test.ts`, incl. the global-install leg).
+  all name 18.12.3 (`tests/drift.test.ts`, incl. the global-install leg).
 - The room-root resolver and the one-time legacy migration (`tests/room-root.test.ts`).
 - The audit fixes that a test pins: the escaped delivery line (`tests/attention.test.ts`), the
   cursor floor and the per-root delivery serialisation (`tests/attention.test.ts`), the
@@ -40,11 +40,20 @@ global room root, the linked-plugin route and the legacy migration are now verif
 
 ### Live verification (2026-10-20)
 
-Run against the **live host omp 18.12.2** — the exact version the plugin pins. `omp --version`
-prints `omp/18.12.2`; `plugin/package.json` (peer + dev deps) and `plugin/node_modules` are all
-18.12.2. The **packaged/linked route** is live: `omp plugin list` shows
+Run against the **live host omp 18.12.3** — the exact version the plugin pins. `omp --version`
+prints `omp/18.12.3`; `plugin/package.json` (peer + dev deps) and `plugin/node_modules` are all
+18.12.3. The **packaged/linked route** is live: `omp plugin list` shows
 `omp-agent-chatroom@0.1.0  Available: [room, wait-tools, panel]`, linked at
 `~/.omp/plugins/node_modules/omp-agent-chatroom -> /home/yuzu/projects/omp-chatroom/plugin`.
+
+The full set of checks below was run on **18.12.2**. The host then moved to 18.12.3 mid-round — the
+drift gate caught it (`tests/drift.test.ts`, production leg) and the pin moved with it — and the
+essential checks were re-run on **18.12.3**: the `room` tool in a real model turn (`room join →
+rc1b11bca8146aa11 · 0 claim(s) · 1 member(s) · cursor 0`, `room post → t1 · seq 2`), the legacy
+migration keeping its room id (`room join → rLEGACYFFFFGGGG`), and the `/room` panel opening and
+rendering (`Room #r9ee775e0aa4fd033 · chat|board · 1 running`, `no claims` in the board pane).
+The plugin produced no errors, warnings or stack traces in any run; the only stderr was host-level
+noise (slow-startup notices, MCP server timeouts).
 
 The `room` tool was exercised in a **real model turn** (a fresh omp process, `--mode json`,
 `--tools=room`, `--auto-approve`; note `--mode print` does not exist — the modes are
@@ -136,7 +145,7 @@ time the room is opened, so the pinned room id survives.
 | Gate | Result |
 |---|---|
 | `bunx --bun tsc --noEmit -p tsconfig.json` | **0 errors** |
-| `bun test tests/` | **260 pass / 0 fail**, 3325 assertions, 14 files (as of 2026-10-19; the plan-008 skew pin is gone — retention now invalidates the tree) |
+| `bun test tests/` | **274 pass / 0 fail**, 3398 assertions, 15 files (as of 2026-10-20; the plan-008 skew pin is gone — retention now invalidates the tree) |
 | `bunx --bun @biomejs/biome check src tests` | **0 errors, 0 warnings** |
 | Remaining `not implemented` stubs | **0** |
 | Plugin loads in a real session | **0 extension errors**, all 4 tools + `/room` registered |
@@ -145,9 +154,9 @@ time the room is opened, so the pinned room id survives.
 | Mutation testing (store) | 8/12 caught; 5 load-bearing tests non-vacuous |
 | Mutation testing (tree) | **12/12 caught** |
 | Panel keys | **wired via `ctx.ui.onTerminalInput`** — the host never focuses an overlay component |
-| Panel rendering | **verified live** — the `/room` panel renders in a real terminal (raw pty, 120x40) against host 18.12.2, showing the live chat and board panes |
+| Panel rendering | **verified live** — the `/room` panel renders in a real terminal (raw pty, 120x40) against host 18.12.3, showing the live chat and board panes |
 | Room root | **the global omp session store** — `getSessionsDir()/rooms/<16 hex of the project path>`; one room per project, shared by subagents; a temp-dir project stays project-local; a legacy `<cwd>/.omp-room` is migrated in once |
-| Live verification (2026-10-20, host 18.12.2) | **pass** — plugin loads with zero stderr; `room` works in a real model turn; the global room root, the legacy migration, the linked-plugin route and the `/room` panel in a real pty are all confirmed. See "Live verification (2026-10-20)" |
+| Live verification (2026-10-20, host 18.12.3) | **pass** — plugin loads with zero stderr; `room` works in a real model turn; the global room root, the legacy migration, the linked-plugin route and the `/room` panel in a real pty are all confirmed. See "Live verification (2026-10-20)" |
 
 ## What it does
 
@@ -184,9 +193,9 @@ the suite cannot do for itself.
 ## Verification that is not a test
 
 > These checks predate the 2026-10-19 round: they were run against host 18.10.3 and the old
-> `<cwd>/.omp-room` room root. Re-run them against 18.12.2 and the global room root before
+> `<cwd>/.omp-room` room root. Re-run them against 18.12.3 and the global room root before
 > quoting them as current. The 2026-10-20 live verification re-ran the `room` tool itself against
-> 18.12.2 and the global room root (see "Live verification (2026-10-20)"), but not the
+> 18.12.3 and the global room root (see "Live verification (2026-10-20)"), but not the
 > three-session delivery and mute/recall/zoom checks below.
 
 - **Delivery, live**: three sessions in one process, one shared room. A posts a message mentioning B;
@@ -221,4 +230,5 @@ the suite cannot do for itself.
 | `docs/research/omp-agent-chatroom/PROBES.md` | host-surface probes |
 | `plans/018-global-room-root-and-audit-fixes.md` | this round — the re-pin, the global room root, the audit fixes |
 | `plugin/tests/room-root.test.ts` | the room-root resolver and the one-time legacy migration |
-| this file, "Live verification (2026-10-20)" | the live evidence against host 18.12.2 — panel rendering, global room root, legacy migration, linked-plugin route |
+| `plugin/tests/room-root-e2e.test.ts` | the same, end to end: a child process with a fresh XDG base proves the room lands in the global store and the legacy room is migrated |
+| this file, "Live verification (2026-10-20)" | the live evidence against host 18.12.3 — panel rendering, global room root, legacy migration, linked-plugin route |
