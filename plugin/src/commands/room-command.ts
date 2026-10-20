@@ -4,7 +4,7 @@ import { escapeHarnessTags } from "@oh-my-pi/pi-coding-agent/session/harness-tag
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { resourceKey } from "../ids";
 import { openRoomPanel } from "../panel/panel";
-import { contended, grant, reclaimIfStale, release } from "../store/claims";
+import { contended, grant, reclaimIfStale, release, renew } from "../store/claims";
 import {
   configPath,
   DEFAULT_ROOM_CONFIG,
@@ -244,6 +244,27 @@ export function registerRoomCommand(pi: ExtensionAPI): void {
           const before = store.seq;
           const result = grant(store, resource, agentId, ttlMs);
           if (!result.ok) {
+            // The holder's own lease: RENEW it (the same rule as the tool path).
+            if (result.holder === agentId) {
+              const renewed = renew(store, resource, agentId, ttlMs);
+              if (renewed.ok) {
+                store.members.get(agentId)?.heldTopics.add(topic);
+                const failure = await notifyRecipients(
+                  pi,
+                  ctx,
+                  store,
+                  appendedSince(store, before),
+                  agentId,
+                );
+                report(
+                  ctx,
+                  pi,
+                  `room claim ${safe(resource)} → renewed, expires in ${Math.round(ttlMs / 1000)}s`,
+                );
+                if (failure !== undefined) report(ctx, pi, `delivery: ${safe(failure)}`, "warning");
+                return;
+              }
+            }
             report(
               ctx,
               pi,

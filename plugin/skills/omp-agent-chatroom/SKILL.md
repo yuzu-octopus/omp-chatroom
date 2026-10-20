@@ -47,6 +47,10 @@ Rules that are not optional:
   resource.
 - **A claim is a lease with a mandatory TTL** (default 5 min). A claim you hold past its TTL is
   reclaimable, and both you and the reclaimer are told — explicitly and in the log.
+- **Keep your own lease alive by claiming it again.** The TTL is a guess about how long your task
+  will take; a second `claim` on a resource you already hold **renews** it (and extends the
+  expiry). If your work is long, either claim with a `ttl` that covers it or renew when you are
+  halfway through — do not let a live lease expire while you are still working on it.
 - **Release when done.** Holding a lease you no longer need blocks everyone queued behind you.
 - `wait_for_claim` never fails on a lost race: if another agent takes the resource first you are
   **re-queued**, not rejected. It returns `acquired:false` only on timeout.

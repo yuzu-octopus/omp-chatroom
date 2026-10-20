@@ -25,7 +25,7 @@ import {
 import { globalMap } from "../globals";
 import { buildDigest, DIGEST_CLAIMS_CAP, ROSTER_CAP } from "../onboarding/digest";
 import { safeRoomText } from "../onboarding/escape";
-import { contended, grant, reclaimIfStale, release } from "../store/claims";
+import { contended, grant, reclaimIfStale, release, renew } from "../store/claims";
 import { type RoomConfig, resolveRoomConfig } from "../store/config";
 import { bumpCursor, cursorFor, deliveredT0s, initCursor, lagFor } from "../store/cursors";
 import { type MemberState, type RoomStore, roomStoreFor } from "../store/room-store";
@@ -52,8 +52,9 @@ record is wanted.
 
 Ops: join (first call) · read (records since your cursor) · post (send to a topic; mention is T0
 wake+steer, so use it only when you really need to interrupt) · claim/release (exclusive ownership of
-"<topic>/<key>", lease default 5 min) · board (claims + roster + lag) · topics · mute/unmute ·
-tree/zoom (cold summary over older records) · recall (regex over the raw log).`;
+"<topic>/<key>", lease default 5 min; claiming a resource you already hold renews it) · board
+(claims + roster + lag) · topics · mute/unmute · tree/zoom (cold summary over older records) ·
+recall (regex over the raw log).`;
 export const ROOM_LOAD_MODE = "essential"; // RISK R3
 
 // §4.1 — all 12 ops: join/read/post/claim/release/board/topics/mute/unmute/tree/zoom/recall
@@ -802,6 +803,38 @@ export function registerRoomTool(pi: ExtensionAPI): void {
             const before = store.seq;
             const result = grant(store, resource, agentId, ttlMs);
             if (!result.ok) {
+              // The holder's own lease: RENEW it rather than reporting "denied — held by <me>".
+              // A TTL is a guess about how long the work takes; renewing is how a slow-but-alive
+              // agent keeps a live lease.
+              if (result.holder === agentId) {
+                const renewed = renew(store, resource, agentId, ttlMs);
+                if (!renewed.ok) {
+                  return fail(
+                    `claim ${resource} denied — held by ${renewed.holder ?? "?"}`,
+                    renewed.holder,
+                    renewed.expiresAt,
+                  );
+                }
+                viewer.heldTopics.add(topic);
+                const renewalFailure = await notifyRecipients(
+                  pi,
+                  ctx,
+                  store,
+                  appendedSince(store, before),
+                  agentId,
+                );
+                return okWithDelivery(
+                  {
+                    ok: true,
+                    op: "claim",
+                    holder: renewed.claim.holder,
+                    expiresAt: renewed.claim.acquiredAt + renewed.claim.ttlMs,
+                    renewed: true,
+                  },
+                  `room claim ${safe(resource)} → renewed, expires in ${Math.round(ttlMs / 1000)}s`,
+                  renewalFailure,
+                );
+              }
               return fail(
                 `claim ${resource} denied — held by ${result.holder}`,
                 result.holder,

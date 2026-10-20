@@ -15,6 +15,7 @@ import {
   hydrateClaims,
   reclaimIfStale,
   release,
+  renew,
   requeueWaiter,
   resolveWaiters,
 } from "../src/store/claims";
@@ -74,8 +75,40 @@ test("first-writer-wins: A claims, B's claim returns {ok:false, holder:'A'} and 
   expect(s.seq).toBe(seqAfterA);
 });
 
-// --- test 2 — release promotes the oldest waiter --------------------------------
+test("renew: the holder extends its own lease instead of being denied", () => {
+  const s = newStore();
+  const first = grant(s, "build/step", "A", 60_000);
+  expect(first.ok).toBe(true);
+  const expiryBefore = first.ok ? first.claim.acquiredAt + first.claim.ttlMs : 0;
 
+  const renewed = renew(s, "build/step", "A", 120_000);
+  expect(renewed.ok).toBe(true);
+  if (renewed.ok) {
+    expect(renewed.claim.holder).toBe("A");
+    expect(renewed.claim.ttlMs).toBe(120_000);
+    // the lease's start moves to now, so the expiry is strictly later
+    expect(renewed.claim.acquiredAt + renewed.claim.ttlMs).toBeGreaterThan(expiryBefore);
+  }
+  // the lease the board sees is the renewed one
+  expect(s.claims.get("build/step")?.ttlMs).toBe(120_000);
+  // and it is in the log, so a replay reproduces it
+  const last = s.records.at(-1);
+  expect(last?.kind).toBe("claim");
+});
+
+test("renew: a non-holder cannot renew somebody else's lease", () => {
+  const s = newStore();
+  expect(grant(s, "build/step", "A", 60_000).ok).toBe(true);
+  const seqBefore = s.seq;
+
+  const denied = renew(s, "build/step", "B", 60_000);
+  expect(denied.ok).toBe(false);
+  if (!denied.ok) expect(denied.holder).toBe("A");
+  // a denied renewal is not state
+  expect(s.seq).toBe(seqBefore);
+});
+
+// --- test 2 — release promotes the oldest waiter --------------------------------
 test("release promotes the oldest waiter AND grants it the lease", () => {
   const s = newStore();
   expect(grant(s, "build/step", "A", 45_000).ok).toBe(true);
@@ -505,6 +538,21 @@ function newTestStore(): { store: RoomStore; ctx: ExtensionContext } {
 }
 
 // --- topics ---
+test("claim: claiming a resource you already hold renews it, it does not deny you", async () => {
+  const { ctx } = newTestStore();
+
+  const first = await invokeRoom(ctx, { op: "claim", topic: "build", key: "step", ttl: 60_000 });
+  expect(first.details).toMatchObject({ ok: true, op: "claim", holder: "AgentA" });
+  expect(first.details?.renewed).toBeUndefined();
+  const expiryBefore = first.details?.expiresAt as number;
+
+  const second = await invokeRoom(ctx, { op: "claim", topic: "build", key: "step", ttl: 120_000 });
+  expect(second.details).toMatchObject({ ok: true, op: "claim", holder: "AgentA", renewed: true });
+  expect(second.details?.expiresAt as number).toBeGreaterThan(expiryBefore);
+  // the model-facing line says what happened
+  const text = JSON.stringify(second.content);
+  expect(text).toContain("renewed");
+});
 
 test("topics: returns topic list with unread counts and lastSeq", async () => {
   const { store, ctx } = newTestStore();
