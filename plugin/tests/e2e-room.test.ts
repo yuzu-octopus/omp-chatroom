@@ -7,7 +7,8 @@ import { resolveLocalRoot } from "@oh-my-pi/pi-coding-agent/internal-urls/local-
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { logPathFor, roomIdFor } from "../src/ids";
 import roomExtension, { __roomTest } from "../src/index";
-import { resolveRoomId } from "../src/store/config";
+import { DEFAULT_ROOM_CONFIG, resolveRoomId, saveRoomConfig } from "../src/store/config";
+import { __compactTest } from "../src/store/compactor";
 
 type Session = Awaited<ReturnType<typeof createAgentSession>>["session"];
 
@@ -28,7 +29,30 @@ interface ToolCall {
 const ROOM_ROOT = (root: string): string => `${root}/.omp-room`;
 const ROOM_ID = (root: string): string => roomIdFor(ROOM_ROOT(root));
 const logPath = (root: string): string => logPathFor(ROOM_ROOT(root), ROOM_ID(root));
-async function newSession(bus: EventBus, registry: AgentRegistry, root: string, id: string) {
+/**
+ * A SUBAGENT session by default, and a MAIN one only where the test needs it.
+ *
+ * Two reasons, both about what a MAIN session drags in: the room's background jobs (the claim
+ * sweep, the pruner) and the compactor start only for a main session - and the compactor makes
+ * REAL model calls at the configured provider, which made this file depend on the network and
+ * burn the user's quota. A main session also costs a provider round-trip per session.
+ *
+ * The sweep test asks for `main: true`, because that job is what it is testing.
+ */
+async function newSession(
+  bus: EventBus,
+  registry: AgentRegistry,
+  root: string,
+  id: string,
+  main = false,
+) {
+  // The compactor only starts for a MAIN session, and this file's sessions are main (the
+  // claim-sweep job only runs there). Without this the compactor would fire REAL model calls at
+  // the configured provider - dozens per run, on the user's quota, and the suite's duration
+  // would depend on the network. The compactor has its own tests (tree.test.ts) with the fake
+  // LLM seam; here it is capped at zero.
+  saveRoomConfig(ROOM_ROOT(root), { ...DEFAULT_ROOM_CONFIG, compactionCallsPerDay: 1 });
+  __compactTest.setSpendToday(ROOM_ROOT(root), 1);
   const { session } = await createAgentSession({
     eventBus: bus,
     // `ctx.cwd` — the room root — comes from the SessionManager, not the `cwd` option (verified:
@@ -38,6 +62,8 @@ async function newSession(bus: EventBus, registry: AgentRegistry, root: string, 
     extensions: [roomExtension],
     agentRegistry: registry,
     agentId: id,
+    // A main session only where the test needs the room's background jobs; see the helper's note.
+    taskDepth: main ? 0 : 1,
     disableExtensionDiscovery: true,
     enableMCP: false,
     enableLsp: false,
@@ -418,7 +444,8 @@ test("the real 5 s sweep job expires a stale claim (K3 integration)", async () =
   const root = freshRoot();
   const bus = new EventBus();
   const registry = new AgentRegistry();
-  const a = await newSession(bus, registry, root, "AgentA");
+  // The one test that needs a MAIN session: the sweep job it exercises only runs there.
+  const a = await newSession(bus, registry, root, "AgentA", true);
   try {
     await toolOf(a, "room").execute("c-claim", { op: "claim", topic: "ttl", key: "x", ttl: 1_000 });
     // claimSweepMs is 5000 (config default); the claim's 1 s TTL is long past.

@@ -52,6 +52,11 @@ async function newSession(
     // here would leave the global empty, so the tool could only ever hit its timeout branch.
     ...(registry === undefined ? {} : { agentRegistry: registry }),
     agentId: id,
+    // A SUBAGENT session, like every other agent in a swarm. It matters here: the compactor only
+    // starts for a main session (compactor.ts:318), and a main session's compactor fires REAL
+    // model calls at the configured provider - which made this file take minutes and depend on
+    // the network. The compactor has its own tests (tree.test.ts) with the fake LLM seam.
+    taskDepth: 1,
     disableExtensionDiscovery: true,
     enableMCP: false,
     enableLsp: false,
