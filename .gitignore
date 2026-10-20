@@ -14,7 +14,6 @@ coverage/
 .idea/
 .vscode/
 
-# Room runtime state — the room now lives in the global omp session store
-# (~/.omp/agent/sessions/rooms/<hash>). A legacy project-local .omp-room/ can still exist:
-# it is copied into the global store once and then left inert.
-.omp-room/
+# Room runtime state needs no entry: the room lives in the global omp session store
+# (~/.omp/agent/sessions/rooms/<hash>), and a legacy project-local .omp-room/ is MOVED
+# into it on the first open — so nothing is left in the working tree.

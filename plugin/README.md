@@ -193,8 +193,13 @@ The room **lives in the global omp session store**, not in the project tree:
 `getSessionsDir()` — `~/.omp/agent/sessions`, or `$XDG_DATA_HOME/omp/sessions` under XDG. The room
 data is working data, so it does not belong in a checkout; the project directory stays clean. Two
 exceptions: a project under the system temp dir stays project-local (a test or a throwaway worktree
-must never write into the user's real room store), and a legacy project-local `.omp-room/` is copied
-into the global store once, on first open, keeping its room id.
+must never write into the user's real room store — a temp-dir project that is itself a git checkout
+may want its own `.omp-room/` ignore entry), and a legacy project-local `.omp-room/` is MOVED into
+the global store once, on first open: it is copied there, keeping its room id, and then removed, so
+the project tree ends up with no `.omp-room` at all and a checkout needs no `.omp-room/` ignore
+entry. A migration that is skipped — the legacy room is held by a live omp process, the pinned room
+id matches no log, or the target already has a room — removes nothing and leaves the legacy room
+byte-for-byte intact.
 
 Only one omp process per project may write it, and that is now enforced rather than assumed: the
 room takes a lockfile (`<root>/room/.lock`, the owner's pid, stale pids reaped) and a second omp

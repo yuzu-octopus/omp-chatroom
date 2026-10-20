@@ -95,19 +95,24 @@ uses, auto-discovered) and `omp plugin link .` (packaged, verified with `omp plu
 **The room lives in the global omp session store, not in the project tree.** The room root is
 `getSessionsDir()/rooms/<16 hex chars of the project path>` — i.e. `~/.omp/agent/sessions/rooms/<hash>`
 `($XDG_DATA_HOME/omp/sessions` under XDG) — so a room no longer lands in the user's working tree
-(the `.omp-room/` gitignore entry stays only for a legacy or temp-dir room).
+(nothing is left in the working tree, so a checkout needs no `.omp-room/` ignore entry).
 `roomRootFor()` is `store/room-root.ts:52-56`; `rootOf()` is `store/room-store.ts:229-235`.
 
 Two rules, both deliberate:
 
 - **A project under the system temp dir stays project-local** (`<cwd>/.omp-room`). A test, a
-  scratch task or a throwaway worktree must never write into the user's real room store.
-- **A legacy `<project>/.omp-room` is copied into the global store once**, on the first open of
+  scratch task or a throwaway worktree must never write into the user's real room store. A
+  temp-dir project that is itself a git checkout may want its own `.omp-room/` ignore entry.
+- **A legacy `<project>/.omp-room` is MOVED into the global store once**, on the first open of
   target root (`migrateLegacyRoom`, `store/room-root.ts`). The legacy `config.json` travels with
   the log, and the copied log is named after the id the TARGET resolves, so the pinned `roomId`
-  survives the move; the old directory is left in place and is inert. The copy takes BOTH locks:
-  a legacy room held by a LIVE process belongs to that process and is left alone (no migration),
-  and the target's lock keeps two omp processes from copying into the same room.
+  survives the move; once the copy is verified, the legacy room is REMOVED — the copied files, the
+  legacy `room/` directory and the empty legacy root — so the project tree ends up with no
+  `.omp-room` at all. The copy takes BOTH locks: a legacy room held by a LIVE process belongs to
+  that process and is left alone (no migration), and the target's lock keeps two omp processes from
+  copying into the same room. A migration that is SKIPPED — the legacy room is held by a live omp
+  process, the pinned room id matches no log, or the target already has a room — removes NOTHING and
+  leaves the legacy room byte-for-byte intact.
 
 The room is still ONE per project, shared by the main session and every subagent it spawns:
 `ctx.cwd` is inherited by subagents and is the one stable per-tree key. `localProtocolOptions` is
@@ -230,7 +235,7 @@ chat|board · 1 running`, `no claims` in the board pane).
 | Digest reaches the model | as a real custom message with `customType` `room:digest` |
 | Global room root | room data lands in the **global** store at `<sessions>/rooms/<16 hex of the project path>/room/{config.json,<roomId>.jsonl}` (the leaf equals `sha256(projectPath).slice(0,16)`) and **never** in the project directory — the project tree stayed empty (no `.omp-room`) |
 | XDG branch of `getSessionsDir()` | with `XDG_DATA_HOME` set **and** `$XDG_DATA_HOME/omp` existing, it resolves to `$XDG_DATA_HOME/omp/sessions`; without that app dir it falls back to `~/.omp/agent/sessions` |
-| Legacy migration | a project-local `.omp-room/room/<id>.jsonl` + `config.json` was copied into the global room with the **same room id**, the legacy record preserved as seq 1, and the legacy directory left in place. A project genuinely under `os.tmpdir()` stays project-local and creates no global room |
+| Legacy migration | a project-local `.omp-room/room/<id>.jsonl` + `config.json` was copied into the global room with the **same room id**, the legacy record preserved as seq 1, and the legacy room was then removed — the project tree kept no `.omp-room` (a SKIPPED migration removes nothing and leaves the legacy room byte-for-byte intact). A project genuinely under `os.tmpdir()` stays project-local and creates no global room |
 | `/room` panel in a real terminal | **renders** — `tmux` is not installed on this machine, so a raw pty was used (python `pty.fork()` + `TIOCSWINSZ` 120x40, writing `/room` to the master fd). The panel showed the live room: the posted message in the chat pane, the held claim in the board pane, and the room id in the title matched the id in the global store file. The plugin's own panel trace shows `boxRound=object` (the field that used to crash it with `theme.boxRound` undefined) and `RoomPanel ctor: theme=object fg=function`, with no `FAILED` line and no `Room panel unavailable` notification |
 | Noise | the plugin produced **no** errors, warnings or stack traces across all runs (the plugin's own stderr was empty; the only stderr was host-level noise — slow-startup notices and MCP server timeouts — and no matching entries in `~/.omp/logs/`) |
 | Unprompted discovery | **measured over 16 trials**: the model claimed before mutating in 12 (85.7 % of scored trials, 75.0 % counting the two harness-error trials as misses). All three probe inputs (digest, routing rule, tool description) reached the model in 16/16; the control with the room plugin not loaded produced zero room calls. Every miss had the same shape: the model inspected the file and never consulted the room — and in a solo room the digest reads `1 live · 0 record(s)`, so the model correctly concluded there was nobody to coordinate with |

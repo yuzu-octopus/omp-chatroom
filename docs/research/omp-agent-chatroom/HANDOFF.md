@@ -14,7 +14,7 @@ global room root, the linked-plugin route and the legacy migration are now verif
 | Host pin | **18.12.3** — `HOST_VERSION_PIN` (`plugin/src/version.ts`), `plugin/package.json` (peer + dev), `plugin/bun.lock` |
 | Declared host deps | `@oh-my-pi/pi-coding-agent`, `@oh-my-pi/pi-tui`, `@oh-my-pi/pi-ai`, **`@oh-my-pi/pi-utils`** (was imported by eight source files while undeclared) |
 | Room root | `getSessionsDir()/rooms/<16 hex of the project path>` — the global omp session store (`~/.omp/agent/sessions`, or `$XDG_DATA_HOME/omp/sessions`), **not** `<cwd>/.omp-room` |
-| Room-root exceptions | a project under the system temp dir stays project-local; a legacy `<cwd>/.omp-room` is copied into the global store once (its `config.json` travels with it, so the pinned `roomId` survives) — but a legacy room held by a LIVE process is left alone, and the copy is taken under both rooms' locks |
+| Room-root exceptions | a project under the system temp dir stays project-local (a temp-dir project that is itself a git checkout may want its own `.omp-room/` ignore entry); a legacy `<cwd>/.omp-room` is MOVED into the global store once — copied there (its `config.json` travels with it, so the pinned `roomId` survives), verified, and then removed from the project tree, which keeps no `.omp-room` at all. A SKIPPED migration (the legacy room is held by a LIVE process, the pinned room id matches no log, or the target already has a room) removes nothing and leaves the legacy room byte-for-byte intact; the copy is taken under both rooms' locks |
 | Tests | **294 pass / 0 fail, 15 files** (`bun test tests/`) |
 | New test files | `plugin/tests/room-root.test.ts` (13 tests: global vs temp resolution, one-room-per-project, the migration, its no-clobber rule and its two locks) and `plugin/tests/room-root-e2e.test.ts` (2 tests: the room really lands in the global store, and a legacy room is migrated — both in a child process with a fresh XDG base) |
 
@@ -72,9 +72,14 @@ The 16-hex leaf equals `sha256(projectPath).slice(0,16)`, and the project direct
 `$XDG_DATA_HOME/omp/sessions`; without that app dir it falls back to `~/.omp/agent/sessions`.
 
 **Legacy migration — live-verified.** A project-local `.omp-room/room/<id>.jsonl` + `config.json`
-was copied into the global room with the **same room id**, the legacy record preserved as seq 1, and
-the legacy directory left in place. The project-local branch was confirmed as well: a project
-genuinely under `os.tmpdir()` stays project-local and creates no global room.
+was copied into the global room with the **same room id**, the legacy record preserved as seq 1. The
+migration then **removes** the legacy room — the copied files, the legacy `room/` directory and the
+empty legacy root — so the project tree keeps no `.omp-room` at all (the removal is the newer half of
+the migration; the live run above observed the copy itself). A migration that is **skipped** — the
+legacy room is held by a live omp process, the pinned room id matches no log, or the target already
+has a room — removes nothing and leaves the legacy room byte-for-byte intact. The project-local
+branch was confirmed as well: a project genuinely under `os.tmpdir()` stays project-local and
+creates no global room.
 
 **`/room` panel — live-verified in a real terminal.** `tmux` is **not** installed on this machine,
 so a raw pty was used: a python `pty.fork()` driver with `TIOCSWINSZ` (120x40) writing `/room` to
@@ -286,8 +291,12 @@ picked up on the next session (no hot reload — restart omp).
 The room itself now lives **outside the project tree**, in the global omp session store:
 `getSessionsDir()/rooms/<16 hex of the project path>` (`~/.omp/agent/sessions/rooms/<hash>`, or
 `$XDG_DATA_HOME/omp/sessions/rooms/<hash>`). A project under the system temp dir keeps
-`<cwd>/.omp-room` instead. An existing `<cwd>/.omp-room` is copied into the global store the first
-time the room is opened, so the pinned room id survives.
+`<cwd>/.omp-room` instead — a temp-dir project that is itself a git checkout may want its own
+`.omp-room/` ignore entry. An existing `<cwd>/.omp-room` is MOVED into the global store the first
+time the room is opened: it is copied there, so the pinned room id survives, and then removed from
+the project tree, which keeps no `.omp-room` at all. A skipped migration (the legacy room is held by
+a live omp process, the pinned room id matches no log, or the target already has a room) removes
+nothing and leaves the legacy room byte-for-byte intact.
 
 ## Gates (all green)
 
@@ -304,7 +313,7 @@ time the room is opened, so the pinned room id survives.
 | Mutation testing (tree) | **12/12 caught** |
 | Panel keys | **wired via `ctx.ui.onTerminalInput`** — the host never focuses an overlay component |
 | Panel rendering | **verified live** — the `/room` panel renders in a real terminal (raw pty, 120x40) against host 18.12.3, showing the live chat and board panes |
-| Room root | **the global omp session store** — `getSessionsDir()/rooms/<16 hex of the project path>`; one room per project, shared by subagents; a temp-dir project stays project-local; a legacy `<cwd>/.omp-room` is migrated in once |
+| Room root | **the global omp session store** — `getSessionsDir()/rooms/<16 hex of the project path>`; one room per project, shared by subagents; a temp-dir project stays project-local; a legacy `<cwd>/.omp-room` is moved in once (copied, verified, then removed from the project tree) |
 | Live verification (2026-10-20, host 18.12.3) | **pass** — plugin loads with zero stderr; `room` works in a real model turn; the global room root, the legacy migration, the linked-plugin route and the `/room` panel in a real pty are all confirmed. See "Live verification (2026-10-20)" |
 
 ## What it does

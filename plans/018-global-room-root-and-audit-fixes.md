@@ -145,7 +145,7 @@ asserted against the same constant, so the second bump is covered by the same te
 
 | File | Change |
 |---|---|
-| `plugin/src/store/room-root.ts` (new) | `legacyRoomRoot(cwd)` = `<cwd>/.omp-room`; `globalRoomRoot(cwd)` = `getSessionsDir()/rooms/<16 hex of the project path>`; `roomRootFor(ctx)` picks between them; `migrateLegacyRoom(legacyRoot, targetRoot)` copies a legacy room in once |
+| `plugin/src/store/room-root.ts` (new) | `legacyRoomRoot(cwd)` = `<cwd>/.omp-room`; `globalRoomRoot(cwd)` = `getSessionsDir()/rooms/<16 hex of the project path>`; `roomRootFor(ctx)` picks between them; `migrateLegacyRoom(legacyRoot, targetRoot)` moves a legacy room in once — copies it into the global store, verifies the copy, then removes the legacy room |
 | `plugin/src/ids.ts` | new `roomDirNameFor(cwd)` — the 16-hex directory leaf, derived from the **project path** |
 | `plugin/src/store/room-store.ts` | `rootOf()` now returns `roomRootFor(ctx)`; `roomStoreFor()` runs `migrateLegacyRoom()` on the first open of a root |
 
@@ -154,13 +154,17 @@ asserted against the same constant, so the second bump is covered by the same te
 - The room lives at `getSessionsDir()/rooms/<16 hex of the project path>` — `~/.omp/agent/sessions`
   (or `$XDG_DATA_HOME/omp/sessions`) — so it never lands in the user's working tree.
 - **A project under the system temp dir stays project-local** (`<cwd>/.omp-room`): a test, a
-  scratch task or a throwaway worktree must never write into the user's real room store.
-- **A legacy `<cwd>/.omp-room` is copied into the global store once**, on the first open of the
+  scratch task or a throwaway worktree must never write into the user's real room store. A
+  temp-dir project that is itself a git checkout may want its own `.omp-room/` ignore entry.
+- **A legacy `<cwd>/.omp-room` is MOVED into the global store once**, on the first open of the
   target root. The legacy `config.json` travels with the log, so the pinned `roomId` survives the
   move; a legacy room with no config has its log renamed to the id the target would mint. The
-  migration never clobbers a target that already holds a log, and the old directory is left in
-  place (inert). The copy takes **both** rooms' locks and names the copied log after the id the
-  **target** resolves — both hardened in item 5.
+  migration never clobbers a target that already holds a log; once the copy is verified it REMOVES
+  the legacy room — the copied files, the legacy `room/` directory and the empty legacy root — so
+  the project tree ends up with no `.omp-room` at all. A SKIPPED migration (the legacy room is held
+  by a live omp process, the pinned room id matches no log, or the target already has a room)
+  removes NOTHING and leaves the legacy room byte-for-byte intact. The copy takes **both** rooms'
+  locks and names the copied log after the id the **target** resolves — both hardened in item 5.
 - The **directory leaf is a hash of the project path**, while the **room id is minted from the
   room root** (`ids.ts` `roomIdFor`). They differ by design and never have to agree.
 

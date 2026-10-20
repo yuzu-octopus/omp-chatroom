@@ -10,12 +10,17 @@
 # Costs one live model turn per run. Requires a keyed model (`omp --mode text`
 # must work); without one the probe reports HARNESS-ERROR, not failure.
 set -u
-cd "$(dirname "$0")"
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 
 TRIAL_DIR=$(mktemp -d /tmp/discovery-XXXX)
 trap 'rm -rf "$TRIAL_DIR"' EXIT
 echo "shared content" > "$TRIAL_DIR/shared.txt"
-PROMPT=$(sed "s|APPDIR|$TRIAL_DIR|g" discovery-prompt.txt)
+PROMPT=$(sed "s|APPDIR|$TRIAL_DIR|g" "$SCRIPT_DIR/discovery-prompt.txt")
+
+# The session runs IN the trial dir: that is where shared.txt is, and it is what keys the room
+# (one room per project directory). Running it from the script's directory instead made every
+# trial share ONE room and left a stray .omp-room in the repository.
+cd "$TRIAL_DIR"
 
 OUT="$TRIAL_DIR/events.jsonl"
 if ! timeout 500 omp --mode json "$PROMPT" > "$OUT" 2>"$TRIAL_DIR/stderr.txt"; then

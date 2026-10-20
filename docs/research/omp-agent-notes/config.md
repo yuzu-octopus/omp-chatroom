@@ -26,8 +26,9 @@ Slice: `plugin/package.json`, `plugin/tsconfig.json`, `plugin/biome.json`, `plug
    `AGENTS.md`, `docs/`, `plans/`, `plugin/`, `probes/`.
 2. **The root `.omp-room/` is now LEGACY, not the live room.** The room's working data lives in
    the global omp session store (§7); a `.omp-room/` left in a project tree is either a
-   temp-dir project (which *is* project-local by rule) or an inert legacy directory that was
-   already copied into the global store.
+   temp-dir project (which *is* project-local by rule) or a legacy directory the migration has
+   not removed yet — the migration removes it once it has copied it into the global store, and a
+   skipped migration leaves it byte-for-byte intact.
 3. **Therefore every command must be run from `plugin/`.** Running `bun test` at the repo root
    fails — there is no manifest there to define the script or resolve the workspace.
 4. The single lockfile is `plugin/bun.lock` (`plugin/bun.lock:1-8`): `lockfileVersion: 2`,
@@ -243,8 +244,7 @@ quoted in `docs/research/omp-agent-chatroom/findings/F15-plugin-packaging-devtoo
 | 10-11 | `.DS_Store`, `Thumbs.db` | OS noise |
 | 12 | `*.log` | logs |
 | 13-15 | `coverage/`, `.idea/`, `.vscode/` | coverage + IDE |
-| 17-19 | `# Room runtime state — the room now lives in the global omp session store …` | explains where the room actually is |
-| 20 | `.omp-room/` | **legacy / temp-dir rooms only** — not the live room location |
+| 17-19 | `# Room runtime state needs no entry: the room lives in the global omp session store …` | explains why there is no `.omp-room/` entry any more |
 
 31. **The live room is NOT in the project tree any more.** The room's working data (the JSONL log,
     the cold tree, `config.json`, the lockfile) lives in the **global omp session store**:
@@ -252,12 +252,15 @@ quoted in `docs/research/omp-agent-chatroom/findings/F15-plugin-packaging-devtoo
     `getSessionsDir()` from `@oh-my-pi/pi-utils` — `~/.omp/agent/sessions`, or
     `$XDG_DATA_HOME/omp/sessions` when `XDG_DATA_HOME` is set **and** `$XDG_DATA_HOME/omp`
     exists (`plugin/src/store/room-root.ts:30-32`; the XDG rule is the host's
-    `node_modules/@oh-my-pi/pi-utils/src/dirs.ts:389-403, 429-434`). `.gitignore:20` still lists
-    `.omp-room/` because a **legacy or temp-dir** room can still be project-local (§7, item 35).
-32. `.gitignore` is a **pattern**, not a directory list — it matches at any depth, so a
-    `.omp-room/` anywhere in the tree is excluded by the single rule. The root `.omp-room/`
-    observed on disk is a **legacy** room (inert after migration) — the current room for this
-    project is under the global store.
+    `node_modules/@oh-my-pi/pi-utils/src/dirs.ts:389-403, 429-434`). The root `.gitignore` has
+    **no `.omp-room/` entry** any more: the room is not in the project tree, and a legacy
+    project-local room is MOVED into the global store, so nothing is left to ignore (§7, item 35).
+32. `.gitignore` is a **pattern**, not a directory list — it matches at any depth. The only case
+    where a `.omp-room/` still belongs in a project tree is a **temp-dir** project, which stays
+    project-local by rule (§7, item 35); such a project, if it is itself a git checkout, may want
+    its own `.omp-room/` ignore entry. The root `.omp-room/` observed on disk is a **legacy** room:
+    the migration copies it into the global store and then REMOVES it, and a skipped migration
+    leaves it byte-for-byte intact — the current room for this project is under the global store.
 33. `plugin/.gitignore` holds only `node_modules/` (`plugin/.gitignore:1`) — everything else comes
     from the root file.
 34. Room id/root derivation is `r` + first 16 hex of sha256(root)
@@ -269,15 +272,20 @@ quoted in `docs/research/omp-agent-chatroom/findings/F15-plugin-packaging-devtoo
     `ctx.cwd + "/.omp-room"`.** Two locations, by rule:
     - a project under the system temp dir stays **project-local** (`<cwd>/.omp-room`) — "a test, a
       scratch task or a throwaway worktree must never write into the user's real room store"
-      (`plugin/src/store/room-root.ts:50-53`); every other project uses the **global store**
+      (`plugin/src/store/room-root.ts:50-53`); a temp-dir project that is itself a git checkout may
+      want its own `.omp-room/` ignore entry; every other project uses the **global store**
       (`plugin/src/store/room-root.ts:30-32`);
-    - a **legacy** project-local room is copied into the global store **once**, on first open
+    - a **legacy** project-local room is MOVED into the global store **once**, on first open
       (`migrateLegacyRoom`, `plugin/src/store/room-root.ts:77-146`; called from
       `plugin/src/store/room-store.ts:243`). The copy takes **BOTH** locks: a legacy room held by a
       **LIVE** process is left alone (that room belongs to that process), and the target's lock
       keeps two omp processes from copying into the same room. The copied log is named after the
-      id the **TARGET** resolves, so the pinned `roomId` survives the move; the old directory is
-      left in place and is **inert**.
+      id the **TARGET** resolves, so the pinned `roomId` survives the move; once the copy is
+      verified, the legacy room is **REMOVED** — the copied files, the legacy `room/` directory and
+      the empty legacy root — so the project tree keeps no `.omp-room` at all. A **skipped**
+      migration (the legacy room is held by a live omp process, the pinned room id matches no log,
+      or the target already has a room) removes NOTHING and leaves the legacy room byte-for-byte
+      intact.
     The `ctx.cwd` key itself has NOT changed: `ctx.localProtocolOptions` is per-*session*, so
     keying there gave every agent a private room (`plugin/src/store/room-root.ts:41-49`).
 36. **A single-writer lockfile now exists** — `<room root>/room/.lock`
@@ -361,9 +369,11 @@ quoted in `docs/research/omp-agent-chatroom/findings/F15-plugin-packaging-devtoo
     code. The **plan** (`PLAN-build.md`) is the thing that is still version-stale — see
     `docs.md` §5.
 49. **Untracked directories on disk that you must not commit**: the root `.omp-room/` (a **legacy**
-    room — inert after migration, but still untracked), `.tmp-swarm/`, `probes/` (untracked,
-    unclassified), `plans/`. `.tmp-swarm/` is not in `.gitignore` — check `git status` before
-    staging anything. `plugin/.omp-room/` and `plugin/undefined/` no longer exist.
+    room — the migration copies it into the global store and then removes it; until it has run, or
+    if it is skipped, the directory stays untracked and there is no `.omp-room/` ignore entry any
+    more), `.tmp-swarm/`, `probes/` (untracked, unclassified), `plans/`. `.tmp-swarm/` is not in
+    `.gitignore` — check `git status` before staging anything. `plugin/.omp-room/` and
+    `plugin/undefined/` no longer exist.
 
 ## 10. Cheat sheet
 
@@ -387,5 +397,5 @@ omp plugin doctor
 #   <sessions>/rooms/<16 hex of the project path>/room/{config.json,<roomId>.jsonl,.lock}
 #   <sessions> = getSessionsDir() = ~/.omp/agent/sessions  (or $XDG_DATA_HOME/omp/sessions)
 # a project under os.tmpdir() stays project-local: <cwd>/.omp-room/room/…
-# a legacy project-local room is copied into the global store once, then left inert
+# a legacy project-local room is copied into the global store once, then removed from the project
 ```
