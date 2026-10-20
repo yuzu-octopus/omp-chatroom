@@ -101,11 +101,30 @@ export function truncateBytes(text: string, maxBytes: number): string {
   return out;
 }
 
+/**
+ * Cut a summary at a WORD boundary, so the stored node never ends mid-word.
+ *
+ * A node's text is the INPUT of the next merge: the level-2 node above it is summarised again
+ * into a level-4 node. A byte-exact cut leaves a half-word ("… - SQLite will"), and a model
+ * summarising two such halves produced "- Weekday" — nine bytes that carried nothing. Cutting at
+ * the last space keeps the merge input coherent.
+ *
+ * A text with no space in the cut region is cut at the byte limit as before (a single long word
+ * has no boundary to cut at).
+ */
+export function trimToWordBoundary(text: string, maxBytes: number): string {
+  if (Buffer.byteLength(text, "utf-8") <= maxBytes) return text;
+  const cut = truncateBytes(text, maxBytes);
+  const lastSpace = cut.lastIndexOf(" ");
+  if (lastSpace <= 0) return cut; // no word boundary to cut at
+  return cut.slice(0, lastSpace).trimEnd();
+}
+
 /** One fixed-width record: text, space padding, then the newline in the last byte. */
 function encodeRecord(summary: string): Buffer {
   // A record is one line: an embedded newline would shift every later record's offset.
   const flat = summary.replace(/[\r\n]+/g, " ");
-  const text = Buffer.from(truncateBytes(flat, SUMMARY_BYTES), "utf-8");
+  const text = Buffer.from(trimToWordBoundary(flat, SUMMARY_BYTES), "utf-8");
   const rec = Buffer.alloc(TREE_REC, 0x20);
   text.copy(rec, 0);
   rec[TREE_REC - 1] = 0x0a;

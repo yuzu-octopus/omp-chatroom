@@ -831,3 +831,68 @@ test("retention prunes the head AND invalidates the tree built over it", () => {
     resetRoomStores();
   }
 });
+
+// --- the live summarisation findings ---------------------------------------
+
+test("a stored summary is cut at a word boundary, never mid-word", () => {
+  // A node's text is the INPUT of the next merge. A byte-exact cut leaves a half-word, and a
+  // model summarising two such halves produced "- Weekday" — nine bytes that carried nothing.
+  const treePath = tmpTreePath();
+  const tree = openTreeStore(treePath);
+  const long = "alpha beta gamma delta " + "x".repeat(600);
+  expect(tree.putNode(0, 2, long)).toBe(true);
+  const stored = tree.getNode(0, 2)!;
+  expect(stored).toBe("alpha beta gamma delta");
+  expect(stored).not.toContain("x");
+});
+
+test("a degenerate MERGE summary is rejected and the summariser is asked again", async () => {
+  // The live defect: the merge of two TRUNCATED child summaries produced "- Weekday" (nine
+  // bytes) for a 400-byte input, and that garbage became the input of the next merge. A merge
+  // whose reply carries almost nothing is rejected and the summariser is asked again.
+  // A block of 32 records is a MERGE (the leaf path covers blocks of 16 or fewer): its input is
+  // two already-summarised halves, which is where a degenerate summary comes from.
+  const { treePath } = tmpRootTree();
+  const N = 32;
+  const store = fakeStore(
+    treePath,
+    Array.from({ length: N }, (_, i) => msg(i)),
+  );
+  const { ctx } = fakeCtx("main");
+
+  // The children are summarised properly; every merge attempt is degenerate.
+  let phase: "children" | "merge" = "children";
+  replyFor = () => (phase === "children" ? filler(200) : "- x");
+  expect(await compactOnce(store, ctx, [0, 16])).toBe(true);
+  expect(await compactOnce(store, ctx, [16, 32])).toBe(true);
+  phase = "merge";
+  const before = llmCalls;
+  expect(await summarizeBlock(ctx, store, 0, N)).toBe("");
+  expect(llmCalls - before).toBe(COMPACT_MAX_RETRIES); // every attempt was degenerate
+  replyFor = undefined;
+});
+
+test("a degenerate merge reply is retried and the usable one is kept", async () => {
+  const { treePath } = tmpRootTree();
+  const N = 32;
+  const store = fakeStore(
+    treePath,
+    Array.from({ length: N }, (_, i) => msg(i)),
+  );
+  const { ctx } = fakeCtx("main");
+
+  let phase: "children" | "merge" = "children";
+  let attempts = 0;
+  replyFor = () => {
+    if (phase === "children") return filler(200);
+    attempts += 1;
+    return attempts === 1 ? "- x" : filler(200);
+  };
+  expect(await compactOnce(store, ctx, [0, 16])).toBe(true);
+  expect(await compactOnce(store, ctx, [16, 32])).toBe(true);
+  phase = "merge";
+  const before = llmCalls;
+  expect(await summarizeBlock(ctx, store, 0, N)).toBe(filler(200).trim());
+  expect(llmCalls - before).toBe(2); // the degenerate attempt, then the usable one
+  replyFor = undefined;
+});

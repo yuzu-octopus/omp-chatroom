@@ -213,6 +213,13 @@ export async function summarizeBlock(
   // One conversation: a too-long reply is replayed verbatim, then the cut message, so the provider
   // reuses the cached prefix instead of paying to write a fresh one.
   const context: Context = { messages: [{ role: "user", content: task, timestamp: Date.now() }] };
+  // A summary that carries almost nothing is not a summary — but only a MERGE can be degenerate
+  // this way: its input is two already-summarised halves, and the merge of two TRUNCATED halves
+  // produced "- Weekday" (nine bytes) for a 400-byte input. That garbage became the input of the
+  // next merge. So the floor applies to the merge path only, and it is a FRACTION of the input: a
+  // leaf (raw records in) may legitimately summarise to a short line.
+  const minUsefulBytes =
+    hi - lo > RAW_MAX ? Math.max(1, Math.floor(Buffer.byteLength(body, "utf-8") * 0.05)) : 1;
   let best = "";
   let bestBytes = Number.POSITIVE_INFINITY;
   for (let attempt = 0; attempt < COMPACT_MAX_RETRIES; attempt++) {
@@ -221,6 +228,7 @@ export async function summarizeBlock(
       const text = replyText(message);
       if (text === "") continue; // no text is not a usable summary; try again
       const bytes = Buffer.byteLength(text, "utf-8");
+      if (bytes < minUsefulBytes) continue; // degenerate — it cannot carry the block; try again
       if (bytes < bestBytes) {
         best = text;
         bestBytes = bytes;
