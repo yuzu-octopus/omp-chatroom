@@ -16,6 +16,16 @@ export function classify(record: RoomRecord, viewer: MemberState): Tier {
     case "msg":
       if (record.mention?.includes(viewer.agentId)) return "T0"; // @mention → T0
       if (record.replyTo !== undefined && record.replyTo === viewer.lastMessageId) return "T0";
+      // R6 — the loop guard. The topic's status ledger says the topic is looping; that is an
+      // interruption for the agents following the topic, not for everyone. MAST's largest single
+      // failure mode is step repetition (15.7%), and its "unaware of termination" mode (9.82%)
+      // is what the ledger is for: without an interrupt, a swarm keeps talking without converging.
+      if (
+        record.status?.is_in_loop?.answer.toLowerCase() === "yes" &&
+        viewer.topics.has(record.topic)
+      ) {
+        return "T0";
+      }
       if (viewer.heldTopics.has(record.topic)) return "T1"; // claim held on topic
       if (viewer.topics.has(record.topic)) return "T1"; // followed topic
       if (record.threadRoot !== undefined && viewer.threadRoots.has(record.threadRoot)) return "T1";

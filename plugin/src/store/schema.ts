@@ -16,8 +16,10 @@ export type RoomRecord =
       performative?: Performative;
       replyWith?: string;
       replyBy?: string;
-      /** R7 — a retry key: a repeat with the same key returns THIS record instead of a new one. */
+      /** R1 — a retry key: a repeat with the same key returns THIS record instead of a new one. */
       idemKey?: string;
+      /** R6 — the topic's status ledger, written by the agent that holds the topic's claim. */
+      status?: StatusObject;
     }
   | {
       v: 1;
@@ -119,6 +121,35 @@ export type Performative =
   | "reject"
   | "query"
   | "failure";
+
+/**
+ * R6 — one answer in the topic's status ledger: what it is, and why.
+ *
+ * Magentic-One's ledger is five keys, each `{reason, answer}` — the shape the report calls the
+ * strongest single number in the corpus ("eliminating both ledgers... drops performance by 31%").
+ */
+export interface StatusAnswer {
+  reason: string;
+  answer: string;
+}
+
+/** The five keys. All five are required: a partial ledger is not a ledger. */
+export interface StatusObject {
+  is_request_satisfied: StatusAnswer;
+  is_in_loop: StatusAnswer;
+  is_progress_being_made: StatusAnswer;
+  next_speaker: StatusAnswer;
+  instruction_or_question: StatusAnswer;
+}
+
+/** The ledger's keys, in the order the schema checks them. */
+export const STATUS_KEYS = [
+  "is_request_satisfied",
+  "is_in_loop",
+  "is_progress_being_made",
+  "next_speaker",
+  "instruction_or_question",
+] as const satisfies readonly (keyof StatusObject)[];
 
 export type RecordKind = RoomRecord["kind"];
 

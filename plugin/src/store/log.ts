@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import { globalMap } from "../globals";
 import { logPathFor, newMessageId } from "../ids";
-import type { RecordKind, RoomRecord } from "./schema";
+import { type RecordKind, type RoomRecord, STATUS_KEYS, type StatusObject } from "./schema";
 
 // §2.1 §3.3 — K8: one fd per process per logPath, in a globalThis registry.
 // Opened O_RDWR (not O_WRONLY) because readSince/replay take this same fd; O_APPEND still gives
@@ -287,6 +287,17 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
+
+/** R6 — the status ledger's shape: five keys, each `{reason, answer}`, both strings. */
+function isStatusObject(value: unknown): value is StatusObject {
+  if (!isPlainObject(value)) return false;
+  for (const key of STATUS_KEYS) {
+    const answer = value[key];
+    if (!isPlainObject(answer)) return false;
+    if (typeof answer.reason !== "string" || typeof answer.answer !== "string") return false;
+  }
+  return true;
+}
 function isRecordKind(value: unknown): value is RecordKind {
   return typeof value === "string" && KINDS.has(value);
 }
@@ -311,6 +322,7 @@ export function validateRecord(value: unknown): RoomRecord | null {
   }
   if (value.mention !== undefined && !isStringArray(value.mention)) return null;
   if (value.dependsOn !== undefined && !isStringArray(value.dependsOn)) return null;
+  if (value.status !== undefined && !isStatusObject(value.status)) return null;
   if (
     kind === "msg" &&
     value.performative !== undefined &&

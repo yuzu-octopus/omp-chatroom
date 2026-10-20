@@ -5,6 +5,7 @@ import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { AgentRegistry, type ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { DEFAULT_CAPS, resetTurnBudget } from "../src/attention/governor";
+import { classify } from "../src/attention/tiers";
 import { DIGEST_CLAIMS_CAP } from "../src/onboarding/digest";
 import {
   contended,
@@ -28,6 +29,7 @@ import {
   roomTimers,
   storeFor,
 } from "../src/store/room-store";
+import type { RoomRecord } from "../src/store/schema";
 import { viewPath } from "../src/store/tree-store";
 import { ROOM_DESCRIPTION, registerRoomTool } from "../src/tools/room";
 import { zodStub } from "./zod-stub";
@@ -106,6 +108,71 @@ test("renew: a non-holder cannot renew somebody else's lease", () => {
   if (!denied.ok) expect(denied.holder).toBe("A");
   // a denied renewal is not state
   expect(s.seq).toBe(seqBefore);
+});
+
+test("R6: the status ledger is written by the topic's claim holder, and its shape is checked", async () => {
+  const { store, ctx } = newTestStore();
+  const ledger = {
+    is_request_satisfied: { reason: "the parser is green", answer: "no" },
+    is_in_loop: { reason: "three agents are re-reading the same file", answer: "yes" },
+    is_progress_being_made: { reason: "the last commit changed the parser", answer: "yes" },
+    next_speaker: { reason: "the parser needs the schema", answer: "AgentB" },
+    instruction_or_question: {
+      reason: "AgentB must publish the schema first",
+      answer: "publish it",
+    },
+  };
+
+  // No claim on the topic: the ledger is not the caller's to write.
+  const refused = await invokeRoom(ctx, {
+    op: "post",
+    topic: "build",
+    body: "status",
+    status: ledger,
+  });
+  expect(refused.details).toMatchObject({ ok: false });
+  expect(JSON.stringify(refused.content)).toContain("holding the topic's claim");
+  expect(store.records.filter((r) => r.kind === "msg")).toHaveLength(0);
+
+  // Holding it: the ledger is accepted.
+  expect(grant(store, "build/parser", "AgentA", 60_000).ok).toBe(true);
+  const ok = await invokeRoom(ctx, { op: "post", topic: "build", body: "status", status: ledger });
+  expect(ok.details).toMatchObject({ ok: true, op: "post" });
+  const written = store.records.find((r) => r.kind === "msg");
+  expect(written?.kind === "msg" ? written.status?.is_in_loop?.answer : undefined).toBe("yes");
+});
+
+test("R6: a ledger that says the topic is looping interrupts the topic's followers", () => {
+  const viewer = {
+    agentId: "AgentB",
+    joinedAtSeq: 0,
+    topics: new Set(["build"]),
+    muted: new Set<string>(),
+    threadRoots: new Set<string>(),
+    heldTopics: new Set<string>(),
+  };
+  const record: RoomRecord = {
+    v: 1,
+    seq: 1,
+    ts: Date.now(),
+    kind: "msg",
+    id: "m1",
+    from: "AgentA",
+    topic: "build",
+    body: "status",
+    status: {
+      is_request_satisfied: { reason: "no", answer: "no" },
+      is_in_loop: { reason: "the same edit, again", answer: "yes" },
+      is_progress_being_made: { reason: "no", answer: "no" },
+      next_speaker: { reason: "someone else", answer: "AgentC" },
+      instruction_or_question: { reason: "stop", answer: "stop repeating" },
+    },
+  };
+  // The follower is interrupted: MAST's largest failure mode is step repetition.
+  expect(classify(record, viewer)).toBe("T0");
+  // An agent that does not follow the topic is not.
+  const stranger = { ...viewer, topics: new Set<string>() };
+  expect(classify(record, stranger)).toBe("T2");
 });
 
 test("R9: the board says who is blocked on what", async () => {

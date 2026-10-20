@@ -18,7 +18,21 @@ interface StubSchema {
 }
 
 export const zodStub: unknown = {
-  object: (shape: Record<string, unknown>) => shape,
+  // The shape's keys AND the chainable surface: the tests read the captured parameters as the
+  // plain shape (`parameters.post`), while the tool builders also call `.optional()` / `.describe()`
+  // on the object they build. The chain is NON-ENUMERABLE, so a test that walks the shape's keys
+  // does not walk the chain's.
+  object: (shape: Record<string, unknown>) => {
+    const base = stubSchema();
+    return Object.defineProperties(
+      { ...shape },
+      {
+        describe: { value: base.describe, enumerable: false },
+        optional: { value: base.optional, enumerable: false },
+        describes: { value: base.describes, enumerable: false },
+      },
+    );
+  },
   enum: (values: string[]) => stubSchema({ values }) as unknown as StubSchema,
   string: () => stubSchema(),
   number: () => stubSchema(),

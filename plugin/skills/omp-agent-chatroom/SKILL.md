@@ -111,11 +111,9 @@ context:
 Muting a topic suppresses its T1 pushes, but a direct mention still gets through.
 
 ## Module 3 — finish, hand off, and record
-
 The most common multi-agent failure is not doing the work — it is **finishing ambiguously**: a
 claim released with no outcome, a finding posted in a way nobody can use later, or a task closed
 before anyone checked it.
-
 - **Release and record in the same breath.** When the work is done, post the outcome *and* release
   the claim. A released claim with no outcome leaves the next agent with nothing but a lease.
 - **Write findings so a later agent can use them.** Post in a **named** topic (the topic is how a
@@ -126,8 +124,24 @@ before anyone checked it.
   costs the whole room a turn.
 - **Do not close a task you did not verify.** A claim is a promise that someone else will not
   duplicate your work; releasing it early breaks that promise.
-- **If a post might be retried, give it a `idemKey`.** A repeat with the same key returns the first
+- **If a post might be retried, give it an `idemKey`.** A repeat with the same key returns the first
   post instead of posting twice — and a double post double-wakes every agent it mentions.
+
+## Module 4 — the topic's status ledger
+
+A topic can carry a **status ledger**: five keys, each `{reason, answer}` —
+`is_request_satisfied`, `is_in_loop`, `is_progress_being_made`, `next_speaker`,
+`instruction_or_question`.
+
+- **Only the agent holding the topic's claim may write it.** The claim holder is the topic's
+  coordinator; nobody else can say what the topic is doing.
+- **Put it on a `post`**: `room{op:"post", topic, body, status:{…}}`.
+- **When the topic is looping, say so.** `is_in_loop: {reason, answer: "yes"}` **interrupts** the
+  agents following that topic — it is the one thing that stops a swarm from repeating itself
+  until the timeout. If you are the one holding the claim and the topic is going in circles, that
+  is your move.
+- **Name the next actor.** `next_speaker` and `instruction_or_question` are how the topic says
+  what it is waiting for. Use them instead of a bare "anyone?" post.
 
 ## When NOT to use the room
 
@@ -151,7 +165,7 @@ This build ships the full **twelve ops**: `join`, `read`, `post`, `claim`, `rele
 |---|---|---|
 | `join` | first call — registers you and mints your cursor | — |
 | `read` | pull records after your cursor | `since?` (seq), `limit?` (default 50, max 200) |
-| `post` | send a message to a topic | `topic`, `body` (≤ 8 KiB), `mention?`, `replyTo?`, `performative?`, `idemKey?` |
+| `post` | send a message to a topic | `topic`, `body` (≤ 8 KiB), `mention?`, `replyTo?`, `performative?`, `idemKey?`, `status?` |
 | `claim` | take exclusive ownership of `"<topic>/<key>"`; claiming it again renews your lease | `topic`, `key`, `ttl?` (ms), `dependsOn?` |
 | `release` | drop a claim you hold | `topic`, `key` |
 | `board` | see claims, roster, per-agent lag, unread topics | — |

@@ -29,7 +29,14 @@ import { contended, grant, reclaimIfStale, release, renew, staleGen } from "../s
 import { type RoomConfig, resolveRoomConfig } from "../store/config";
 import { bumpCursor, cursorFor, deliveredT0s, initCursor, lagFor } from "../store/cursors";
 import { idemIndexKey, type MemberState, type RoomStore, roomStoreFor } from "../store/room-store";
-import type { BoardResult, Performative, RoomRecord, TopicRow } from "../store/schema";
+import {
+  type BoardResult,
+  type Performative,
+  type RoomRecord,
+  STATUS_KEYS,
+  type StatusObject,
+  type TopicRow,
+} from "../store/schema";
 import {
   COVER_BUDGET_LINES,
   loadView,
@@ -86,6 +93,8 @@ export interface RoomParams {
   key?: string;
   /** R1 — the fencing token: the generation of the grant this call belongs to. */
   gen?: number;
+  /** R6 — the topic's status ledger, as it arrives on the wire; checked on write. */
+  status?: Record<string, { reason: string; answer: string }>;
   /** R3 — the resources that must be free before this claim can start. */
   dependsOn?: string[];
   ttl?: number;
@@ -675,6 +684,20 @@ export function registerRoomTool(pi: ExtensionAPI): void {
       .describe(
         'Second half of a claim resource, e.g. "src/auth". The full resource is "<topic>/<key>".',
       ),
+    status: z
+      .object({
+        is_request_satisfied: z.object({ reason: z.string(), answer: z.string() }),
+        is_in_loop: z.object({ reason: z.string(), answer: z.string() }),
+        is_progress_being_made: z.object({ reason: z.string(), answer: z.string() }),
+        next_speaker: z.object({ reason: z.string(), answer: z.string() }),
+        instruction_or_question: z.object({ reason: z.string(), answer: z.string() }),
+      })
+      .optional()
+      .describe(
+        "The topic's status ledger: five keys (is_request_satisfied, is_in_loop, " +
+          "is_progress_being_made, next_speaker, instruction_or_question), each {reason, answer}. " +
+          "Only the agent holding the topic's claim may write it.",
+      ),
     gen: z
       .number()
       .optional()
@@ -820,6 +843,35 @@ export function registerRoomTool(pi: ExtensionAPI): void {
             const { head, handle } = truncateOversized(body, config.maxT1Tokens);
             const storedBody = handle !== "" ? `${head}${handle}` : head;
             const viewer = viewerFor(store, agentId);
+            // R6 — the topic's status ledger. The writer is the agent that HOLDS the topic's
+            // claim: in a flat room that is the coordination role, without a hierarchy (the
+            // report's synthesis: give the flat room the protocol a router provides, not the
+            // router itself). The shape is Magentic-One's five keys, each {reason, answer}, and
+            // it is checked on write the way that ledger is checked at runtime.
+            if (p.status !== undefined) {
+              const missing = STATUS_KEYS.filter((key) => {
+                const answer = p.status?.[key];
+                return (
+                  answer === undefined ||
+                  typeof answer.reason !== "string" ||
+                  typeof answer.answer !== "string"
+                );
+              });
+              if (missing.length > 0) {
+                return fail(
+                  `status is missing or malformed: ${missing.join(", ")} (each key needs ` +
+                    `{reason, answer})`,
+                );
+              }
+              const holds = [...store.claims.values()].some(
+                (claim) => claim.holder === agentId && claim.resource.startsWith(`${topic}/`),
+              );
+              if (!holds) {
+                return fail(
+                  `status is written by the agent holding the topic's claim — claim ${topic}/… first`,
+                );
+              }
+            }
             // R1 — the write-path fence. A post into a topic the poster CLAIMS must carry that
             // claim's current generation: a holder whose lease was reclaimed and re-granted is
             // behind, and its late write is refused instead of landing on top of the new holder's
@@ -878,6 +930,7 @@ export function registerRoomTool(pi: ExtensionAPI): void {
               ...(threadRoot ? { threadRoot } : {}),
               ...(p.performative ? { performative: p.performative } : {}),
               ...(p.idemKey !== undefined ? { idemKey: p.idemKey } : {}),
+              ...(p.status !== undefined ? { status: p.status as unknown as StatusObject } : {}),
             });
             viewer.lastMessageId = record.id;
             viewer.topics.add(topic);
