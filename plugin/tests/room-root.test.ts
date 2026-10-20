@@ -4,7 +4,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { getSessionsDir } from "@oh-my-pi/pi-utils";
-import { roomIdFor } from "../src/ids";
+import { logPathFor, roomIdFor } from "../src/ids";
+import { resolveRoomId } from "../src/store/config";
+import { lockPathFor, openRoomLog } from "../src/store/log";
 import {
   globalRoomRoot,
   legacyRoomRoot,
@@ -94,4 +96,90 @@ test("migration is a no-op without a legacy room, and for an identical source an
   const empty = tempRoot();
   expect(migrateLegacyRoom(empty, tempRoot())).toBe(false);
   expect(migrateLegacyRoom(empty, empty)).toBe(false);
+});
+
+// --- F5: the migration copies a room another process may still be writing ---------
+
+/** A legacy room with one log, ready to be migrated. */
+function legacyRoomWithLog(): { legacy: string; legacyId: string } {
+  const legacy = tempRoot();
+  const legacyId = roomIdFor(legacy);
+  fs.mkdirSync(path.join(legacy, "room"), { recursive: true });
+  fs.writeFileSync(path.join(legacy, "room", `${legacyId}.jsonl`), '{"seq":1}\n');
+  return { legacy, legacyId };
+}
+
+test("migration skips a legacy room that a LIVE process still holds (F5)", () => {
+  const { legacy, legacyId } = legacyRoomWithLog();
+  const target = tempRoot();
+  // The lock file holds the owner pid; this process is alive, so the room belongs to a live
+  // writer and must be left alone.
+  fs.writeFileSync(lockPathFor(legacy), String(process.pid));
+
+  expect(migrateLegacyRoom(legacy, target)).toBe(false);
+  // The legacy room is untouched — including its lock, which the live owner still needs...
+  expect(fs.readFileSync(lockPathFor(legacy), "utf-8")).toBe(String(process.pid));
+  expect(fs.existsSync(path.join(legacy, "room", `${legacyId}.jsonl`))).toBe(true);
+  // ...and nothing was copied into the target.
+  expect(fs.existsSync(path.join(target, "room"))).toBe(false);
+});
+
+test("migration does not copy into a target that a LIVE process holds (F5)", () => {
+  const { legacy, legacyId } = legacyRoomWithLog();
+  const target = tempRoot();
+  fs.mkdirSync(path.join(target, "room"), { recursive: true });
+  fs.writeFileSync(lockPathFor(target), String(process.pid));
+
+  expect(migrateLegacyRoom(legacy, target)).toBe(false);
+  expect(fs.existsSync(path.join(target, "room", `${legacyId}.jsonl`))).toBe(false);
+  // The live owner's lock survives the attempt.
+  expect(fs.readFileSync(lockPathFor(target), "utf-8")).toBe(String(process.pid));
+});
+
+test("migration leaves no lock behind: the project tree is clean and the target opens (F5)", () => {
+  const { legacy, legacyId } = legacyRoomWithLog();
+  const target = tempRoot();
+
+  expect(migrateLegacyRoom(legacy, target)).toBe(true);
+  // No stale pid in the user's project tree — a leftover would block a later downgrade.
+  expect(fs.existsSync(lockPathFor(legacy))).toBe(false);
+  // The target's lock was released too: openRoomLog takes it later, and a lock left behind
+  // would make that acquisition fail.
+  expect(fs.existsSync(lockPathFor(target))).toBe(false);
+  const opened = openRoomLog(target, legacyId);
+  expect(opened.ok).toBe(true);
+});
+
+// --- F6: the migration can orphan the copied log ----------------------------------
+
+test("migration names the copied log after the id the TARGET resolves (F6)", () => {
+  const legacy = tempRoot();
+  const target = tempRoot();
+  fs.mkdirSync(path.join(legacy, "room"), { recursive: true });
+  // The config pins an id the log was never named after: copied as-is, the history would sit
+  // in a file the target never reads.
+  fs.writeFileSync(path.join(legacy, "room", "r-legacy.jsonl"), '{"seq":1}\n');
+  fs.writeFileSync(
+    path.join(legacy, "room", "config.json"),
+    `${JSON.stringify({ roomId: "custom-room" })}\n`,
+  );
+
+  expect(migrateLegacyRoom(legacy, target)).toBe(true);
+  expect(resolveRoomId(target)).toBe("custom-room");
+  // The migrated history IS the file the target reads.
+  expect(fs.existsSync(logPathFor(target, resolveRoomId(target)))).toBe(true);
+  expect(fs.existsSync(path.join(target, "room", "custom-room.jsonl"))).toBe(true);
+});
+
+test("migration names the copied log after the target's minted id when the config pins none (F6)", () => {
+  const legacy = tempRoot();
+  const target = tempRoot();
+  fs.mkdirSync(path.join(legacy, "room"), { recursive: true });
+  fs.writeFileSync(path.join(legacy, "room", "r-legacy.jsonl"), '{"seq":1}\n');
+  // `roomId: ""` is the documented "mint from the root".
+  fs.writeFileSync(path.join(legacy, "room", "config.json"), `${JSON.stringify({ roomId: "" })}\n`);
+
+  expect(migrateLegacyRoom(legacy, target)).toBe(true);
+  expect(resolveRoomId(target)).toBe(roomIdFor(target));
+  expect(fs.existsSync(logPathFor(target, resolveRoomId(target)))).toBe(true);
 });

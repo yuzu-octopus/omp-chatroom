@@ -12,12 +12,14 @@ import {
   persistOwnCursor,
   restoreOwnCursor,
 } from "../store/cursors";
+import { roomRootFor } from "../store/room-root";
 import {
   disposeRoomSession,
   type MemberState,
   type RoomStore,
   registerSweepNotifier,
   roomStoreFor,
+  unregisterSweepNotifier,
 } from "../store/room-store";
 import { buildDigest } from "./digest";
 import rule from "./routing-rule.md" with { type: "text" };
@@ -49,7 +51,13 @@ export function registerHooks(pi: ExtensionAPI): void {
     let store: RoomStore;
     try {
       store = roomStoreFor(ctx);
-    } catch {
+    } catch (error) {
+      // F7 — the degradation must not be SILENT: an agent that cannot see the room behaves as if
+      // it were alone in it, so the failure is logged with the error that caused it.
+      pi.logger.warn(
+        `omp-agent-chatroom: room unavailable for ${ctx.agent.id}: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
       return { systemPrompt };
     }
     const agentId = ctx.agent.id;
@@ -60,7 +68,17 @@ export function registerHooks(pi: ExtensionAPI): void {
     if (ctx.agent.kind === "main") {
       registerSweepNotifier(store.root, async (expired) => {
         for (const claim of expired) {
-          await deliver(pi, ctx, claim.prev, claim.record, "T0");
+          // F4 — each expiry is delivered on its own: ONE dead target (a disposed session, a
+          // transport rejection) must not swallow the rest of the batch, and the rejection must
+          // never escape the notifier (the sweep timer would see an unhandled rejection).
+          try {
+            await deliver(pi, ctx, claim.prev, claim.record, "T0");
+          } catch (error) {
+            pi.logger.warn(
+              `omp-agent-chatroom: expiry notice to ${claim.prev} failed: ` +
+                `${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
         }
       });
     }
@@ -94,6 +112,9 @@ export function registerHooks(pi: ExtensionAPI): void {
   // ref. `disposeRoomSession` is idempotent per agent; the last session closes the log fd (K8) and
   // evicts the root (K9). Calling `store.dispose()` here instead would decrement twice.
   pi.on("session_shutdown", (_event, ctx) => {
+    // F4 — a dead session's notifier must not fire later: the sweep would deliver the T0 notice
+    // through a disposed session. Only the main session registers one, so only it unregisters.
+    if (ctx.agent.kind === "main") unregisterSweepNotifier(roomRootFor(ctx));
     disposeRoomSession(ctx);
   });
 

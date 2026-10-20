@@ -305,6 +305,16 @@ const SWEEP_NOTIFIERS = globalMap<string, SweepNotifier>("__roomSweepNotifiers")
 export function registerSweepNotifier(root: string, notifier: SweepNotifier): void {
   SWEEP_NOTIFIERS.set(root, notifier);
 }
+
+/**
+ * Drop the notifier for `root` (F4).
+ *
+ * A dead session's notifier must not fire later: the sweep would deliver the T0 "your lease
+ * expired" notice through a disposed session. A no-op when nothing is registered.
+ */
+export function unregisterSweepNotifier(root: string): void {
+  SWEEP_NOTIFIERS.delete(root);
+}
 export function enforceRetention(store: RoomStore, now: number): RoomRecord | null {
   const cutoff = now - store.config.logMaxAgeMs;
   let dropped = 0;

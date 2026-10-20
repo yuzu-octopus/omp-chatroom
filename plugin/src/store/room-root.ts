@@ -4,6 +4,8 @@ import * as path from "node:path";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { getSessionsDir } from "@oh-my-pi/pi-utils";
 import { roomDirNameFor, roomIdFor } from "../ids";
+import { isValidRoomId, loadRoomConfig } from "./config";
+import { acquireRoomLock, releaseRoomLock } from "./log";
 
 /**
  * The legacy project-local room root: `<cwd>/.omp-room`.
@@ -59,10 +61,16 @@ export function roomRootFor(ctx: ExtensionContext): string {
  * Copy a legacy project-local room into the global store, once.
  *
  * Runs before the first open of the target root. It never clobbers: a target that already holds
- * a log is left alone, so this is a no-op after the first migration. The log keeps its legacy
- * name and the legacy `config.json` travels with it, so the room id (which the config pins)
- * survives the move; a legacy room with no config gets its log renamed to the id the target
- * would mint.
+ * a log is left alone, so this is a no-op after the first migration. The legacy `config.json`
+ * travels with the room, and the copied log is named after the id the TARGET resolves — so the
+ * migrated history is the file the target actually reads.
+ *
+ * Two locks guard the move (F5). The legacy room's lock says whether a live process still owns
+ * it: that room belongs to that process, so the migration is skipped and the legacy room is left
+ * alone. The target's lock keeps two omp processes starting on the same project from both
+ * copying into the same room. Both locks are released again: the target's lock is taken LATER by
+ * `openRoomLog`, and a lock left behind in the user's project tree would block a later
+ * downgrade to the project-local room.
  *
  * @returns true when files were copied.
  */
@@ -78,28 +86,65 @@ export function migrateLegacyRoom(legacyRoot: string, targetRoot: string): boole
   }
   const logs = entries.filter((e) => e.isFile() && e.name.endsWith(".jsonl"));
   if (logs.length === 0) return false;
+  // A legacy room held by a LIVE process belongs to THAT process: copying it would fork the
+  // history while the old owner keeps appending to the old file. Leave the legacy room alone.
   try {
-    if (fs.readdirSync(targetRoomDir).some((name) => name.endsWith(".jsonl"))) return false;
+    acquireRoomLock(legacyRoot);
   } catch {
-    // no target room yet — proceed
+    return false; // a live owner holds the legacy room
   }
-  fs.mkdirSync(targetRoomDir, { recursive: true });
-  const hasConfig = fs.existsSync(path.join(legacyRoomDir, "config.json"));
-  if (hasConfig) {
-    fs.copyFileSync(
-      path.join(legacyRoomDir, "config.json"),
-      path.join(targetRoomDir, "config.json"),
-    );
+  try {
+    // The copy takes the TARGET's lock, so two omp processes starting on the same project at the
+    // same time cannot both copy into the same room.
+    try {
+      acquireRoomLock(targetRoot);
+    } catch {
+      return false; // another process owns the target room
+    }
+    try {
+      // It never clobbers: a target that already holds a log is left alone.
+      try {
+        if (fs.readdirSync(targetRoomDir).some((name) => name.endsWith(".jsonl"))) return false;
+      } catch {
+        // no target room yet — proceed
+      }
+      fs.mkdirSync(targetRoomDir, { recursive: true });
+      const hasConfig = fs.existsSync(path.join(legacyRoomDir, "config.json"));
+      if (hasConfig) {
+        fs.copyFileSync(
+          path.join(legacyRoomDir, "config.json"),
+          path.join(targetRoomDir, "config.json"),
+        );
+      }
+      // F6 — the copied log must carry the id the TARGET will use. `resolveRoomId` reads the
+      // room's config and falls back to the id minted from the root, so the target's id is the
+      // legacy config's `roomId` when that is a valid non-empty id, and the target's minted id
+      // otherwise (`roomId: ""` means "mint from the root"). A log named after a DIFFERENT id
+      // would be copied into a file the target never reads, and the history would be invisible.
+      const pinned = loadRoomConfig(legacyRoot).roomId;
+      const targetId = pinned !== "" && isValidRoomId(pinned) ? pinned : roomIdFor(targetRoot);
+      const source = logs.find((log) => log.name === `${targetId}.jsonl`) ?? logs[0];
+      fs.copyFileSync(
+        path.join(legacyRoomDir, source.name),
+        path.join(targetRoomDir, `${targetId}.jsonl`),
+      );
+      // Any other legacy log (a leftover from an earlier id) travels under its own name, so the
+      // migration never silently drops history.
+      for (const log of logs) {
+        if (log.name === source.name) continue;
+        fs.copyFileSync(path.join(legacyRoomDir, log.name), path.join(targetRoomDir, log.name));
+      }
+      // The tree is a rebuildable cache over the log — copy it so the first read after the move is
+      // warm instead of rebuilding the summaries from scratch.
+      const legacyTree = path.join(legacyRoomDir, "tree");
+      if (fs.existsSync(legacyTree)) {
+        fs.cpSync(legacyTree, path.join(targetRoomDir, "tree"), { recursive: true });
+      }
+      return true;
+    } finally {
+      releaseRoomLock(targetRoot);
+    }
+  } finally {
+    releaseRoomLock(legacyRoot);
   }
-  for (const log of logs) {
-    const name = hasConfig ? log.name : `${roomIdFor(targetRoot)}.jsonl`;
-    fs.copyFileSync(path.join(legacyRoomDir, log.name), path.join(targetRoomDir, name));
-  }
-  // The tree is a rebuildable cache over the log — copy it so the first read after the move is
-  // warm instead of rebuilding the summaries from scratch.
-  const legacyTree = path.join(legacyRoomDir, "tree");
-  if (fs.existsSync(legacyTree)) {
-    fs.cpSync(legacyTree, path.join(targetRoomDir, "tree"), { recursive: true });
-  }
-  return true;
 }

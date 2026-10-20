@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, setSystemTime, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent";
 import { AgentRegistry, type ExtensionAPI, type ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 
 import { roomIdFor } from "../src/ids";
@@ -21,6 +22,7 @@ import {
   type RoomStore,
   resetRoomStores,
   roomStoreFor,
+  roomTimers,
   storeFor,
 } from "../src/store/room-store";
 
@@ -186,8 +188,14 @@ test("the routing rule is present in full in the system prompt regardless of dig
 function fakePi(): {
   pi: ExtensionAPI;
   fire: (event: string, payload: unknown, ctx: unknown) => Promise<unknown>;
+  /** Every `pi.logger.warn` message, in order. */
+  warnings: string[];
+  /** Every `pi.sendMessage` payload, in order. */
+  sends: unknown[];
 } {
   const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
+  const warnings: string[] = [];
+  const sends: unknown[] = [];
   const pi = {
     on(event: string, handler: (event: unknown, ctx: unknown) => unknown) {
       const list = handlers.get(event) ?? [];
@@ -199,6 +207,14 @@ function fakePi(): {
       return undefined;
     },
     registerFlag() {},
+    logger: {
+      warn(message: string) {
+        warnings.push(message);
+      },
+    },
+    sendMessage(payload: unknown) {
+      sends.push(payload);
+    },
   } as unknown as ExtensionAPI;
   const fire = async (event: string, payload: unknown, ctx: unknown) => {
     let result: unknown;
@@ -207,7 +223,7 @@ function fakePi(): {
     }
     return result;
   };
-  return { pi, fire };
+  return { pi, fire, warnings, sends };
 }
 
 function fakeCtx(agentId: string): ExtensionContext {
@@ -644,4 +660,132 @@ test("the digest still fits its token budget and the routing rule is still not c
   expect(estimateTokens(String(result?.message?.content ?? ""))).toBeLessThanOrEqual(
     DIGEST_BUDGET_TOKENS,
   );
+});
+
+// ---------------------------------------------------------------------------------------------
+// 10. F4 — the expiry notifier: one dead target must not swallow the batch, and a dead
+//     session's notifier must not fire later.
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * The claim sweep is the SECOND interval the store schedules (the first is retention). Capture
+ * it and run it — the same seam tests/room-tool.test.ts uses.
+ */
+function captureSweep(root: string): Array<() => unknown> {
+  const intervals: Array<() => unknown> = [];
+  const ctx = {
+    ...fakeCtx("AgentA"),
+    setInterval: (cb: () => unknown) => {
+      intervals.push(cb);
+      return 0 as unknown as Timer;
+    },
+  } as unknown as ExtensionContext;
+  roomTimers.stop(root);
+  roomTimers.start(root, ctx);
+  return intervals;
+}
+
+test("the expiry notifier delivers the whole batch when one delivery fails (F4)", async () => {
+  // Two stale leases. The FIRST holder's transport rejects; the second one's accepts.
+  const bad = { sent: 0 };
+  const good = { sent: 0 };
+  AgentRegistry.global().register({
+    id: "HolderBad",
+    displayName: "HolderBad",
+    kind: "sub",
+    status: "running",
+    session: {
+      sendCustomMessage: () => {
+        bad.sent += 1;
+        return Promise.reject(new Error("transport down"));
+      },
+    } as unknown as AgentSession,
+  });
+  AgentRegistry.global().register({
+    id: "HolderGood",
+    displayName: "HolderGood",
+    kind: "sub",
+    status: "running",
+    session: {
+      sendCustomMessage: () => {
+        good.sent += 1;
+        return Promise.resolve();
+      },
+    } as unknown as AgentSession,
+  });
+
+  const { pi, fire, warnings } = fakePi();
+  registerHooks(pi);
+  const ctx = fakeCtx("AgentA");
+  await fire(
+    "before_agent_start",
+    { type: "before_agent_start", prompt: "hi", systemPrompt: [] },
+    ctx,
+  );
+  // A TTL of zero means the leases are already past.
+  store.append({ kind: "claim", from: "HolderBad", resource: "build/bad", ttlMs: 0 });
+  store.append({ kind: "claim", from: "HolderGood", resource: "build/good", ttlMs: 0 });
+
+  const intervals = captureSweep(store.root);
+  expect(intervals.length).toBe(2);
+
+  // The failing delivery must not swallow the rest of the batch, and the rejection must not
+  // escape the notifier.
+  await expect(intervals[1]!()).resolves.toBeUndefined();
+  expect(bad.sent).toBe(1);
+  expect(good.sent).toBe(1);
+  // The failure is logged, not swallowed.
+  expect(warnings.length).toBe(1);
+  expect(warnings[0]).toContain("transport down");
+});
+
+test("the expiry notifier is unregistered when the session shuts down (F4)", async () => {
+  const { pi, fire, sends } = fakePi();
+  registerHooks(pi);
+  const ctx = fakeCtx("AgentA");
+  await fire(
+    "before_agent_start",
+    { type: "before_agent_start", prompt: "hi", systemPrompt: [] },
+    ctx,
+  );
+  const intervals = captureSweep(store.root);
+  expect(intervals.length).toBe(2);
+
+  // While the session lives, the expiry notice is delivered (the holder is this agent).
+  store.append({ kind: "claim", from: "AgentA", resource: "build/step", ttlMs: 0 });
+  await intervals[1]!();
+  expect(sends.length).toBe(1);
+
+  // The session dies: its notifier must not fire again.
+  await fire("session_shutdown", { type: "session_shutdown" }, ctx);
+  store.append({ kind: "claim", from: "AgentA", resource: "build/other", ttlMs: 0 });
+  await intervals[1]!();
+  expect(sends.length).toBe(1);
+});
+
+// ---------------------------------------------------------------------------------------------
+// 11. F7 — the hook drops the digest with no signal.
+// ---------------------------------------------------------------------------------------------
+
+test("the hook logs a broken room instead of silently dropping the digest (F7)", async () => {
+  // A room that cannot be opened: the room directory is a FILE, so the store cannot be made.
+  const broken = path.join(artifactsDir, "broken");
+  fs.mkdirSync(path.join(broken, ".omp-room"), { recursive: true });
+  fs.writeFileSync(path.join(broken, ".omp-room", "room"), "not a directory");
+
+  const { pi, fire, warnings } = fakePi();
+  registerHooks(pi);
+  const ctx = { ...fakeCtx("AgentA"), cwd: broken } as unknown as ExtensionContext;
+  const result = (await fire(
+    "before_agent_start",
+    { type: "before_agent_start", prompt: "hi", systemPrompt: ["BASE"] },
+    ctx,
+  )) as { systemPrompt?: string[] } | undefined;
+
+  // The degradation stays: the routing rule is still injected and the turn continues.
+  expect((result?.systemPrompt ?? []).join("\n")).toContain("## Room vs direct message");
+  // But the drop is not silent: the failure is logged, with the error that caused it.
+  expect(warnings.length).toBe(1);
+  expect(warnings[0]).toContain("room unavailable");
+  expect(warnings[0]).toContain("EEXIST");
 });
