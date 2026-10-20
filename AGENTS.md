@@ -188,12 +188,13 @@ Test-only seams: `__roomTest.store.reset()` (`src/index.ts`), `__compactTest`
 **Assert the model-facing `content` array** for anything the model reads — `details` never reaches it.
 A gap here hid a real defect once (see the K1 block in `tests/room-tool.test.ts`).
 
-**Not covered, so treat as unverified:** real-model summarisation quality, and `wait_for_agent`'s
-happy `event` path under a real model (`wait_for_message` and `wait_for_claim` were driven to their
-`outcome: "event"` path by real models; `wait_for_agent`'s was not). Everything else was verified
-live — the panel in a real terminal, the cards in a real transcript, the global room root, the
-linked-plugin route, the legacy migration, the coordination checks — and the unprompted discovery
-rate was MEASURED at 75–86 %. See "Live verification" below.
+**Not covered, so treat as unverified:** `wait_for_agent`'s happy `event` path under a real model
+(`wait_for_message` and `wait_for_claim` were driven to their `outcome: "event"` path by real
+models; `wait_for_agent`'s was not). Everything else was verified live — the panel in a real
+terminal, the cards in a real transcript, the global room root, the linked-plugin route, the legacy
+migration, the coordination checks, and the cold-tree summaries (faithful at the leaves, and a
+prompt injection inside a room message was summarised as DATA, never obeyed) — and the unprompted
+discovery rate was MEASURED at 75–86 %. See "Live verification" below.
 
 **Do not re-litigate these settled findings** — both are recorded with evidence:
 
