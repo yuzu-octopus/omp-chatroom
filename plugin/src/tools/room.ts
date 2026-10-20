@@ -474,10 +474,7 @@ async function deliverToTarget(
     // behind a refusal it stays owed, but it never lowers the floor: the refusal below it
     // already sets a lower one.
     const gaps = pending.filter(
-      (r) =>
-        r.kind === "gap" &&
-        !records.some((x) => x.seq === r.seq) &&
-        r.seq < owedFloorOthers,
+      (r) => r.kind === "gap" && !records.some((x) => x.seq === r.seq) && r.seq < owedFloorOthers,
     );
     // Last in the batch: the T0/T1 deliveries go first, so a failed one aborts the pass before
     // the gap is told (the gap is retried on the next pass) and the gap's cursor bump never

@@ -100,8 +100,13 @@ function padOrTrim(text: string, width: number): string {
  * §6.3 — one styled row per message: `[unread][tier][time] author › topic · body`, body truncated to
  * the pane. Every line is exactly `width` cells (the caller has already sliced the window).
  */
-export function renderChatRows(rows: readonly ChatRow[], width: number, theme: Theme): string[] {
-  return rows.map((row) => {
+export function renderChatRows(
+  rows: readonly ChatRow[],
+  width: number,
+  theme: Theme,
+  selected = -1,
+): string[] {
+  return rows.map((row, index) => {
     const unread = row.unread ? theme.fg("accent", theme.nav.cursor) : " ";
     // D3: the theme owns a 1-cell status glyph per severity (theme-class.ts:485-503). Painting the
     // ASCII "T0"/"T1"/"T2" made the badge 2 cells and the only row element not theme-sourced.
@@ -114,11 +119,15 @@ export function renderChatRows(rows: readonly ChatRow[], width: number, theme: T
     const indent =
       row.threadDepth > 0 ? theme.tree.vertical.repeat(row.threadDepth) + theme.tree.branch : "";
     const body = truncateToWidth(row.body.replace(/[\r\n]+/g, " "), Math.max(1, width - 32));
+    // The visible cursor: the row the panel's actions address is the row the user can see. The
+    // glyph is the THEME's own "selected" symbol (nav.selected) — the house rule is that every
+    // row element comes from the theme, and the fallback theme defines nav.selected.
+    const marker = index === selected ? theme.fg("accent", theme.nav.selected) : " ";
     // D2: one space between the unread cursor and the badge. D1: `sep.dot` is already " · " with its
     // flanks (symbols.ts:455), so it must not be wrapped in more spaces. D7: the separator between
     // author and topic is `nav.selected`, a SymbolKey, not a hardcoded "›".
     const head =
-      `${unread}${badge} ${time} ${indent}${author}${theme.sep.dot}` +
+      `${marker}${unread}${badge} ${time} ${indent}${author}${theme.sep.dot}` +
       `${theme.fg("muted", sanitizeText(row.topic))}${theme.nav.selected}${body}`;
     return padOrTrim(head, width);
   });
@@ -127,15 +136,26 @@ export function renderChatRows(rows: readonly ChatRow[], width: number, theme: T
 /**
  * §6.2/§6.3 — a WINDOWED chat renderer: it renders only the tail of the row list that fits the pane
  * (`followTail`), never one component per message (§6.2 perf rule).
+ *
+ * `getSelected` is the index into the FULL row list (the panel's selection), so the marker lands
+ * on the row the user is on even when the pane shows only the tail.
  */
 export function createChatPane(
   getRows: () => readonly ChatRow[],
   height: number,
   theme: Theme,
+  getSelected: () => number = () => -1,
 ): LayoutRenderer {
   return (width: number, paneHeight: number | undefined): readonly string[] => {
     const size = Math.max(0, paneHeight ?? height);
     const rows = getRows();
-    return renderChatRows(rows.slice(Math.max(0, rows.length - size)), width, theme);
+    const selected = getSelected();
+    // The pane shows the TAIL of the log (the newest rows). When the cursor moves above that
+    // window the window follows it, so the marker is never invisible in a long room.
+    let start = Math.max(0, rows.length - size);
+    if (selected >= 0 && selected < start)
+      start = Math.min(selected, Math.max(0, rows.length - size));
+    const windowed = rows.slice(start, start + size);
+    return renderChatRows(windowed, width, theme, selected - start);
   };
 }

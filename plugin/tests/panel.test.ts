@@ -715,7 +715,9 @@ test("chat row: one-cell tier glyph, single-spaced separator", () => {
   // old `${topic} ${sep.dot} ${body}` produced "topic  ·  body".
   for (const row of out) expect(row.replace(ANSI, "")).not.toContain("  ·  ");
   // D2: the unread cursor no longer abuts the badge. It reads "❯✘ <time>" — cursor, glyph, space.
-  expect(out[0]!.replace(ANSI, "")).toMatch(/^❯✘ \d\d:\d\d:\d\d /);
+  // The row starts with the selection-marker cell (a space when the row is not selected), so the
+  // columns of every row stay aligned.
+  expect(out[0]!.replace(ANSI, "")).toMatch(/^.?❯✘ \d\d:\d\d:\d\d /);
   // D7: the author/topic separator is the theme's nav.selected, not a hardcoded "›".
   expect(out[0]!.replace(ANSI, "")).not.toContain("›");
   // Every row is padded/trimmed to exactly `width` VISIBLE cells (ANSI codes are invisible).
@@ -739,4 +741,100 @@ test("panel `r` releases through the arbiter: reason released + waiter promoted 
   expect(releases.length).toBe(1);
   expect(releases[0]).toMatchObject({ resource: "build/step", reason: "released" });
   expect(store.claims.get("build/step")?.holder).toBe("W");
+});
+
+// --- the live-pty findings: the index leak, the focus, the selection --------
+
+test("`r` in CHAT focus releases nothing (the old shared index released an arbitrary claim)", () => {
+  const store = fixtureStore();
+  const released: string[] = [];
+  const panel = makePanel(store, 30, { onReleaseClaim: (resource) => released.push(resource) });
+  try {
+    // The chat has ONE row, the board has ONE claim. With one shared index, `G` (bottom) clamped
+    // the index to the CHAT's row count (0) and `r` then released board row 0 — a claim the user
+    // never selected.
+    panel.handleInput("G");
+    panel.handleInput("r");
+    expect(released).toEqual([]);
+
+    // With the board focused, `r` releases the claim the user has selected.
+    panel.handleInput("2");
+    panel.handleInput("r");
+    expect(released).toEqual(["build/step"]);
+  } finally {
+    panel.dispose();
+    store.reset();
+  }
+});
+
+test("`r` in board focus releases the row the user sees (display order: held first)", () => {
+  const store = fixtureStore();
+  store.append({ kind: "claim", from: "AgentC", resource: "build/second", ttlMs: 600_000 });
+  const released: string[] = [];
+  const panel = makePanel(store, 30, { onReleaseClaim: (resource) => released.push(resource) });
+  try {
+    panel.handleInput("2");
+    panel.handleInput("r");
+    expect(released).toEqual(["build/step"]);
+    panel.handleInput("j");
+    panel.handleInput("r");
+    expect(released).toEqual(["build/step", "build/second"]);
+  } finally {
+    panel.dispose();
+    store.reset();
+  }
+});
+
+test("the focused pane is visible in the rendered panel", () => {
+  const store = fixtureStore();
+  const panel = makePanel(store);
+  try {
+    const chatFocused = panel.render(100).join("\n");
+    expect(chatFocused).toContain("[chat]|board");
+    panel.handleInput("2");
+    const boardFocused = panel.render(100).join("\n");
+    expect(boardFocused).toContain("chat|[board]");
+    expect(boardFocused).not.toContain("[chat]|board");
+  } finally {
+    panel.dispose();
+    store.reset();
+  }
+});
+
+test("the selected row is marked in the board pane", () => {
+  const store = fixtureStore();
+  const panel = makePanel(store);
+  try {
+    panel.handleInput("2");
+    const rows = projectClaims(
+      [
+        {
+          resource: "build/step",
+          holder: "AgentB",
+          state: "held",
+          expiresAt: 0,
+          ttlMs: 1,
+          contended: 0,
+        },
+        {
+          resource: "build/other",
+          holder: "AgentC",
+          state: "held",
+          expiresAt: 0,
+          ttlMs: 1,
+          contended: 0,
+        },
+      ] as unknown as BoardRow[],
+      60,
+      theme,
+      Date.now(),
+      1,
+    );
+    // The marker is the THEME's own "selected" glyph (nav.selected), not a hardcoded character.
+    expect(rows[1]).toContain(theme.nav.selected);
+    expect(rows[0]).not.toContain(theme.nav.selected);
+  } finally {
+    panel.dispose();
+    store.reset();
+  }
 });

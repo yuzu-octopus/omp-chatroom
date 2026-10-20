@@ -50,24 +50,41 @@ function holderText(row: BoardRow): string {
 }
 
 /**
+ * §6.4 — the display order: `held` first, finished rows last.
+ *
+ * Exported because the panel's ACTIONS must address the row the user SEES. The panel used to
+ * index the unsorted projection, so `r` could release a different claim than the highlighted one.
+ */
+export function sortBoardRows(rows: readonly BoardRow[]): BoardRow[] {
+  return [...rows].sort((a, b) => STATE_RANK[a.state] - STATE_RANK[b.state]);
+}
+
+/**
  * §6.4 — the pure projection: claim rows → exactly `width`-cell strings, one per row, `held` first
  * and finished rows last. No TUI required.
+ *
+ * `selected` marks the row the panel's actions will act on (the visible cursor).
  */
 export function projectClaims(
   rows: readonly BoardRow[],
   width: number,
   theme: Theme,
   now = Date.now(),
+  selected = -1,
 ): string[] {
   if (rows.length === 0) return [fitWidth(theme.fg("dim", "no claims"), width)];
-  const ordered = [...rows].sort((a, b) => STATE_RANK[a.state] - STATE_RANK[b.state]);
+  const ordered = sortBoardRows(rows);
   const out: string[] = [];
-  for (const row of ordered) {
+  for (const [index, row] of ordered.entries()) {
     const dim = row.state !== "held";
     const ttl = ttlCell(row, now);
+    const marked = index === selected;
     const cells: TableCell[] = [
       {
-        text: sanitizeText(row.resource),
+        // The cursor marker: the row `r`/`o` will act on is the row the user can see. The glyph is
+        // the THEME's own "selected" symbol (nav.selected) — the house rule is that every row
+        // element comes from the theme, and the plugin's fallback theme defines nav.selected.
+        text: `${marked ? theme.nav.selected : " "}${sanitizeText(row.resource)}`,
         style: dim ? (text) => theme.fg("muted", text) : undefined,
       },
       {
@@ -87,9 +104,16 @@ export function createBoardPane(
   getRows: () => readonly BoardRow[],
   width: number,
   theme: Theme,
+  getSelected: () => number = () => -1,
 ): LayoutRenderer {
   return (paneWidth: number, height: number | undefined): readonly string[] => {
-    const rows = projectClaims(getRows(), paneWidth > 0 ? paneWidth : width, theme);
+    const rows = projectClaims(
+      getRows(),
+      paneWidth > 0 ? paneWidth : width,
+      theme,
+      Date.now(),
+      getSelected(),
+    );
     return rows.slice(0, height ?? rows.length);
   };
 }

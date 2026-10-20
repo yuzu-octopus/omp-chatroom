@@ -10,7 +10,7 @@ import { cursorFor } from "../store/cursors";
 import { type MemberState, type RoomStore, roomStoreFor } from "../store/room-store";
 import type { ClaimRow } from "../store/schema";
 import { appendedSince, notifyRecipients } from "../tools/room";
-import { type BoardRow, createBoardPane } from "./board-pane";
+import { type BoardRow, createBoardPane, sortBoardRows } from "./board-pane";
 import { type ChatRow, createChatPane, projectChatRows } from "./chat-pane";
 import { fitBlock, frameRows } from "./chrome";
 import { adoptHostTheme, uncolouredTheme } from "./host-theme";
@@ -73,7 +73,13 @@ export class RoomPanel implements Component {
   #rows: ChatRow[] = [];
   #board: BoardRow[] = [];
   #roster = "";
-  #selected = 0;
+  // One selection PER PANE. A single shared index was the bug the live pty run found: it was
+  // clamped by the FOCUSED pane's row count but applied to the BOARD's rows, so `r` in chat focus
+  // released an arbitrary claim the user had never selected.
+  // The chat cursor starts on the NEWEST row (the pane shows the tail of the log, so row 0 would
+  // be off-window and the marker invisible).
+  #chatSelected = Number.MAX_SAFE_INTEGER;
+  #boardSelected = 0;
   #focus: "chat" | "board" = "chat";
   #narrowOpen = false;
   #disposed = false;
@@ -95,8 +101,18 @@ export class RoomPanel implements Component {
     const store = options.store;
 
     this.#split = new SplitPane({
-      left: createChatPane(() => this.#rows, 0, this.#options.theme),
-      right: createBoardPane(() => this.#board, 0, this.#options.theme),
+      left: createChatPane(
+        () => this.#rows,
+        0,
+        this.#options.theme,
+        () => this.#chatSelected,
+      ),
+      right: createBoardPane(
+        () => this.#board,
+        0,
+        this.#options.theme,
+        () => this.#boardSelected,
+      ),
       leftSize: { ratio: PANEL_LEFT_RATIO, min: 40 },
       rightMinWidth: PANEL_RIGHT_MIN_WIDTH,
       splitAt: PANEL_SPLIT_AT,
@@ -184,16 +200,16 @@ export class RoomPanel implements Component {
         this.#narrowOpen = !this.#narrowOpen;
         break;
       case "down":
-        this.#selected += 1;
+        this.#moveSelection(1);
         break;
       case "up":
-        this.#selected -= 1;
+        this.#moveSelection(-1);
         break;
       case "top":
-        this.#selected = 0;
+        this.#setSelection(0);
         break;
       case "bottom":
-        this.#selected = Number.MAX_SAFE_INTEGER;
+        this.#setSelection(Number.MAX_SAFE_INTEGER);
         break;
       case "focus-chat":
         this.#focus = "chat";
@@ -202,12 +218,17 @@ export class RoomPanel implements Component {
         this.#focus = "board";
         break;
       case "release-claim": {
-        const row = this.#board[this.#selected];
+        // The board is the only pane with claims: `r` acts on the BOARD's own selection, and only
+        // while the board has the focus. In chat focus it releases nothing — the user has not
+        // selected a claim, and the old shared index released an arbitrary one.
+        if (this.#focus !== "board") break;
+        const row = this.#boardAt(this.#boardSelected);
         if (row !== undefined) this.#options.onReleaseClaim(row.resource);
         break;
       }
       case "focus-agent": {
-        const row = this.#board[this.#selected];
+        if (this.#focus !== "board") break;
+        const row = this.#boardAt(this.#boardSelected);
         if (row !== undefined) this.#options.onFocusAgent(row.holder);
         break;
       }
@@ -270,16 +291,48 @@ export class RoomPanel implements Component {
   }
 
   #clampSelection(): void {
-    const count = this.#focus === "chat" ? this.#rows.length : this.#board.length;
+    this.#chatSelected = this.#clamp(this.#chatSelected, this.#rows.length);
+    this.#boardSelected = this.#clamp(this.#boardSelected, this.#board.length);
+  }
+
+  #clamp(value: number, count: number): number {
     const last = Math.max(0, count - 1);
-    if (this.#selected > last) this.#selected = last;
-    if (this.#selected < 0) this.#selected = 0;
+    if (value > last) return last;
+    if (value < 0) return 0;
+    return value;
+  }
+
+  /** The focused pane's selection moves; the other pane keeps its own. */
+  #moveSelection(delta: number): void {
+    if (this.#focus === "chat") this.#chatSelected += delta;
+    else this.#boardSelected += delta;
+  }
+
+  #setSelection(value: number): void {
+    if (this.#focus === "chat") this.#chatSelected = value;
+    else this.#boardSelected = value;
+  }
+
+  /**
+   * The board row at a selection index, in DISPLAY order (`held` first, finished rows last) —
+   * the same order the pane renders, so `r` acts on the row the user can see.
+   */
+  #boardAt(index: number): BoardRow | undefined {
+    return sortBoardRows(this.#board)[index];
   }
 
   // --- chrome -------------------------------------------------------------
 
   #titleFor(narrow: boolean): string {
-    const pane = narrow ? (this.#narrowOpen ? "board" : "chat") : "chat|board";
+    // The focused pane is marked: `1`/`2` used to change nothing on screen, so the key looked
+    // broken. In the narrow layout only one pane is visible, so the mark names the visible one.
+    const pane = narrow
+      ? this.#narrowOpen
+        ? "[board]"
+        : "[chat]"
+      : this.#focus === "chat"
+        ? "[chat]|board"
+        : "chat|[board]";
     return `Room #${sanitizeText(this.#options.roomId)} · ${pane} · ${this.#roster}`;
   }
 }
