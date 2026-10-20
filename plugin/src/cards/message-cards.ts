@@ -65,6 +65,18 @@ function ageOf(timestamp: number): string {
 }
 
 /**
+ * The topic, capped. The card header is truncated to the render width, so an unbounded topic would
+ * push the author and the age off the line; the cap keeps them visible.
+ */
+const TOPIC_MAX = 24;
+function topicOf(record: RoomRecord | undefined): string | undefined {
+  if (!record || (record.kind !== "msg" && record.kind !== "note")) return undefined;
+  const topic = record.topic;
+  if (!topic) return undefined;
+  return topic.length > TOPIC_MAX ? `${topic.slice(0, TOPIC_MAX - 1)}…` : topic;
+}
+
+/**
  * A card whose rows are padded to exactly `width` visible cells. Custom message frames draw their
  * own border around the renderer output, so the rows must be full-width or the frame ragged-edges.
  */
@@ -91,7 +103,7 @@ function frameComponent(
   );
 }
 
-/** `✉ room ⟵ author · [reply] · 2m ago` + the quote-bordered body (§7.3/§7.4). */
+/** `✉ room ⟵ author · topic · [reply] · 2m ago` + the quote-bordered body (§7.3/§7.4). */
 export function renderMessageCard(
   message: CustomMessage,
   options: MessageRenderOptions,
@@ -100,7 +112,7 @@ export function renderMessageCard(
   return frameComponent(message, options, theme, (_width, expanded, record, body) => {
     const from = record && "from" in record ? record.from : "?";
     const replyTo = record?.kind === "msg" ? record.replyTo : undefined;
-    const meta = [replyTo ? "reply" : undefined, ageOf(message.timestamp)].filter(
+    const meta = [topicOf(record), replyTo ? "reply" : undefined, ageOf(message.timestamp)].filter(
       (part): part is string => !!part,
     );
     const lines = [
@@ -124,7 +136,7 @@ export function renderMessageCard(
   });
 }
 
-/** `✉ room ⟵ author ➤ me · reply · 2m ago` — the mention card adds the addressing marker (§7.3). */
+/** `✉ room ⟵ author ➤ me · topic · reply · 2m ago` — the mention card adds the addressing marker (§7.3). */
 export function renderMentionCard(
   message: CustomMessage,
   options: MessageRenderOptions,
@@ -134,6 +146,7 @@ export function renderMentionCard(
     const from = record && "from" in record ? record.from : "?";
     const meta = [
       "➤ me",
+      topicOf(record),
       record?.kind === "msg" && record.replyTo ? "reply" : undefined,
       ageOf(message.timestamp),
     ].filter((part): part is string => !!part);

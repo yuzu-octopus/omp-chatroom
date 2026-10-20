@@ -202,6 +202,30 @@ test("the collapsed room:message card shows header + 3 body lines + the counter;
   expect(expanded.at(-1)).toContain("+8 more lines");
 });
 
+test("the card header names the topic, so a human can tell which topic a message came from", () => {
+  const header = render(renderMessageCard(msgMessage("hi"), { expanded: false }, theme), 80)[0]!;
+  expect(header).toContain("build");
+  // the topic sits next to the author, not in place of it
+  expect(header).toContain("agent-1");
+
+  const mentionHeader = render(
+    renderMentionCard(msgMessage("hi", { mention: ["me"] }), { expanded: false }, theme),
+    80,
+  )[0]!;
+  expect(mentionHeader).toContain("build");
+  expect(mentionHeader).toContain("agent-1");
+});
+
+test("a long topic is capped so the author and the age stay on the header line", () => {
+  const long = "t".repeat(80);
+  const header = render(
+    renderMessageCard(msgMessage("hi", { topic: long }), { expanded: false }, theme),
+    120,
+  )[0]!;
+  expect(header).not.toContain(long);
+  expect(header).toContain("agent-1");
+});
+
 // --- 2. escaping ----------------------------------------------------------
 
 test("a body with a forged <irc> tag and a closing </room-authored> is escaped in the rendered rows", () => {

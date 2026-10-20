@@ -60,6 +60,15 @@ against 18.7.0 with a consistent +5..+10 drift, so the evidence holds and only t
 > at :601, the node-format paragraph at :883, `maxTokens: 288` at :941, and "retry up to 3 times" at
 > :958 — are body prose describing the build as it happened and were left untouched under the
 > historical-record rule.
+
+> **Addendum 2026-10-20 — the human-facing card now names its topic.** The §7.3 table row for
+> `room:message` said the collapsed card is `✉ room ⟵ author · 2m ago` + 3 quote-bordered lines. It
+> is now `✉ room ⟵ author · topic · [reply] · 2m ago` (`plugin/src/cards/message-cards.ts`,
+> `topicOf()`), with the same topic on the `room:mention` card. The topic was on the *model*-facing
+> line only, so a human reading a transcript could not tell which topic a message belonged to — in
+> a swarm running five topics, every card looked alike. The topic is capped at 24 chars so a long
+> topic cannot push the author and the age off the (width-truncated) header line.
+
 Evidence base: `findings/F15..F19` (round 3) + `REPORT-v2-hybrid.md` (round 2) + `REPORT.md` (round 1)
 + `review4/` lens reports D1–D8 (round 4).
 Every non-obvious claim carries a source tag: `[F15]`…`[F19]`, `[R2]`, `[F0]`, `[F1]`…, `[D5]`, `[D6]`,
