@@ -73,7 +73,7 @@ Rules that are not optional:
 
 One tool, `room`, dispatched on `op`. All ops return a `content` line plus `details` with `ok`.
 
-This build ships the full **eleven ops**: `join`, `read`, `post`, `claim`, `release`, `board`,
+This build ships the full **twelve ops**: `join`, `read`, `post`, `claim`, `release`, `board`,
 `topics`, `mute`, `unmute`, `tree`, `zoom`, `recall` — plus all three wait tools.
 
 | op | use when | key args |
