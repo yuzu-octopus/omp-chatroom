@@ -199,7 +199,11 @@ export function registerRoomCommand(pi: ExtensionAPI): void {
 
         case "join": {
           // §4.1 join idempotency — a second join is a no-op: no second member record.
-          if (!store.cursors.has(agentId)) {
+          // The membership check must be on MEMBERS, not on the cursor: the hook's
+          // `initCursor` runs for every agent at turn start, so a cursor-keyed check never
+          // fires and the agent never gets a `member{join}` record — it stays out of the
+          // board roster and out of the log. The tool path checks membership (tools/room.ts).
+          if (!store.members.has(agentId)) {
             store.append({ kind: "member", from: agentId, action: "join" });
             initCursor(store, agentId);
           }

@@ -180,3 +180,24 @@ test("/room claim notifies a waiter on the resource (M-8 T1)", async () => {
     AgentRegistry.global().unregister("Waiter");
   }
 });
+
+test("/room join records membership even when the agent already has a cursor", async () => {
+  const notified: string[] = [];
+  const handler = captureHandler(notified);
+  const root = tempRoot();
+  const store = roomStoreForCwd(root);
+  const ctx = headlessCtx(root, notified);
+  // The hook's initCursor runs for EVERY agent at turn start, so the cursor map already
+  // contains the agent. A cursor-keyed join check therefore never fires and the agent never
+  // gets a member{join} record — it stays out of the board roster and out of the log.
+  store.cursors.set("Main", 0);
+  expect(store.members.has("Main")).toBe(false);
+
+  await handler("join", ctx);
+
+  expect(store.records.filter((r) => r.kind === "member" && r.from === "Main")).toHaveLength(1);
+  expect(store.members.has("Main")).toBe(true);
+  // A second join is still a no-op: no second member record.
+  await handler("join", ctx);
+  expect(store.records.filter((r) => r.kind === "member" && r.from === "Main")).toHaveLength(1);
+});
