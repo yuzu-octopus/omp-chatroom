@@ -110,6 +110,25 @@ reported against a **paired noise floor of roughly [−3, +18] pp**, with a **�
 effect. In practice that means the plugin must be able to compute a **coordination-active subset**
 (the records where coordination actually happened) — which R5 is what makes possible.
 
+### The adversarial review round
+
+A reviewer read the last six commits (which turned out to be ~45) adversarially and returned seven
+findings. All seven are fixed; each fix is mutation-checked (the test fails without it).
+
+| # | Finding | Severity | Fix |
+|---|---|---|---|
+| 1 | The T1 window admits the OLDEST pending records, but a delivery pass only ever tried to deliver the CURRENT batch's — so a recipient whose backlog exceeded the window never had its own record admitted, its cursor never moved, and the overflow hint was computed and thrown away. The push channel was dead, silently. | P1 | The window is computed once per target and its summary line is delivered, even when nothing was admitted — exactly the starved case. The floor is unchanged: the owed records stay readable. `966de15` |
+| 2 | `sendBounded` mapped every resolution to "delivered", but the host resolves `false` when its preflight declines to start a turn. A declined T0 was marked given and pushed below the cursor: a mention lost for good. | P2 | The send outcome has three states — accepted, uncertain (the bound expired), failed. A declined send is a failure (the record stays owed); an uncertain one is remembered as given but does not advance the cursor. `966de15` |
+| 3 | The compactor's merge floor was computed from the INPUT SUMMARIES — the thing that may be degenerate — and a summary under the floor was rejected SILENTLY, so the same answer came back five times and the node was never built (leaving everything above it unbuildable). | P2 | The floor is a fraction of the block's RAW size, capped below the ruler's length; a rejection now tells the model what it produced and what the floor is. `137570c` |
+| 4 | The migration copied the tree cache (dense positions into the legacy's array ≠ the target's replayed array) and overwrote the target's config. | P3 | The tree is not copied (a cold cache costs one rebuild, a wrong one costs the truth); the target's config wins and is never clobbered. `49cece8` |
+| 5 | The legacy lock was released BEFORE the removal, so another process could append to the legacy room in that window and have its records deleted. | P3 | The removal happens while the lock is still held. `ca0d6dd` |
+| 6 | The delivered-T0 registry was never forgotten (a `globalThis` key per project, for the life of the process), and the sweep's notice bypassed it — so a T0 could interrupt twice. | P3 | The registry is forgotten with the room; the sweep checks it first. `ca0d6dd` |
+| 7 | The sweep's notice could jump the cursor past an uncarried gap (the owed floor excludes gaps, but the sweep is not a delivery pass, so nothing carries them). | P3 | The floor takes a flag, and the sweep counts the gaps. `ca0d6dd` |
+
+The review also reported the classes it checked and found clean: escaping, I1 (no `await` in the
+mutation path), I4 (no raw timers), I6 (no unhandled rejections), the per-recipient concurrency, the
+migration's atomicity and containment, and the panel's selection mapping.
+
 ### Live checks the human still owns
 
 - **The card header** (plan 019): post into a named topic and confirm the card reads
