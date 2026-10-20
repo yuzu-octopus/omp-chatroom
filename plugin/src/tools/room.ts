@@ -83,6 +83,8 @@ export interface RoomParams {
   performative?: Performative;
   idemKey?: string;
   key?: string;
+  /** R3 — the resources that must be free before this claim can start. */
+  dependsOn?: string[];
   ttl?: number;
   since?: number;
   limit?: number;
@@ -654,6 +656,13 @@ export function registerRoomTool(pi: ExtensionAPI): void {
       .describe(
         'Second half of a claim resource, e.g. "src/auth". The full resource is "<topic>/<key>".',
       ),
+    dependsOn: z
+      .array(z.string())
+      .optional()
+      .describe(
+        'Resources that must be free before this claim can start, as "<topic>/<key>". The claim ' +
+          "is refused while one of them is held, and the refusal names the holder.",
+      ),
     ttl: z
       .number()
       .optional()
@@ -851,8 +860,20 @@ export function registerRoomTool(pi: ExtensionAPI): void {
             const viewer = viewerFor(store, agentId);
             const ttlMs = clamp(p.ttl ?? config.claimTtlMs, CLAIM_TTL_MIN_MS, CLAIM_TTL_MAX_MS);
             const before = store.seq;
-            const result = grant(store, resource, agentId, ttlMs);
+            const result = grant(store, resource, agentId, ttlMs, p.dependsOn);
             if (!result.ok) {
+              // R3 — the claim depends on a resource that is still held. Say WHO holds it, so the
+              // agent can wait for it (wait_for_claim) instead of duplicating the work.
+              if ("blockedBy" in result && result.blockedBy.length > 0) {
+                const blockers = result.blockedBy
+                  .map((b) => `${b.resource} (held by ${b.holder})`)
+                  .join(", ");
+                return fail(
+                  `claim ${resource} blocked — depends on ${blockers}`,
+                  result.holder,
+                  result.expiresAt,
+                );
+              }
               // The holder's own lease: RENEW it rather than reporting "denied — held by <me>".
               // A TTL is a guess about how long the work takes; renewing is how a slow-but-alive
               // agent keeps a live lease.

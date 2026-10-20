@@ -28,6 +28,8 @@ export type RoomRecord =
       from: string;
       resource: string;
       ttlMs: number;
+      /** R3 — the resources that must be free before this one may be claimed. */
+      dependsOn?: string[];
     }
   | {
       v: 1;

@@ -310,6 +310,7 @@ export function validateRecord(value: unknown): RoomRecord | null {
     if (value[field] !== undefined && typeof value[field] !== "string") return null;
   }
   if (value.mention !== undefined && !isStringArray(value.mention)) return null;
+  if (value.dependsOn !== undefined && !isStringArray(value.dependsOn)) return null;
   if (
     kind === "msg" &&
     value.performative !== undefined &&

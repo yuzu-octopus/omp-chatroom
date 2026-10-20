@@ -12,7 +12,9 @@ export interface ClaimState {
 
 export type GrantResult =
   | { ok: true; claim: ClaimState }
-  | { ok: false; holder: string; expiresAt: number };
+  | { ok: false; holder: string; expiresAt: number }
+  /** R3 — the claim was refused because a dependency is still held. */
+  | { ok: false; holder: string; expiresAt: number; blockedBy: { resource: string; holder: string }[] };
 
 // §3.2 defines the release-reason union inside RoomRecord; alias it rather than redeclare.
 export type ReleaseReason = Extract<RoomRecord, { kind: "release" }>["reason"];
@@ -35,12 +37,41 @@ export function grant(
   resource: string,
   holder: string,
   ttlMs: number,
+  dependsOn?: readonly string[],
 ): GrantResult {
   const existing = store.claims.get(resource);
   if (existing !== undefined) {
     return { ok: false, holder: existing.holder, expiresAt: existing.acquiredAt + existing.ttlMs };
   }
-  store.append({ kind: "claim", from: holder, resource, ttlMs });
+  // R3 — dependency ordering. A claim may declare the resources that must be free before it can
+  // start; if one of them is still held, the claim is REFUSED and the refusal names the blocker.
+  // This is the shape Claude Code's shipped agent teams use ("a pending task with unresolved
+  // dependencies cannot be claimed until those dependencies are completed") and Smith's contract
+  // net ("A subcontract will not be announced... until its predecessors have been completed").
+  //
+  // A dependency that nobody holds is satisfied: the ordering is about the CLAIM order, not about
+  // a resource having to exist first.
+  if (dependsOn !== undefined && dependsOn.length > 0) {
+    const blockedBy = dependsOn
+      .filter((dep) => dep !== resource)
+      .map((dep) => ({ resource: dep, holder: store.claims.get(dep)?.holder }))
+      .filter((dep): dep is { resource: string; holder: string } => dep.holder !== undefined);
+    if (blockedBy.length > 0) {
+      return {
+        ok: false,
+        holder: blockedBy[0]!.holder,
+        expiresAt: 0,
+        blockedBy,
+      };
+    }
+  }
+  store.append({
+    kind: "claim",
+    from: holder,
+    resource,
+    ttlMs,
+    ...(dependsOn !== undefined && dependsOn.length > 0 ? { dependsOn: [...dependsOn] } : {}),
+  });
   return { ok: true, claim: store.claims.get(resource)! };
 }
 

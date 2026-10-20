@@ -108,6 +108,35 @@ test("renew: a non-holder cannot renew somebody else's lease", () => {
   expect(s.seq).toBe(seqBefore);
 });
 
+test("R3: a claim whose dependency is still held is refused, and the refusal names the blocker", async () => {
+  const { store, ctx } = newTestStore();
+
+  // B holds the schema; A wants the parser, which depends on it.
+  expect(grant(store, "build/schema", "AgentB", 60_000).ok).toBe(true);
+  const blocked = await invokeRoom(ctx, {
+    op: "claim",
+    topic: "build",
+    key: "parser",
+    dependsOn: ["build/schema"],
+  });
+  expect(blocked.details).toMatchObject({ ok: false });
+  const text = JSON.stringify(blocked.content);
+  expect(text).toContain("build/schema");
+  expect(text).toContain("AgentB");
+  // and nothing was granted
+  expect(store.claims.get("build/parser")).toBeUndefined();
+
+  // once the dependency is released, the claim succeeds
+  expect(release(store, "build/schema", "AgentB", "released")).toBe(true);
+  const granted = await invokeRoom(ctx, {
+    op: "claim",
+    topic: "build",
+    key: "parser",
+    dependsOn: ["build/schema"],
+  });
+  expect(granted.details).toMatchObject({ ok: true, op: "claim", holder: "AgentA" });
+});
+
 test("R7: a retried post with the same key returns the first one instead of posting twice", async () => {
   const { store, ctx } = newTestStore();
 
