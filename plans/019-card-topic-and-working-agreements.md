@@ -93,13 +93,25 @@ exits 0 again.
 The `room` tool has **twelve** ops, not eleven. The source comment, the notes and the READMEs said
 eleven — including `plugin/skills/omp-agent-chatroom/SKILL.md`, the file the **model** reads.
 
+### 7. The speech act reached nobody — DONE (`f94e596`)
+
+`post`'s `performative` parameter is described in the tool schema as "carried through to cards". It
+was not: the field was validated, stored, and read by **nobody** — not the cards, not the
+model-facing line. The model was told the knob meant something and it meant nothing.
+
+The card header now shows the act (`inform | request | propose | accept | reject | query |
+failure`), so the promise is true. The **model-facing** line still omits it: whether the model
+needs the act is a question for the research round, and a delivery-format change is not something
+to slip in unasked. Pinned by "the speech act reaches the card, as the tool schema promises"
+(fails without the fix).
+
 ## Verification
 
 ```sh
 cd plugin
 bunx --bun @biomejs/biome check src tests    # exit 0 over 51 files
 bun check                                     # 0 type errors in 50 files
-bun test tests/                               # 302 pass / 0 fail, 15 files
+bun test tests/                               # 303 pass / 0 fail, 15 files
 ```
 
 ## Not done here
