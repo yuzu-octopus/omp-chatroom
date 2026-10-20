@@ -32,6 +32,7 @@ import {
 } from "../src/attention/governor";
 import { classify, type Tier } from "../src/attention/tiers";
 import { enqueueWaiter } from "../src/store/claims";
+import { deliveredT0s } from "../src/store/cursors";
 import {
   type MemberState,
   type RoomStore,
@@ -39,7 +40,7 @@ import {
   roomStoreFor,
 } from "../src/store/room-store";
 import type { RoomRecord } from "../src/store/schema";
-import { type RoomToolResult, registerRoomTool } from "../src/tools/room";
+import { notifyRecipients, type RoomToolResult, registerRoomTool } from "../src/tools/room";
 
 // --- fixtures -------------------------------------------------------------
 
@@ -476,14 +477,20 @@ function fakeCtx(root: string, id: string): ExtensionContext {
   } as unknown as ExtensionContext;
 }
 
-function registerSession(id: string, calls: Send[]): void {
+/**
+ * `result` is what the HOST answers: `true` (the turn started), `false` (the host's preflight
+ * declined - it resolves false, it does not reject), or a promise that never settles (the bound
+ * expires).
+ */
+function registerSession(id: string, calls: Send[], result: boolean | "never" = true): void {
   const session = {
     async sendCustomMessage(payload: unknown, options?: unknown): Promise<boolean> {
       calls.push({
         payload: payload as Record<string, unknown>,
         options: options as Record<string, unknown>,
       });
-      return true;
+      if (result === "never") return new Promise<boolean>(() => {});
+      return result;
     },
   };
   AgentRegistry.global().register({
@@ -541,6 +548,83 @@ test("R5: deliveries are counted per tier, and a T0 is logged", async () => {
     expect(record.tier).toBe("T0");
     expect(record.deliveredSeq).toBe(2);
   }
+});
+
+test("a send the host DECLINED is not a delivery: the record stays owed", async () => {
+  // The host resolves `false` when its preflight declines to start a turn - a resolution, not a
+  // rejection. Treating it as a delivery marks the record delivered AND pushes it below the
+  // cursor, so the mention is gone from the recipient's view for good.
+  const root = tempRoot();
+  const ctx = fakeCtx(root, "Sender");
+  const store = roomStoreFor(ctx);
+  const { pi } = fakePi();
+  const calls: Send[] = [];
+  registerSession("Decliner", calls, false);
+
+  const record = msg(1, { from: "Other", topic: "build", mention: ["Decliner"] });
+  await expect(deliver(pi, ctx, "Decliner", record, "T0")).rejects.toThrow();
+
+  // The cursor did NOT move: the record is still owed, so `room{op:"read"}` can still return it.
+  expect(store.cursors.get("Decliner")).toBeUndefined();
+  // and the T0 was not marked as given, so the next pass will try again
+  expect(deliveredT0s(store.root, "Decliner").has(1)).toBe(false);
+});
+
+test("a send whose outcome is UNKNOWN does not advance the cursor either", async () => {
+  // The bound expired before the host answered: the send was issued, but it may still be declined.
+  // The cursor must not claim it was read.
+  const root = tempRoot();
+  const ctx = fakeCtx(root, "Sender");
+  const store = roomStoreFor(ctx);
+  const { pi } = fakePi();
+  const calls: Send[] = [];
+  registerSession("Slow", calls, "never");
+
+  const record = msg(1, { from: "Other", topic: "build", mention: ["Slow"] });
+  await deliver(pi, ctx, "Slow", record, "T0");
+
+  expect(store.cursors.get("Slow")).toBeUndefined();
+  // the T0 IS remembered as given, so the next pass does not storm the target with duplicates
+  expect(deliveredT0s(store.root, "Slow").has(1)).toBe(true);
+});
+
+test("a recipient whose T1 backlog exceeds the window is TOLD to read, not left deaf", async () => {
+  // The window admits the OLDEST pending T1s, so a recipient whose backlog exceeds it never has
+  // its own newer record admitted — and its cursor never moves, so the backlog grows forever.
+  // The data stays readable, but the push channel is dead unless the recipient is told.
+  const root = tempRoot();
+  const ctx = fakeCtx(root, "Sender");
+  const store = roomStoreFor(ctx);
+  const { pi } = fakePi();
+
+  // The recipient is a ROOM MEMBER whose session is absent (it was not running), so the pass
+  // skips it without advancing its cursor: the backlog builds up above the cursor.
+  store.append({ kind: "member", from: "Recipient", action: "join" });
+  store.members.get("Recipient")!.topics.add("build");
+
+  // More posts than the window holds (maxT1PerTurn is 10).
+  for (let i = 0; i < 13; i++) {
+    const record = store.append({
+      kind: "msg",
+      from: "Sender",
+      topic: "build",
+      body: `message ${i}`,
+    });
+    await notifyRecipients(pi, ctx, store, [record], "Sender");
+  }
+  expect(store.cursors.get("Recipient") ?? 0).toBe(0);
+
+  // The recipient comes back. Its backlog is now larger than the window, so the window admits
+  // the OLDEST records — which are not this batch's — and refuses the new one.
+  const recipientCalls: Send[] = [];
+  registerSession("Recipient", recipientCalls);
+  const fresh = store.append({ kind: "msg", from: "Sender", topic: "build", body: "the newest" });
+  await notifyRecipients(pi, ctx, store, [fresh], "Sender");
+
+  // The hint must reach it: how many records the window refused, and how to read them. Without
+  // the hint the recipient is deaf and never learns why.
+  const texts = recipientCalls.map((c) => JSON.stringify(c.payload));
+  expect(texts.some((t) => t.includes("read with"))).toBe(true);
 });
 
 test("deliver: T0 steers, T1 is an aside, T2 only bumps the cursor", async () => {
@@ -1291,8 +1375,9 @@ test("a T0 is not re-delivered while an older refused record pins the cursor", a
   }
   // A mention for B: it is T0, so it is delivered — but the cursor cannot advance past the
   // refused records, so the T0 would be selected again by the next pass. It must be sent ONCE.
+  // (The T1 overflow hint is a separate board-delta notice, not a delivery of the record.)
   await h.execute({ op: "post", topic: "build", body: "over to you", mention: [b] });
-  const first = bCalls.length;
+  const first = bCalls.filter((c) => String(c.payload.content).includes("over to you")).length;
   expect(first).toBe(1);
 
   // A second pass must not re-send it: a T0 is a wake+steer, and re-sending it is an interrupt

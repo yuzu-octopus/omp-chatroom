@@ -24,8 +24,18 @@ import type { Tier } from "./tiers";
  */
 export const SEND_ACCEPT_BOUND_MS = 250;
 
-/** The outcome of a bounded send: accepted (or the bound expired) vs a transport failure. */
-export type SendOutcome = { ok: true } | { ok: false; error: unknown };
+/**
+ * The outcome of a bounded send.
+ *
+ * Three states, not two, and the third one matters:
+ * - **accepted** — the host took it (`sendCustomMessage` resolved truthy or void).
+ * - **uncertain** — the bound expired before the host answered. The send WAS issued, but its fate
+ *   is unknown: the host may still queue it, or its preflight may decline it.
+ * - **failed** — the send was rejected, or the host DECLINED it. The host resolves `false` for
+ *   outcomes that provably start no turn (a streaming queue, an idle plan-mode fold, a deferred
+ *   ACP turn) — a *resolution*, not a rejection, and it must not be mistaken for a delivery.
+ */
+export type SendOutcome = { ok: true; accepted: boolean } | { ok: false; error: unknown };
 
 /**
  * Await a send with a deadline, so a delivery pass never waits for the target's TURN.
@@ -40,7 +50,12 @@ export async function sendBounded(
   send: Promise<unknown>,
 ): Promise<SendOutcome> {
   const settled: Promise<SendOutcome> = send.then(
-    () => ({ ok: true }),
+    (value: unknown) =>
+      // `false` is the host's "no turn started" answer. Treating it as a delivery would mark a
+      // record delivered that nobody ever received.
+      value === false
+        ? { ok: false, error: new Error("the host declined the send") }
+        : { ok: true, accepted: true },
     (error: unknown) => ({ ok: false, error }),
   );
   // A ctx without the host's timer API has no deadline — and a raw timer is forbidden (I4).
@@ -52,14 +67,16 @@ export async function sendBounded(
   const schedule = timers.setTimeout?.bind(ctx);
   if (schedule === undefined) {
     void settled;
-    return { ok: true };
+    // No timer, so the send is not even awaited: its fate is unknown.
+    return { ok: true, accepted: false };
   }
   let timer: Timer | undefined;
   try {
     return await Promise.race([
       settled,
       new Promise<SendOutcome>((resolve) => {
-        timer = schedule(() => resolve({ ok: true }), SEND_ACCEPT_BOUND_MS);
+        // The bound expired: the send was issued, but the host has not answered. UNCERTAIN.
+        timer = schedule(() => resolve({ ok: true, accepted: false }), SEND_ACCEPT_BOUND_MS);
       }),
     ]);
   } finally {
@@ -159,11 +176,20 @@ export async function deliver(
   // The send resolves when the TARGET'S TURN ends — so it is bounded (see `sendBounded`). A
   // rejection inside the bound is a transport failure: it propagates to the delivery pass, which
   // reports it as `deliveryError`, and the cursor is NOT bumped (the record is still owed).
+  // The host's `false` (no turn started) lands here too, and it is NOT a delivery either.
   const outcome = await sendBounded(
     ctx,
     Promise.resolve(ref!.session!.sendCustomMessage(payload, options)),
   );
   if (!outcome.ok) throw outcome.error;
+  if (!outcome.accepted) {
+    // UNCERTAIN: the send was issued, but the host never answered inside the bound. It may still
+    // queue the message, or its preflight may decline it. So: remember it as GIVEN (the next pass
+    // must not storm the target with duplicates) but do NOT advance the cursor — the record stays
+    // readable, because a send that was declined must not fall below the cursor and be lost.
+    if (tier === "T0") markDeliveredT0(store.root, target, record.seq);
+    return;
+  }
   recordDelivery(store, target, record, tier);
   bumpCursor(store, target, Math.min(record.seq, cap));
 }

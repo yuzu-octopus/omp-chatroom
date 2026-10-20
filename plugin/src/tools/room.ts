@@ -330,33 +330,6 @@ function recipients(store: RoomStore, actorId: string): string[] {
   return [...ids];
 }
 
-/**
- * §5.2 K/B injection cap: the T1 records pending above the viewer's cursor are admitted oldest-first
- * up to K and B; a record past the cap is left to the digest instead of pushed. T0/T2 are not
- * bounded here (T0 is never dropped; T2 never injects).
- */
-function t1Admitted(
-  store: RoomStore,
-  viewer: MemberState,
-  record: RoomRecord,
-  config: RoomConfig,
-): boolean {
-  const cursor = store.cursors.get(viewer.agentId) ?? 0;
-  const pending = store.records.filter(
-    (r) =>
-      r.seq > cursor &&
-      classify(r, viewer) === "T1" &&
-      // A `gap` is a system notice (the retention prune said "records were dropped"), not a
-      // room message: it is exempt from K/B like T0, and it has its own delivery path in
-      // `deliverToTarget` — so it must not eat a slot of the per-turn T1 budget either.
-      r.kind !== "gap" &&
-      !isMuted(store, viewer, r),
-  );
-  return selectT1(store, viewer, pending, { caps: config }).injected.some(
-    (r) => r.seq === record.seq,
-  );
-}
-
 /** A board-delta card, the same shell `deliver` uses, for the T0 batch and the T2 digest. */
 async function notice(
   pi: ExtensionAPI,
@@ -493,10 +466,23 @@ async function deliverToTarget(
       pending.filter((r) => classify(r, viewer) === "T0" && !alreadyDelivered.has(r.seq)),
     );
     const admitted = [...t0.injected];
+    // The T1 window is computed ONCE for this target: the admitted set cannot change within the
+    // pass (the per-turn budget is not spent here), and the selection's SUMMARY LINE is what a
+    // starved recipient needs — it says how many records the window refused and how to read them.
+    //
+    // Without it the push channel starves silently: the window admits the OLDEST pending T1s, so
+    // a recipient whose backlog exceeds the window never has its own (newer) record admitted, the
+    // cursor never moves, and the backlog grows — forever. The data stays readable, but the push
+    // is dead and the recipient was never told. The hint is the difference between a starved agent
+    // and a deaf one.
+    const t1Pending = pending.filter(
+      (r) => classify(r, viewer) === "T1" && r.kind !== "gap" && !isMuted(store, viewer, r),
+    );
+    const t1 = selectT1(store, viewer, t1Pending, { caps: config });
     for (const record of records) {
       if (isMuted(store, viewer, record)) continue;
       if (classify(record, viewer) !== "T1") continue;
-      if (!coalesced && t1Admitted(store, viewer, record, config)) admitted.push(record);
+      if (!coalesced && t1.injected.some((r) => r.seq === record.seq)) admitted.push(record);
     }
     // A `gap` record is a promised notify (T1 for every viewer) that the retention prune
     // appends OUTSIDE any op's batch — so it is never in `records`, and no delivery pass would
@@ -548,6 +534,12 @@ async function deliverToTarget(
       await notice(pi, ctx, target, t0.summaryLine, "steer");
     } else if (extra.length > 0) {
       await notice(pi, ctx, target, extra.join("\n"), "aside");
+    }
+    // The T1 overflow hint (the window refused records this recipient still owes). It goes out
+    // even when nothing was admitted — that is exactly the case where the recipient would
+    // otherwise never learn that it is behind.
+    if (t1.summaryLine !== null) {
+      await notice(pi, ctx, target, t1.summaryLine, "aside");
     }
     // A red (coalesced) producer's records are left pending for the digest: the log is already
     // durable and the cursor must NOT advance, or `coalescePending` could never see them.
