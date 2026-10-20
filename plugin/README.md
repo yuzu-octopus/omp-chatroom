@@ -116,8 +116,9 @@ sweep job expires stale claims and promotes the oldest waiter.
 
 Failures are normal results, not exceptions: `details:{ ok:false, error }` with a `content` line.
 `claim` losing a race returns the holder and its expiry; `release` by a non-holder returns
-`not holder`. A `recall` pattern longer than 200 chars, or one that burns its 1 s scan deadline,
-returns `{ ok:false, error }` rather than hanging the process.
+`not holder`. A `recall` pattern longer than 200 chars, or one with a quantifier over a quantified
+group (`(a+)+` — exponential on a non-matching input), returns `{ ok:false, error }` rather than
+hanging the process.
 
 ### Delivery — posting actually notifies
 
@@ -125,6 +126,12 @@ A `post`/`claim`/`release` does not merely append. After the synchronous append,
 pipeline runs per recipient: `classify` → mute check → rate limit → `deliver`. Delivery happens
 **after** the append and is wrapped in try/catch, so a transport failure cannot corrupt the log or
 throw out of `execute`; it surfaces as `deliveryError` on `details`.
+
+A delivery never waits for the recipient's whole turn. The host's `sendCustomMessage` resolves when
+the *target's* turn ends, so the send is bounded (250 ms): a rejection inside the bound still
+surfaces as `deliveryError`, and a recipient that is busy does not hold up the others. Without that
+bound, two agents talking to each other would deadlock — A's post waits for B's turn, B's turn
+posts and waits for A's post.
 
 | Tier | Kinds | Delivery | Wakes? |
 |---|---|---|---|
@@ -157,7 +164,8 @@ Two footguns closed deliberately:
 
 The manifest deliberately carries no `settings` block: `PluginManifest.settings` is CLI-facing
 validation only, and `ExtensionAPI` has no `settings` property, so a manifest setting is unreachable
-from extension code. The plugin owns a real config file at `<project cwd>/.omp-room/room/config.json`,
+from extension code. The plugin owns a real config file inside the room root
+(`<room root>/room/config.json`, and the room root is in the global session store — see below),
 surfaced via `/room config`.
 
 Load order, highest first: **registered flags → config file → built-in defaults**. Unknown keys are
@@ -166,27 +174,36 @@ ignored, wrong-typed values fall back to defaults.
 | Flag | Type | Default | Effect |
 |---|---|---|---|
 | `--room-panel-key` | string | `""` | keyboard shortcut that opens the panel; empty disables |
-| `--room-cold-tree` | boolean | `true` | enable the cold summary tree and compactor |
 
 `--room-panel-key` is best-effort: the host's `setupKeyHandlers()` runs only at editor build, so a
 late-loaded plugin has no shortcut until the next rebuild. The slash command is the primary route.
 
 ## The room is one per project
 
-The room root is the **project directory** (`ctx.cwd + "/.omp-room"`), not the `local://` root. That
-is deliberate: `localProtocolOptions` is per-session — a subagent's artifacts dir is its own session
+The room is keyed by the **project directory** (`ctx.cwd`), not the `local://` root. That is
+deliberate: `localProtocolOptions` is per-session — a subagent's artifacts dir is its own session
 file minus `.jsonl` — so keying the room there gave every agent a private room and the claim board
 coordinated nobody. `ctx.cwd` is inherited by subagents, so main and children share one room.
 
-Only one omp process per project may write it. Atomicity rests on single-threaded JS and synchronous
-`O_APPEND` + `fsync` writes; a second process writing the same file would tear lines. There is no
-cross-process lock. Add `.omp-room/` to `.gitignore` — the log, tree and view are working data.
+The room **lives in the global omp session store**, not in the project tree:
+`<sessions>/rooms/<16 hex chars of the project path>/room/`, where `<sessions>` is
+`getSessionsDir()` — `~/.omp/agent/sessions`, or `$XDG_DATA_HOME/omp/sessions` under XDG. The room
+data is working data, so it does not belong in a checkout; the project directory stays clean. Two
+exceptions: a project under the system temp dir stays project-local (a test or a throwaway worktree
+must never write into the user's real room store), and a legacy project-local `.omp-room/` is copied
+into the global store once, on first open, keeping its room id.
+
+Only one omp process per project may write it, and that is now enforced rather than assumed: the
+room takes a lockfile (`<root>/room/.lock`, the owner's pid, stale pids reaped) and a second omp
+process on the same project fails loudly with `room file locked by pid N`. Two writers were measured
+minting 10 duplicate seqs over 40 records without ever seeing each other's records. A swarm of
+subagents is unaffected — they live in the same process and share one room and one lock.
 
 ## Development
 
 ```sh
 cd plugin
-bun test tests/                                 # 205 tests, 11 files
+bun test tests/                                 # 274 tests, 15 files
 bunx --bun tsc --noEmit -p tsconfig.json        # typecheck only
 bunx --bun @biomejs/biome check src tests       # lint + format check
 bunx --bun @biomejs/biome check src tests --write   # apply fixes
