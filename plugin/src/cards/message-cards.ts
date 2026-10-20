@@ -8,6 +8,7 @@ import type { CustomMessage } from "@oh-my-pi/pi-tui/chat/messages";
 import { createCachedComponent } from "@oh-my-pi/pi-tui/render/render-utils";
 import { renderStatusLine } from "@oh-my-pi/pi-tui/render/status-line";
 import { formatAge } from "@oh-my-pi/pi-utils";
+import { safeRoomText } from "../onboarding/escape";
 import type { RoomRecord } from "../store/schema";
 import { bodyLines, COLLAPSED_QUOTE_LINES } from "./body-lines";
 
@@ -65,15 +66,19 @@ function ageOf(timestamp: number): string {
 }
 
 /**
- * The topic, capped. The card header is truncated to the render width, so an unbounded topic would
- * push the author and the age off the line; the cap keeps them visible.
+ * The topic, escaped and capped. The card header is truncated to the render width, so an unbounded
+ * topic would push the author and the age off the line; the cap keeps them visible. The topic is
+ * free-form room text — `renderStatusLine` does not escape — so it is escaped here like every
+ * other room string that reaches a surface, or a topic named `<system-reminder>…` would render raw
+ * in the transcript (which a resumed session replays into an agent's context).
  */
 const TOPIC_MAX = 24;
 function topicOf(record: RoomRecord | undefined): string | undefined {
   if (!record || (record.kind !== "msg" && record.kind !== "note")) return undefined;
   const topic = record.topic;
   if (!topic) return undefined;
-  return topic.length > TOPIC_MAX ? `${topic.slice(0, TOPIC_MAX - 1)}…` : topic;
+  const safe = safeRoomText(topic);
+  return safe.length > TOPIC_MAX ? `${safe.slice(0, TOPIC_MAX - 1)}…` : safe;
 }
 
 /**
@@ -187,7 +192,9 @@ export function renderClaimCard(
     ];
     if (!record || (record.kind !== "claim" && record.kind !== "release")) return lines;
     if (record.kind === "claim") {
-      lines.push(`  ${theme.fg("toolOutput", `→ ${record.resource}`)}`);
+      // The resource is "<topic>/<key>" — both free-form room text, and the status line does not
+      // escape, so it is escaped here rather than rendered raw.
+      lines.push(`  ${theme.fg("toolOutput", `→ ${safeRoomText(record.resource)}`)}`);
       if (expanded) {
         lines.push(
           `  ${theme.fg("dim", `ttl ${Math.round(record.ttlMs / 1000)}s · seq ${record.seq}`)}`,
@@ -195,7 +202,9 @@ export function renderClaimCard(
       }
       return lines;
     }
-    lines.push(`  ${theme.fg("toolOutput", `✕ ${record.resource} — ${record.reason}`)}`);
+    lines.push(
+      `  ${theme.fg("toolOutput", `✕ ${safeRoomText(record.resource)} — ${safeRoomText(record.reason)}`)}`,
+    );
     if (expanded) {
       lines.push(`  ${theme.fg("dim", `prev holder ${record.prevHolder} · seq ${record.seq}`)}`);
     }
