@@ -229,6 +229,7 @@ A raw pty (no tmux on this machine), a pyte virtual screen to read the diff-rend
 | `r` (board focus) | releases exactly the SELECTED claim — one `release` record in the room log for `t/k2`, `t/k1` untouched |
 | `r` (chat focus) | releases NOTHING — the board is unchanged and no record is appended (this was the bug the first pty run found) |
 | the chat pane | the selection glyph sits on the newest row |
+| an ended claim | it stays on the board, dimmed at the bottom (`t/k1 … — rel…` under the live `t/k2 … 818s held`); `r` on it releases nothing — the room log's release count is 1 before the keypress and 1 after, while the same key on the HELD row does release |
 
 No plugin error, warning or stack trace in the run's stderr, raw pty output, `~/.omp/logs/` or the
 plugin's own trace log.

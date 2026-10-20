@@ -189,13 +189,14 @@ Test-only seams: `__roomTest.store.reset()` (`src/index.ts`), `__compactTest`
 A gap here hid a real defect once (see the K1 block in `tests/room-tool.test.ts`).
 
 **Nothing is left unverified.** Every surface has been exercised by a real model in a real
-terminal or a real session — the panel and its keys, the inline cards, the claim board, the mention
-delivery, all three wait tools' `event` outcomes, the legacy migration, the cold-tree summaries
-(faithful at the leaves, and a prompt injection inside a room message was summarised as DATA, never
-obeyed), and the unprompted discovery rate (MEASURED at 75–86 %). The one thing that cannot be
-verified is live coordination across two omp *processes*: the room's single-writer lock refuses the
-second writer by design, so that boundary is documented rather than tested. See "Live verification"
-below.
+terminal or a real session — the panel and its keys (including that an ended claim stays on the
+board, dimmed, and that `r` releases exactly the selected claim and nothing in chat focus), the
+inline cards, the claim board, the mention delivery, all three wait tools' `event` outcomes, the
+legacy migration, the cold-tree summaries (faithful at the leaves, and a prompt injection inside a
+room message was summarised as DATA, never obeyed), and the unprompted discovery rate (MEASURED at
+75–86 %). The one thing that cannot be verified is live coordination across two omp *processes*: the
+room's single-writer lock refuses the second writer by design, so that boundary is documented
+rather than tested. See "Live verification" below.
 
 **Do not re-litigate these settled findings** — both are recorded with evidence:
 
