@@ -104,16 +104,81 @@ run had no access to the redirected-away credential store.
 which produced `Failed to load extension ...: NEGATIVE-CONTROL deliberate extension failure` — so
 the clean runs' silence is real signal, not a harness that cannot fail.
 
+### Unprompted discovery — MEASURED (16 trials)
+
+The earlier single-trial "NOT-DISCOVERED" reading was an artefact of one trial. Measured with the
+repo's own probe (`plugin/scripts/discovery-probe.sh`, prompt frozen byte-identical), one fresh
+project dir and one fresh room per trial:
+
+| rule | DISCOVERED | rate |
+|---|---|---|
+| the probe's own verdict, ERROR trials excluded | 12 / 14 | **85.7 %** |
+| the probe's own verdict, ERROR trials counted as misses | 12 / 16 | **75.0 %** |
+
+All three probe inputs reached the model in **16/16** trials — the digest (as a `room:digest`
+custom message), the routing rule (in the system message) and the room tool (description + schema
+in the tool list) — so a miss is a behaviour, not a delivery failure. The control (the room plugin
+not loaded, `--no-extensions`) produced **zero** room calls, so the rate is not vacuous.
+
+Two findings changed the instrument and the product's reading:
+
+- The probe scored a model that appended with `printf >> shared.txt` as HARNESS-ERROR ("the model
+  did nothing") because it only recognised `edit`/`write` as mutations. Both affected trials had
+  actually done the whole task — they were misses. The probe now counts a bash redirect into the
+  target file as a mutation.
+- Every miss had the same shape: the model inspected the file (`read`, then `od -c`/`tail`) and
+  never consulted the room. In the clearest miss it DID join and read the board, saw only itself
+  ("`no other member was editing the file`") and reasoned its way out of claiming. **A solo room
+  cannot simulate "several teammates also edit"** — the digest every model received read
+  `1 live · 0 record(s)` with a roster of only itself. The true rate in a populated room is
+  therefore at least what is measured here.
+
+### Coordination, driven by real models
+
+- **Claim arbitration** — two sessions in one project directory: the first `claim` was granted, the
+  second was refused with `claim build/alpha denied — held by Main`, and one durable log held the
+  `claim`/`release`/`claim` sequence (seq 1–3).
+- **Mention delivery** — a spawned subagent's `post` with `mention:[<parent>]` reached the parent as
+  a real T0 steer: `[T0] room ⟵ LiveCoordination.Ping · topic:build · PING from spawned subagent`.
+- **Release frees the resource** — after the holder released, the next claim was granted (both
+  in-process with distinct agent ids and across processes).
+- **Blocking waits** — `wait_for_message` returned `outcome: "event"` with the matching record
+  when a mention arrived 45 s later; `wait_for_claim` returned `outcome: "event"` with
+  `acquired: true` when a release promoted the waiter. Neither hung.
+
+**The boundary: cross-process coordination is COLD only.** The log, the claim board and the digest
+are shared — a later process replays the log and sees the earlier claims. LIVE coordination (T0
+delivery, wake/steer, wait satisfaction) is **in-process only**: delivery resolves the target
+through the local `AgentRegistry`, and a second live writer on one project directory is refused
+outright (`room file locked by another session`, reproduced deterministically). The plugin's
+coordination domain is one omp process with many agents (main + `task` subagents) — which is
+exactly where the checks above were verified.
+
+### The inline cards, in a real transcript — VERIFIED
+
+Captured from a live TUI (a pty driving `omp`, frames reconstructed from the byte stream):
+
+```
+ ✉ room ⟵ Poster just now
+   ▏ SUBAGENT_MARKER_BBB
+```
+
+and the tool cards: `▦ Room: join`, `▦ Room: post cards-test`, `▦ Room: read cards-test limit 20`.
+The poster does **not** see a message card for its own message (delivery suppresses
+self-authored records) — only the tool card. Note `omp render` shows the RAW custom message, not
+the card: the render CLI builds its session without an `extensionRunner`, so the plugin's
+`registerMessageRenderer` never runs there. It is not a valid oracle for cards.
+
 ### Still unverified — do not claim these
 
-- **The inline cards in a real transcript.** The panel is verified (above); the cards are not. The
-  card renderers are unit-tested; no real transcript has shown one.
-- **A real model choosing to call the room unprompted.** The live runs above drove the tool from a
-  prompt that named it. The discovery probe (`plugin/scripts/discovery-probe.sh`, plan 016) measured
-  **NOT-DISCOVERED on trial 1**: the model edited a file at event 2 without ever calling
-  `room{op:"claim"}`.
 - **Real-model summarisation quality** (the cold-tree summaries).
-- **`wait_for_agent`'s happy `event` path under a real model.** The unit test covers it.
+- **`wait_for_agent`'s happy `event` path under a real model.** `wait_for_message` and
+  `wait_for_claim` were driven to their `outcome: "event"` path by a real model (a spawned
+  subagent's mention satisfied the wait; a release promoted a waiter); `wait_for_agent`'s happy
+  path is still only unit-tested.
+
+Everything else that was on this list is now measured — see "Live verification (2026-10-20)"
+above for the discovery rate, the cards in a real transcript, and the coordination checks.
 
 ## What to run
 

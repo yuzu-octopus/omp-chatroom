@@ -186,10 +186,12 @@ Test-only seams: `__roomTest.store.reset()` (`src/index.ts`), `__compactTest`
 **Assert the model-facing `content` array** for anything the model reads — `details` never reaches it.
 A gap here hid a real defect once (see the K1 block in `tests/room-tool.test.ts`).
 
-**Not covered, so treat as unverified:** cards in a real transcript, a live model choosing to call
-the room, real-model summarisation quality, and `wait_for_agent`'s happy `event` path. (The panel in
-a real terminal, the global room root, the linked-plugin route and the legacy migration were
-verified live — see "Live verification" below.)
+**Not covered, so treat as unverified:** real-model summarisation quality, and `wait_for_agent`'s
+happy `event` path under a real model (`wait_for_message` and `wait_for_claim` were driven to their
+`outcome: "event"` path by real models; `wait_for_agent`'s was not). Everything else was verified
+live — the panel in a real terminal, the cards in a real transcript, the global room root, the
+linked-plugin route, the legacy migration, the coordination checks — and the unprompted discovery
+rate was MEASURED at 75–86 %. See "Live verification" below.
 
 **Do not re-litigate these settled findings** — both are recorded with evidence:
 
@@ -226,6 +228,10 @@ chat|board · 1 running`, `no claims` in the board pane).
 | Legacy migration | a project-local `.omp-room/room/<id>.jsonl` + `config.json` was copied into the global room with the **same room id**, the legacy record preserved as seq 1, and the legacy directory left in place. A project genuinely under `os.tmpdir()` stays project-local and creates no global room |
 | `/room` panel in a real terminal | **renders** — `tmux` is not installed on this machine, so a raw pty was used (python `pty.fork()` + `TIOCSWINSZ` 120x40, writing `/room` to the master fd). The panel showed the live room: the posted message in the chat pane, the held claim in the board pane, and the room id in the title matched the id in the global store file. The plugin's own panel trace shows `boxRound=object` (the field that used to crash it with `theme.boxRound` undefined) and `RoomPanel ctor: theme=object fg=function`, with no `FAILED` line and no `Room panel unavailable` notification |
 | Noise | the plugin produced **no** errors, warnings or stack traces across all runs (the plugin's own stderr was empty; the only stderr was host-level noise — slow-startup notices and MCP server timeouts — and no matching entries in `~/.omp/logs/`) |
+| Unprompted discovery | **measured over 16 trials**: the model claimed before mutating in 12 (85.7 % of scored trials, 75.0 % counting the two harness-error trials as misses). All three probe inputs (digest, routing rule, tool description) reached the model in 16/16; the control with the room plugin not loaded produced zero room calls. Every miss had the same shape: the model inspected the file and never consulted the room — and in a solo room the digest reads `1 live · 0 record(s)`, so the model correctly concluded there was nobody to coordinate with |
+| Coordination under real models | claim arbitration (a second claim refused, naming the holder, one shared durable log), mention delivery (a subagent's `post` with `mention:[parent]` arrived as a real `[T0] room ⟵ …` steer), release freeing the resource, and `wait_for_message` / `wait_for_claim` returning `outcome: "event"` without hanging |
+| The inline cards | **render in a real transcript** — `✉ room ⟵ Poster just now` + a quote-bordered body, and `▦ Room: join` / `▦ Room: post …` for the tool cards. The poster sees no message card for its own message (delivery suppresses self-authored records). `omp render` shows the RAW custom message instead: the render CLI builds its session without an `extensionRunner`, so the plugin's renderer never runs there — it is not a valid oracle |
+| The process boundary | **cross-process coordination is COLD only**: the log, the board and the digest are shared (a later process replays the log), but LIVE coordination is in-process (delivery resolves targets through the local `AgentRegistry`), and a second live writer on one project directory is refused loudly (`room file locked by another session`). The coordination domain is one omp process with many agents |
 
 **The check is not vacuous.** The same harness was run against a deliberately broken extension,
 which produced `Failed to load extension ...: NEGATIVE-CONTROL deliberate extension failure` — so

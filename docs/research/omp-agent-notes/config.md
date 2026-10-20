@@ -3,16 +3,18 @@
 Slice: `plugin/package.json`, `plugin/tsconfig.json`, `plugin/biome.json`, `plugin/bun.lock`,
 `.gitignore`, `.omp/extensions/chatroom.ts`, repo root listing.
 
-> **Verification note.** This investigation had **no local shell device** — the only bash tool
-> available was a remote Composio sandbox that cannot see this filesystem
-> (`cd /home/yuzu/projects/omp-chatroom` → *No such file or directory*). Every claim below is
-> derived by **reading the files**, not by running them. Pass/error counts supplied by the
-> orchestrator (202 pass / 0 fail / 11 files, 0 tsc errors, 0 biome errors) are marked
-> **orchestrator-verified**. The *script bodies* are quoted verbatim from `plugin/package.json:6-11`.
+> **Verification note (refreshed 2026-10-20).** The original investigation had **no local shell
+> device** — the only bash tool available was a remote Composio sandbox that cannot see this
+> filesystem (`cd /home/yuzu/projects/omp-chatroom` → *No such file or directory*). Every claim
+> below was therefore derived by **reading the files**. This refresh re-checked every version,
+> path, flag and count against the current tree with a local shell. The current gate numbers are
+> **274 pass / 0 fail, 15 files** (`bun test tests/`), **0 tsc errors**
+> (`bunx --bun tsc --noEmit -p tsconfig.json`) and a clean Biome pass over **51 files**
+> (`bunx --bun @biomejs/biome check src tests`) — orchestrator-verified, not re-run here. The
+> *script bodies* are quoted verbatim from `plugin/package.json:6-11`.
 >
-> **Delivery note.** This subagent has no filesystem write device (`write` accepts only `xd://`
-> devices and `local://` scratch), so this file is `local://config.md`, not
-> `docs/research/omp-agent-notes/config.md`. The main agent must move it into place.
+> **Delivery note.** The file now lives at `docs/research/omp-agent-notes/config.md` (it was
+> originally authored as `local://config.md` and moved into place).
 
 ---
 
@@ -20,13 +22,17 @@ Slice: `plugin/package.json`, `plugin/tsconfig.json`, `plugin/biome.json`, `plug
 
 1. The repository root contains **no `package.json`**, no lockfile, no workspace config, and no
    root `tsconfig.json`/`biome.json`. Directory listing of `/home/yuzu/projects/omp-chatroom`
-   shows only: `plugin/`, `.omp/`, `.gitignore`, `AGENTS.md`, `docs/`, `probes/`, `.tmp-swarm/`
-   (plus untracked runtime dirs `.omp-room/`, `plugin/.omp-room/`, `plugin/undefined/`).
-2. **Therefore every command must be run from `plugin/`.** Running `bun test` at the repo root
+   shows only: `.github/`, `.git/`, `.gitignore`, `.omp/`, `.omp-room/`, `.tmp-swarm/`,
+   `AGENTS.md`, `docs/`, `plans/`, `plugin/`, `probes/`.
+2. **The root `.omp-room/` is now LEGACY, not the live room.** The room's working data lives in
+   the global omp session store (§7); a `.omp-room/` left in a project tree is either a
+   temp-dir project (which *is* project-local by rule) or an inert legacy directory that was
+   already copied into the global store.
+3. **Therefore every command must be run from `plugin/`.** Running `bun test` at the repo root
    fails — there is no manifest there to define the script or resolve the workspace.
-3. The single lockfile is `plugin/bun.lock` (`plugin/bun.lock:1-8`): `lockfileVersion: 2`,
+4. The single lockfile is `plugin/bun.lock` (`plugin/bun.lock:1-8`): `lockfileVersion: 2`,
    `configVersion: 1`, one workspace named `omp-agent-chatroom`.
-4. `probes/*.mjs` are standalone host probes — **not** part of the package, not covered by any
+5. `probes/*.mjs` are standalone host probes — **not** part of the package, not covered by any
    script, not listed in `files`.
 
 ## 2. The exact runnable commands
