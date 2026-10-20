@@ -131,12 +131,23 @@ migration's atomicity and containment, and the panel's selection mapping.
 
 ### Live checks the human still owns
 
+The repo cannot run these: the first four need a real terminal and a real model, and the last
+costs one live model turn per trial. They are listed here so they are not lost.
+
 - **The card header** (plan 019): post into a named topic and confirm the card reads
-  `room ⟵ <author> · <topic> · <age>`.
-- **Lease renewal**: claim a resource, work past the TTL with a renewal in between, and confirm the
+  `room ⟵ <author> · <topic> · <age>` — and, with a `performative`, `… · request · <age>`.
+- **Lease renewal**: claim a resource, work past the TTL with a claim in between, and confirm the
   expiry moved and no peer was told "denied — held by <you>".
-- **R8's always-on trim** (if it is done): re-measure the unprompted discovery rate against the
-  75–86 % baseline.
+- **The status ledger** (R6): claim `build/parser`, then post with a `status`; confirm a second
+  agent without the claim is refused, and that `is_in_loop: "yes"` interrupts the topic's followers.
+- **The cycle refusal** (R4): have two agents wait for each other's claims; the second must be
+  refused with the cycle named in `details.cycle`.
+- **R8's always-on trim**: re-measure the unprompted discovery rate against the 75–86 % baseline.
+  The harness is in the repo — `plugin/scripts/discovery-probe.sh` (exit 0 = the model claimed
+  before touching the shared file, 1 = it edited without claiming, 2 = harness error). Run it 16
+  times to match the baseline's sample. The prompt (`discovery-prompt.txt`) must not drift between
+  runs: it carries no room vocabulary, or the trial measures prompt-following instead of discovery.
+  If the rate drops, the trim is one commit to revert (`75f7a59`).
 
 
 ## Verification
