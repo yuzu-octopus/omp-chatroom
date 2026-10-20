@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -9,7 +9,13 @@ import {
   zod,
 } from "@oh-my-pi/pi-coding-agent";
 import { resolveLocalRoot } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
-import { deliver, escapeForDelivery, renderLine, roomBodyOf } from "../src/attention/delivery";
+import {
+  deliver,
+  escapeForDelivery,
+  renderLine,
+  roomBodyOf,
+  SEND_ACCEPT_BOUND_MS,
+} from "../src/attention/delivery";
 import {
   admitPost,
   coalescePending,
@@ -460,6 +466,13 @@ function fakeCtx(root: string, id: string): ExtensionContext {
     agent: { id, kind: "sub", name: "sub", depth: 0 },
     cwd: root,
     localProtocolOptions: { getArtifactsDir: () => root, getSessionId: () => id },
+    // The host's managed timers (I4). The bounded send needs a deadline, and a raw timer is
+    // forbidden — so the fake ctx exposes the same `ctx.setTimeout`/`ctx.clearTimer` pair.
+    setTimeout: (callback: (...args: unknown[]) => void, ms?: number): Timer =>
+      setTimeout(callback, ms),
+    clearTimer: (handle: Timer): void => {
+      clearTimeout(handle);
+    },
   } as unknown as ExtensionContext;
 }
 
@@ -962,4 +975,178 @@ test("two posts deliver in seq order to the same recipient", async () => {
   const secondAt = delivered.findIndex((c) => c.includes("second"));
   expect(firstAt).toBeGreaterThanOrEqual(0);
   expect(secondAt).toBeGreaterThan(firstAt);
+});
+
+// --- 12. the bounded send (P0) and the cursor floor on every path (P1) -----
+
+/** Drain the microtask queue: the delivery chain is a chain of awaits, not a timer wait. */
+async function flush(): Promise<void> {
+  for (let i = 0; i < 500; i++) await Promise.resolve();
+}
+
+test("a post to an idle recipient does not wait for the target's turn", async () => {
+  // The host resolves `sendCustomMessage` when the TARGET'S TURN ends: at an idle session both
+  // the `aside` and the `steer`+`triggerTurn` paths `await #promptAgentInitiatedMessage`
+  // (agent-session.ts). The clock is faked so the test is deterministic — the target's turn takes
+  // 2 s of clock time, the acceptance bound is far shorter, and the post must complete while
+  // that turn is still running.
+  vi.useFakeTimers();
+  try {
+    AgentRegistry.resetGlobalForTests();
+    const root = tempRoot();
+    const bCalls: Send[] = [];
+    const b = `attn-idle-${Date.now()}`;
+    let turnEnded = false;
+    AgentRegistry.global().register({
+      id: b,
+      displayName: b,
+      kind: "sub",
+      status: "running",
+      session: {
+        sendCustomMessage(payload: unknown, options?: unknown): Promise<boolean> {
+          // The message is ACCEPTED now; the promise resolves when the target's turn ends.
+          bCalls.push({
+            payload: payload as Record<string, unknown>,
+            options: options as Record<string, unknown>,
+          });
+          return new Promise<boolean>((resolve) => {
+            setTimeout(() => {
+              turnEnded = true;
+              resolve(true);
+            }, 2_000);
+          });
+        },
+      } as never,
+    });
+    const h = roomHarness(root, "A");
+    const started = Date.now();
+    let posted = false;
+    const post = h
+      .execute({ op: "post", topic: "build", body: "over to you", mention: [b] })
+      .then((res) => {
+        posted = true;
+        return res;
+      });
+    await flush();
+    expect(posted).toBe(false); // the acceptance bound has not expired yet
+    await vi.advanceTimersByTime(SEND_ACCEPT_BOUND_MS);
+    await flush();
+    const res = await post;
+    expect(res.details).toMatchObject({ ok: true, op: "post" });
+    // The post completed on the acceptance bound — while the target's turn is STILL running.
+    expect(posted).toBe(true);
+    expect(turnEnded).toBe(false);
+    expect(bCalls.length).toBe(1); // and the message really was delivered
+    expect(Date.now() - started).toBeLessThan(1_000);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("a fast send rejection surfaces as deliveryError and leaves the record owed", async () => {
+  AgentRegistry.resetGlobalForTests();
+  const root = tempRoot();
+  const b = `attn-fastfail-${Date.now()}`;
+  registerFailingSession(b);
+  const h = roomHarness(root, "A");
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown): void => {
+    unhandled.push(reason);
+  };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    const res = await h.execute({ op: "post", topic: "build", body: "over to you", mention: [b] });
+    // The transport failure is still reported on the tool result (never thrown out of execute).
+    expect(res.details).toMatchObject({ ok: true, op: "post", deliveryError: "transport down" });
+    // The failed delivery did not advance the cursor: the record is still owed, still readable.
+    expect(h.store.cursors.get(b) ?? 0).toBe(0);
+    await flush();
+    expect(unhandled.length).toBe(0);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+});
+
+test("a send that rejects after the bound is swallowed, never an unhandled rejection", async () => {
+  vi.useFakeTimers();
+  try {
+    AgentRegistry.resetGlobalForTests();
+    const root = tempRoot();
+    const b = `attn-latefail-${Date.now()}`;
+    AgentRegistry.global().register({
+      id: b,
+      displayName: b,
+      kind: "sub",
+      status: "running",
+      session: {
+        sendCustomMessage(): Promise<boolean> {
+          // The transport fails LATE — after the acceptance bound has already expired.
+          return new Promise<boolean>((_resolve, reject) => {
+            setTimeout(() => reject(new Error("late transport down")), 600);
+          });
+        },
+      } as never,
+    });
+    const h = roomHarness(root, "A");
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const post = h.execute({ op: "post", topic: "build", body: "over to you", mention: [b] });
+      await flush();
+      await vi.advanceTimersByTime(1_000);
+      await flush();
+      const res = await post;
+      // The bound expired first: the message counts as ACCEPTED, so there is no deliveryError.
+      expect(res.details).toMatchObject({ ok: true, op: "post" });
+      expect(JSON.stringify(res.details)).not.toContain("deliveryError");
+      // The late rejection was OBSERVED by the bounded send: it never became an unhandled one.
+      expect(unhandled.length).toBe(0);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("a T0 delivery never pushes the cursor past a record the recipient still owes", async () => {
+  AgentRegistry.resetGlobalForTests();
+  const root = tempRoot();
+  const bCalls: Send[] = [];
+  const b = `attn-t0floor-${Date.now()}`;
+  registerSession(b, bCalls);
+  const h = roomHarness(root, "A");
+  // B follows "build": every message there is T1 for B.
+  h.store.members.set(b, {
+    agentId: b,
+    joinedAtSeq: 0,
+    topics: new Set(["build"]),
+    muted: new Set(),
+    threadRoots: new Set(),
+    heldTopics: new Set(),
+  });
+  // Records 1-4: T1 records for B that no delivery pass ever pushed. B still OWES them — they
+  // sit above its cursor, and `room{op:"read"}` (which starts at the cursor) is the only way
+  // back to them.
+  for (let i = 1; i <= 4; i++) {
+    h.store.append({ kind: "msg", from: "X", topic: "build", body: `owed ${i}` });
+  }
+  // The post mentions B: record 5 is a T0 for B, and it sits ABOVE the owed records.
+  const res = await h.execute({ op: "post", topic: "build", body: "over to you", mention: [b] });
+  expect(res.details).toMatchObject({ ok: true, op: "post" });
+  // The T0 was delivered...
+  expect(bCalls.length).toBe(1);
+  expect(bCalls[0]!.options).toMatchObject({ deliverAs: "steer" });
+  // ...but the cursor did NOT move past the owed records: they are still readable.
+  const cursor = h.store.cursors.get(b) ?? 0;
+  expect(cursor).toBeLessThan(1);
+  // The four T1 records are still above the cursor — readable, never skipped. (The post itself
+  // is the T0 that was delivered, so it is not one of the owed ones.)
+  const owed = h.store.records.filter(
+    (r) => r.kind === "msg" && r.topic === "build" && r.mention === undefined && r.seq > cursor,
+  );
+  expect(owed.length).toBe(4);
 });

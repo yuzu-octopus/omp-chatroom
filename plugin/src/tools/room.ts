@@ -1,6 +1,6 @@
 import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent";
-import { deliver } from "../attention/delivery";
+import { deliver, sendBounded } from "../attention/delivery";
 import {
   admitPost,
   coalescePending,
@@ -327,7 +327,14 @@ async function notice(
     // Awaited: the callers already `await notice(...)`, and a floating send would escape
     // notifyRecipients' per-recipient try/catch as an unhandled rejection. A throw here lands
     // in the caller's `failure` note and surfaces as deliveryError, like deliver() failures.
-    await session.sendCustomMessage(payload, { deliverAs });
+    //
+    // Bounded: the host's send resolves when the TARGET'S TURN ends, so an unbounded await would
+    // deadlock the room (A's pass waits for B's turn, B's turn posts and waits for A's pass).
+    const outcome = await sendBounded(
+      ctx,
+      Promise.resolve(session.sendCustomMessage(payload, { deliverAs })),
+    );
+    if (!outcome.ok) throw outcome.error;
     return;
   }
   if (target === ctx.agent.id) pi.sendMessage(payload, { deliverAs });
@@ -384,69 +391,98 @@ async function deliverPass(
 ): Promise<string | undefined> {
   const config = resolveRoomConfig(pi, store.root);
   let failure: string | undefined;
-  const note = (error: unknown): void => {
-    failure ??= error instanceof Error ? error.message : "delivery failed";
-  };
   try {
     // §5.2 — the producer's bucket, consumed once per appended post (claim/release are not posts).
     const coalesced =
       records.some((r) => r.kind === "msg") &&
       admitPost(store, actorId, Date.now(), config) === "red";
-    for (const target of recipients(store, actorId)) {
-      try {
-        const viewer = viewerStateFor(store, target);
-        const cursor = store.cursors.get(target) ?? 0;
-        // The recipient's whole pending set, minus muted and cursor-only T2: exactly what a
-        // push may show. T0 is exempt from K/B; T1 is admitted oldest-first by `selectT1`.
-        const pending = store.records.filter(
-          (r) => r.seq > cursor && !isMuted(store, viewer, r) && classify(r, viewer) !== "T2",
-        );
-        // N5 — past its ceiling the T0 set batches into ONE digest interrupt, never dropped.
-        const t0 = selectT0(pending.filter((r) => classify(r, viewer) === "T0"));
-        const admitted = [...t0.injected];
-        for (const record of records) {
-          if (isMuted(store, viewer, record)) continue;
-          if (classify(record, viewer) !== "T1") continue;
-          if (!coalesced && t1Admitted(store, viewer, record, config)) admitted.push(record);
-        }
-        // N/T — the T2 backlog rides the next T0/T1 for this recipient as ONE line.
-        const digest =
-          admitted.length > 0 || t0.summaryLine !== null
-            ? coalescePending(store, viewer, Date.now(), config)
-            : null;
-        let extra = digest !== null ? [digest] : [];
-        for (const record of admitted) {
-          await deliver(pi, ctx, target, record, classify(record, viewer), extra);
-          extra = [];
-        }
-        if (t0.summaryLine !== null) {
-          await notice(pi, ctx, target, t0.summaryLine, "steer");
-        } else if (extra.length > 0) {
-          await notice(pi, ctx, target, extra.join("\n"), "aside");
-        }
-        // A red (coalesced) producer's records are left pending for the digest: the log is already
-        // durable and the cursor must NOT advance, or `coalescePending` could never see them.
-        // A non-coalesced T2 is cursor-only — never injected, and consumed on arrival.
-        if (coalesced) continue;
-        // The floor for this target: the seq just below the oldest record it still OWES (a T1 the
-        // K/B cap refused, or a T0 past the batch ceiling). The T2 cursor bump must not cross it,
-        // or the owed record falls below the cursor and `room{op:"read"}` can never return it.
-        const owed = pending.filter((r) => !admitted.some((a) => a.seq === r.seq));
-        const owedFloor = owed.reduce((min, r) => Math.min(min, r.seq), Number.POSITIVE_INFINITY);
-        const cursorCap = owedFloor - 1;
-        for (const record of records) {
-          if (classify(record, viewer) === "T2") {
-            await deliver(pi, ctx, target, record, "T2", [], cursorCap);
-          }
-        }
-      } catch (error) {
-        note(error);
-      }
+    // The recipients are INDEPENDENT of each other: each one gets its own records, in seq order,
+    // inside its own task, so a slow (or busy) recipient must not hold up the others. The
+    // per-root serialisation of PASSES (the DELIVERY_CHAIN) is untouched, and the per-recipient
+    // order is preserved inside each task. The store's cursor map is mutated synchronously, so
+    // the concurrent tasks never race on shared state.
+    const targets = recipients(store, actorId);
+    const errors = await Promise.all(
+      targets.map((target) => deliverToTarget(pi, ctx, store, records, target, coalesced, config)),
+    );
+    // The failures are reported in RECIPIENT ORDER, so the reported one does not depend on which
+    // transport lost the race.
+    for (const message of errors) {
+      if (message === undefined) continue;
+      failure ??= message;
     }
   } catch (error) {
-    note(error);
+    failure ??= error instanceof Error ? error.message : "delivery failed";
   }
   return failure;
+}
+
+/**
+ * Deliver this pass's records to ONE recipient. Returns the failure MESSAGE instead of throwing
+ * it: the pass reports the first failure in recipient order and never lets one recipient's
+ * transport decide the outcome for the others.
+ */
+async function deliverToTarget(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  store: RoomStore,
+  records: readonly RoomRecord[],
+  target: string,
+  coalesced: boolean,
+  config: RoomConfig,
+): Promise<string | undefined> {
+  try {
+    const viewer = viewerStateFor(store, target);
+    const cursor = store.cursors.get(target) ?? 0;
+    // The recipient's whole pending set, minus muted and cursor-only T2: exactly what a
+    // push may show. T0 is exempt from K/B; T1 is admitted oldest-first by `selectT1`.
+    const pending = store.records.filter(
+      (r) => r.seq > cursor && !isMuted(store, viewer, r) && classify(r, viewer) !== "T2",
+    );
+    // N5 — past its ceiling the T0 set batches into ONE digest interrupt, never dropped.
+    const t0 = selectT0(pending.filter((r) => classify(r, viewer) === "T0"));
+    const admitted = [...t0.injected];
+    for (const record of records) {
+      if (isMuted(store, viewer, record)) continue;
+      if (classify(record, viewer) !== "T1") continue;
+      if (!coalesced && t1Admitted(store, viewer, record, config)) admitted.push(record);
+    }
+    // The floor for this target: the seq just below the oldest record it still OWES (a T1 the
+    // K/B cap refused, or a T0 past the batch ceiling). NO cursor bump may cross it — not the
+    // T0/T1 bump and not the T2 bump — or the owed record falls below the cursor and
+    // `room{op:"read"}` (which starts at the cursor) can never return it. `bumpCursor` is
+    // monotonic, so a later capped bump cannot pull the cursor back either.
+    const owed = pending.filter((r) => !admitted.some((a) => a.seq === r.seq));
+    const owedFloor = owed.reduce((min, r) => Math.min(min, r.seq), Number.POSITIVE_INFINITY);
+    const cursorCap = owedFloor - 1;
+    // N/T — the T2 backlog rides the next T0/T1 for this recipient as ONE line.
+    const digest =
+      admitted.length > 0 || t0.summaryLine !== null
+        ? coalescePending(store, viewer, Date.now(), config)
+        : null;
+    let extra = digest !== null ? [digest] : [];
+    for (const record of admitted) {
+      await deliver(pi, ctx, target, record, classify(record, viewer), extra, cursorCap);
+      extra = [];
+    }
+    if (t0.summaryLine !== null) {
+      await notice(pi, ctx, target, t0.summaryLine, "steer");
+    } else if (extra.length > 0) {
+      await notice(pi, ctx, target, extra.join("\n"), "aside");
+    }
+    // A red (coalesced) producer's records are left pending for the digest: the log is already
+    // durable and the cursor must NOT advance, or `coalescePending` could never see them.
+    // A non-coalesced T2 is cursor-only — never injected, and consumed on arrival.
+    if (coalesced) return undefined;
+    for (const record of records) {
+      if (classify(record, viewer) === "T2") {
+        await deliver(pi, ctx, target, record, "T2", [], cursorCap);
+      }
+    }
+    return undefined;
+  } catch (error) {
+    return error instanceof Error ? error.message : "delivery failed";
+  }
 }
 
 /** The records an operation appended: everything with a seq above the pre-op watermark. */

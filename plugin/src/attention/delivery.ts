@@ -6,6 +6,62 @@ import { roomStoreFor } from "../store/room-store";
 import type { RoomRecord } from "../store/schema";
 import type { Tier } from "./tiers";
 
+/**
+ * The send-acceptance bound, in ms.
+ *
+ * The host's `sendCustomMessage` resolves when the TARGET'S WHOLE TURN ends, not when the message
+ * is accepted: at an idle session both `deliverAs: "aside"` and `deliverAs: "steer"` +
+ * `triggerTurn` go through `promptAgentInitiatedMessage`, which resolves only once the target's
+ * turn — every one of its tool calls — is over. Awaiting that inside a delivery pass DEADLOCKS
+ * the room: A's pass waits for B's turn, B's turn calls `room{op:"post"}`, and that post's pass
+ * waits for A's pass. One stuck pass blocks every later post in the room, and the room root is
+ * shared by the main session and every subagent — so it blocks the whole swarm.
+ *
+ * The plugin only needs the message ACCEPTED, and the host accepts it as soon as the message is
+ * queued into the target's session. So the wait is bounded: 250 ms is long enough that a healthy
+ * transport resolves well inside it (the send resolves on acceptance; only the TURN is slow) and
+ * short enough that a post never stalls on a target's turn.
+ */
+export const SEND_ACCEPT_BOUND_MS = 250;
+
+/** The outcome of a bounded send: accepted (or the bound expired) vs a transport failure. */
+export type SendOutcome = { ok: true } | { ok: false; error: unknown };
+
+/**
+ * Await a send with a deadline, so a delivery pass never waits for the target's TURN.
+ *
+ * The send's rejection is ALWAYS observed: `settled` carries both handlers, so a rejection that
+ * arrives AFTER the bound has expired is swallowed (never an unhandled rejection) instead of
+ * escalating. A rejection that arrives inside the bound is returned to the caller, which rethrows
+ * it so the delivery pass reports it as `deliveryError` — and the cursor stays where it was.
+ */
+export async function sendBounded(
+  ctx: ExtensionContext,
+  send: Promise<unknown>,
+): Promise<SendOutcome> {
+  const settled: Promise<SendOutcome> = send.then(
+    () => ({ ok: true }),
+    (error: unknown) => ({ ok: false, error }),
+  );
+  // A ctx without the host's timer API has no deadline — and a raw timer is forbidden (I4).
+  // The host always provides `ctx.setTimeout`; a test double that does not gets the unbounded wait.
+  const timers = ctx as Partial<Pick<ExtensionContext, "setTimeout" | "clearTimer">>;
+  const schedule = timers.setTimeout?.bind(ctx);
+  if (schedule === undefined) return settled;
+  let timer: Timer | undefined;
+  try {
+    return await Promise.race([
+      settled,
+      new Promise<SendOutcome>((resolve) => {
+        timer = schedule(() => resolve({ ok: true }), SEND_ACCEPT_BOUND_MS);
+      }),
+    ]);
+  } finally {
+    // The bound is a deadline, not a job: it is cleared on every path (I4).
+    if (timer !== undefined) timers.clearTimer?.(timer);
+  }
+}
+
 // §5.3 — verbatim, plus `extra` — the optional digest lines (the T2 coalescing digest) that ride
 // the same message, so the digest never needs a timer or a second push channel (§5.2 N/T).
 export async function deliver(
@@ -19,6 +75,13 @@ export async function deliver(
 ): Promise<void> {
   const store = roomStoreFor(ctx);
 
+  // The floor for this target's cursor: the seq just below the oldest record it still OWES (a T1
+  // the K/B cap refused, or a T0 past the batch ceiling). NO cursor bump may cross it — not the
+  // T0/T1 bump and not the T2 bump — otherwise a delivered record that sits ABOVE an owed one
+  // pushes the cursor past it and `room{op:"read"}` (which starts at the cursor) could never
+  // return the owed record. `bumpCursor` is monotonic, so a later capped bump cannot pull it back.
+  const cap = cursorCap ?? record.seq;
+
   // M11 companion — never deliver an agent its own action back. A voluntary release has
   // `prevHolder === from === the releaser`, so `classify` returns T0 for it; an own `msg` on a
   // followed topic would otherwise echo back as T1. Actor kinds only: `note`/`gap` are
@@ -29,7 +92,7 @@ export async function deliver(
     record.kind === "release" ||
     record.kind === "member";
   if (actorKind && record.from === target) {
-    bumpCursor(store, target, record.seq);
+    bumpCursor(store, target, Math.min(record.seq, cap));
     return;
   }
 
@@ -40,7 +103,7 @@ export async function deliver(
     // refused, or a T0 record past the batch ceiling, still sits above the cursor and is still
     // readable. `cursorCap` is that floor (the seq just below the oldest owed record). Without it
     // a T2 delivery would skip the owed record and `room{op:"read"}` could never return it.
-    bumpCursor(store, target, Math.min(record.seq, cursorCap ?? record.seq));
+    bumpCursor(store, target, Math.min(record.seq, cap));
     return;
   }
 
@@ -76,11 +139,18 @@ export async function deliver(
 
   if (target === ctx.agent.id) {
     pi.sendMessage(payload, options);
-    bumpCursor(store, target, record.seq);
+    bumpCursor(store, target, Math.min(record.seq, cap));
     return;
   }
-  await ref!.session!.sendCustomMessage(payload, options);
-  bumpCursor(store, target, record.seq);
+  // The send resolves when the TARGET'S TURN ends — so it is bounded (see `sendBounded`). A
+  // rejection inside the bound is a transport failure: it propagates to the delivery pass, which
+  // reports it as `deliveryError`, and the cursor is NOT bumped (the record is still owed).
+  const outcome = await sendBounded(
+    ctx,
+    Promise.resolve(ref!.session!.sendCustomMessage(payload, options)),
+  );
+  if (!outcome.ok) throw outcome.error;
+  bumpCursor(store, target, Math.min(record.seq, cap));
 }
 export function roomBodyOf(record: RoomRecord): string {
   switch (record.kind) {
