@@ -305,7 +305,14 @@ function t1Admitted(
 ): boolean {
   const cursor = store.cursors.get(viewer.agentId) ?? 0;
   const pending = store.records.filter(
-    (r) => r.seq > cursor && classify(r, viewer) === "T1" && !isMuted(store, viewer, r),
+    (r) =>
+      r.seq > cursor &&
+      classify(r, viewer) === "T1" &&
+      // A `gap` is a system notice (the retention prune said "records were dropped"), not a
+      // room message: it is exempt from K/B like T0, and it has its own delivery path in
+      // `deliverToTarget` — so it must not eat a slot of the per-turn T1 budget either.
+      r.kind !== "gap" &&
+      !isMuted(store, viewer, r),
   );
   return selectT1(store, viewer, pending, { caps: config }).injected.some(
     (r) => r.seq === record.seq,
@@ -447,11 +454,42 @@ async function deliverToTarget(
       if (classify(record, viewer) !== "T1") continue;
       if (!coalesced && t1Admitted(store, viewer, record, config)) admitted.push(record);
     }
+    // A `gap` record is a promised notify (T1 for every viewer) that the retention prune
+    // appends OUTSIDE any op's batch — so it is never in `records`, and no delivery pass would
+    // ever carry it. Left in the pending set it counts as owed and pins the cursor floor below
+    // its seq for good: the cursor freezes and EVERY pass re-delivers the T0s above it (an
+    // interrupt storm). So the gap is CARRIED here, on the T1 path, and it is exempt from the
+    // K/B cap (like T0): the one notice that says "the log lost records" must never be starved
+    // by a busy turn.
+    const owedOthers = pending.filter(
+      (r) => r.kind !== "gap" && !admitted.some((a) => a.seq === r.seq),
+    );
+    const owedFloorOthers = owedOthers.reduce(
+      (min, r) => Math.min(min, r.seq),
+      Number.POSITIVE_INFINITY,
+    );
+    // The gap may only be carried when nothing the recipient still OWES sits BELOW it: telling
+    // the gap moves the cursor to its seq, and that must not cross an owed record — otherwise
+    // `room{op:"read"}` (which starts at the cursor) could never return it. While a gap waits
+    // behind a refusal it stays owed, but it never lowers the floor: the refusal below it
+    // already sets a lower one.
+    const gaps = pending.filter(
+      (r) =>
+        r.kind === "gap" &&
+        !records.some((x) => x.seq === r.seq) &&
+        r.seq < owedFloorOthers,
+    );
+    // Last in the batch: the T0/T1 deliveries go first, so a failed one aborts the pass before
+    // the gap is told (the gap is retried on the next pass) and the gap's cursor bump never
+    // crosses a record whose delivery just failed.
+    admitted.push(...gaps);
     // The floor for this target: the seq just below the oldest record it still OWES (a T1 the
     // K/B cap refused, or a T0 past the batch ceiling). NO cursor bump may cross it — not the
     // T0/T1 bump and not the T2 bump — or the owed record falls below the cursor and
     // `room{op:"read"}` (which starts at the cursor) can never return it. `bumpCursor` is
-    // monotonic, so a later capped bump cannot pull the cursor back either.
+    // monotonic, so a later capped bump cannot pull the cursor back either. A CARRIED gap is
+    // not owed (it was told), so it never pins the floor; an uncarried one stays owed but never
+    // lowers the floor the refusal below it already sets.
     const owed = pending.filter((r) => !admitted.some((a) => a.seq === r.seq));
     const owedFloor = owed.reduce((min, r) => Math.min(min, r.seq), Number.POSITIVE_INFINITY);
     const cursorCap = owedFloor - 1;

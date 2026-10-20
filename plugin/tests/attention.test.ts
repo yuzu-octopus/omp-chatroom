@@ -1150,3 +1150,93 @@ test("a T0 delivery never pushes the cursor past a record the recipient still ow
   );
   expect(owed.length).toBe(4);
 });
+
+// --- 12. the retention gap is CARRIED by the next pass --------------------
+//
+// A `gap` record is appended by the retention prune OUTSIDE any op's batch, so no pass ever
+// carried it: it stayed pending forever, counted as owed, and pinned the cursor floor below its
+// seq — the cursor froze and every pass re-delivered the same T0 (an interrupt storm).
+
+/** B, a member that follows "build" (so build messages are T1 for it). */
+function memberFollowing(h: RoomHarness, id: string): void {
+  h.store.members.set(id, {
+    agentId: id,
+    joinedAtSeq: 0,
+    topics: new Set(["build"]),
+    muted: new Set(),
+    threadRoots: new Set(),
+    heldTopics: new Set(),
+  });
+}
+
+test("a gap in the pending set is delivered to the recipient on the next pass", async () => {
+  const root = tempRoot();
+  const bCalls: Send[] = [];
+  const b = `attn-gapcarry-${Date.now()}`;
+  registerSession(b, bCalls);
+  const h = roomHarness(root, "A");
+  memberFollowing(h, b);
+  // The retention prune drops the oldest records and appends the `gap` — outside any op's batch.
+  const gap = noteGap(h.store, 42, "retention");
+  // The next pass carries an unrelated record (a T2 for B: a topic B does not follow).
+  const res = await h.execute({ op: "post", topic: "elsewhere", body: "unrelated" });
+  expect(res.details).toMatchObject({ ok: true, op: "post" });
+  // The gap was CARRIED: one send, carrying the gap's text, on the T1 path (an aside).
+  const gapSends = bCalls.filter((c) => JSON.stringify(c.payload).includes("42 record(s)"));
+  expect(gapSends.length).toBe(1);
+  expect(gapSends[0]!.options).toMatchObject({ deliverAs: "aside" });
+  expect(JSON.stringify(gapSends[0]!.payload)).toContain("retention");
+  // And the cursor moved past it: the gap is no longer pending, so it is never offered again.
+  const cursor = h.store.cursors.get(b) ?? 0;
+  expect(cursor).toBeGreaterThan(gap.seq);
+  expect(h.store.records.filter((r) => r.kind === "gap" && r.seq > cursor).length).toBe(0);
+});
+
+test("the same T0 is never delivered twice once a gap no longer pins the cursor", async () => {
+  const root = tempRoot();
+  const bCalls: Send[] = [];
+  const b = `attn-gapnodup-${Date.now()}`;
+  registerSession(b, bCalls);
+  const h = roomHarness(root, "A");
+  memberFollowing(h, b);
+  // The gap is the trap: while it is pending it pins the floor, and every pass re-delivers the
+  // T0 above it. Once it is carried, the cursor advances and the T0 is delivered exactly once.
+  noteGap(h.store, 42, "retention");
+  const res = await h.execute({ op: "post", topic: "build", body: "look here", mention: [b] });
+  expect(res.details).toMatchObject({ ok: true, op: "post" });
+  const t0Seq = h.store.records.find((r) => r.kind === "msg" && r.mention?.includes(b))!.seq;
+  expect(bCalls.filter((c) => c.options?.deliverAs === "steer").length).toBe(1);
+  // A second pass: the SAME T0 is not sent again.
+  await h.execute({ op: "post", topic: "elsewhere", body: "unrelated" });
+  expect(bCalls.filter((c) => JSON.stringify(c.payload).includes("look here")).length).toBe(1);
+  // ...and the cursor has advanced past it.
+  expect(h.store.cursors.get(b) ?? 0).toBeGreaterThan(t0Seq);
+});
+
+test("a T1 the K/B cap refused still stays above the cursor — the floor holds under a gap", async () => {
+  const root = tempRoot();
+  const b = `attn-gapfloor-${Date.now()}`;
+  registerSession(b, []);
+  const h = roomHarness(root, "A");
+  memberFollowing(h, b);
+  // 15 pending T1 records for B that no pass ever pushed: the K/B cap (10 records per turn)
+  // refuses the ones past it, and a refused record must stay ABOVE B's cursor — otherwise
+  // `room{op:"read"}` (which starts at the cursor) could never return it.
+  for (let i = 0; i < 15; i++) {
+    h.store.append({ kind: "msg", from: "X", topic: "build", body: `filler ${i}` });
+  }
+  // The retention prune appends a gap ABOVE them: it is carried only when that does not cross
+  // a refused record — so it must not lift the floor over the refusals.
+  const gap = noteGap(h.store, 3, "retention");
+  await h.execute({ op: "post", topic: "build", body: "over to you" });
+  const cursor = h.store.cursors.get(b) ?? 0;
+  expect(cursor).toBeLessThan(1); // the cursor did not move at all
+  // The 15 fillers + the refused post are still above the cursor — readable, never skipped.
+  const owed = h.store.records.filter(
+    (r) => r.kind === "msg" && r.topic === "build" && r.seq > cursor,
+  );
+  expect(owed.length).toBe(16);
+  // The gap is still above the cursor too: it waits behind the refusals, it does not skip them.
+  expect(h.store.records.filter((r) => r.kind === "gap" && r.seq > cursor).length).toBe(1);
+  expect(gap.seq).toBeGreaterThan(cursor);
+});
