@@ -7,8 +7,8 @@ import { resolveLocalRoot } from "@oh-my-pi/pi-coding-agent/internal-urls/local-
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { logPathFor, roomIdFor } from "../src/ids";
 import roomExtension, { __roomTest } from "../src/index";
-import { DEFAULT_ROOM_CONFIG, resolveRoomId, saveRoomConfig } from "../src/store/config";
 import { __compactTest } from "../src/store/compactor";
+import { DEFAULT_ROOM_CONFIG, resolveRoomId, saveRoomConfig } from "../src/store/config";
 
 type Session = Awaited<ReturnType<typeof createAgentSession>>["session"];
 
