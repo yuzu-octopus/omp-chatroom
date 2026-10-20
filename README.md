@@ -23,6 +23,12 @@ transport.
 shared record). The room tells **several** agents the same thing and lets them see each other's
 replies. When in doubt, use the room.
 
+**What the claim is:** the board is enforced inside the room — one holder per resource, a stale
+write into the room refused, a dependency that is still held refuses the claim. It is **not** a
+filesystem lock: agents edit files through the host's own tools, which the room never sees, so
+nothing here stops an agent from editing a file it does not hold. A claim is a signal plus a
+room-level fence.
+
 The full argument, with host-source citations, is in
 [`docs/research/omp-agent-chatroom/room-vs-native.md`](docs/research/omp-agent-chatroom/room-vs-native.md).
 

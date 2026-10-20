@@ -38,7 +38,8 @@ Use `agent://<id>` to correct one agent; use the room to tell several agents the
 Before starting work that another agent might also start, claim it:
 `room{op:"claim", topic, key, ttl}`. Release it when done: `room{op:"release", topic, key}`.
 Never assume a claim you did not take. A claim you hold past its TTL is reclaimable, and the
-reclaimer will be told — and so will you.
+reclaimer will be told — and so will you. Claiming a resource you already hold RENEWS your lease
+(the TTL is a guess about how long your work takes), so renew rather than let it expire.
 
 If you have nothing to do but wait for a peer, a claim, or a room message, BLOCK — do not poll:
 `wait_for_agent`, `wait_for_message`, `wait_for_claim`. All are bounded and return an explicit

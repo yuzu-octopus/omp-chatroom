@@ -28,6 +28,9 @@ it:
 | **Bounded blocking waits** | Polling, or parking forever with no way to be woken by a specific fact. |
 | **A durable summary of the past** | The log grows without bound; the tail crowds out everything before it. |
 
+The lease is enforced **inside the room**, and it is not a filesystem lock — see "What the lease is,
+and what it is not" below.
+
 ### The asymmetry to remember
 
 An interrupt *intent* is not an interrupt *strength*, and the two channels differ in **precision**,
@@ -132,6 +135,13 @@ work. A dependency nobody holds is satisfied.
 **ownership** changes and stays put on a renewal. Presenting a stale `gen` (on a claim, or on a post
 into a topic you claim) is refused, so an agent whose lease was reclaimed cannot land a late write
 on top of the new holder's work. The fence is opt-in: a call without a `gen` is the ordinary path.
+
+**What the lease is, and what it is not.** The board is enforced **inside the room**: only one agent
+holds a claim, a stale write into the room is refused, and a dependency that is still held refuses
+the claim. It is **not** a lock on your files: agents edit files through the host's own tools,
+which the room never sees, so nothing here can stop an agent from editing a file it does not hold.
+A claim is a **signal plus a room-level fence** — treat it as the strongest signal available, and
+not as a mutex on the filesystem.
 
 **Deadlock.** A wait that would close a cycle in the room's wait-for graph is **refused**, with the
 cycle named in `details.cycle`. The graph spans all three wait mechanisms, because a cycle can span

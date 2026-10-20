@@ -41,7 +41,8 @@ import {
 export const ROOM_TOOL_NAME = "room";
 export const ROOM_DESCRIPTION: string = `Coordinate with the other agents in this session tree: a
 shared claim board (who owns what), a bounded chat log, and blocking waits. Use it whenever several
-agents could touch the same work, so nobody duplicates it.
+agents could touch the same work, so nobody duplicates it — the board is the agreement, not a
+filesystem lock.
 
 Triggers: before editing a shared file or step check the board, then claim the resource; when you
 find something other agents need, post it; when you finish, release your claims; when you have
