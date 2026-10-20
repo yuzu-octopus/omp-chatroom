@@ -6,11 +6,13 @@ import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { getSessionsDir } from "@oh-my-pi/pi-utils";
 import { logPathFor, roomIdFor } from "../src/ids";
 import { resolveRoomId } from "../src/store/config";
-import { lockPathFor, openRoomLog } from "../src/store/log";
+import { closeRoomLog, lockPathFor, openRoomLog } from "../src/store/log";
 import {
   globalRoomRoot,
   legacyRoomRoot,
   migrateLegacyRoom,
+  migrationTempPath,
+  openMigratedRoom,
   roomRootFor,
 } from "../src/store/room-root";
 
@@ -182,4 +184,91 @@ test("migration names the copied log after the target's minted id when the confi
   expect(migrateLegacyRoom(legacy, target)).toBe(true);
   expect(resolveRoomId(target)).toBe(roomIdFor(target));
   expect(fs.existsSync(logPathFor(target, resolveRoomId(target)))).toBe(true);
+});
+
+// --- the migration never adopts an arbitrary log ---------------------------------
+
+test("migration never adopts an arbitrary log when the pinned id matches none", () => {
+  const legacy = tempRoot();
+  const target = tempRoot();
+  fs.mkdirSync(path.join(legacy, "room"), { recursive: true });
+  fs.writeFileSync(path.join(legacy, "room", "r-one.jsonl"), '{"seq":1}\n');
+  fs.writeFileSync(path.join(legacy, "room", "r-two.jsonl"), '{"seq":2}\n');
+  // The config pins a valid id that matches NO log file: the legacy room's own log is missing.
+  fs.writeFileSync(
+    path.join(legacy, "room", "config.json"),
+    `${JSON.stringify({ roomId: "custom-room" })}\n`,
+  );
+
+  // Two logs, neither of them the log the legacy room opens: picking one would be arbitrary.
+  expect(migrateLegacyRoom(legacy, target)).toBe(false);
+  // The target got NO log at all — not one of the two renamed to the pinned id, and not the
+  // other one copied under its own name (it would sit there, never opened).
+  expect(fs.existsSync(path.join(target, "room"))).toBe(false);
+  // The legacy room is left exactly as it was.
+  expect(fs.readdirSync(path.join(legacy, "room")).sort()).toEqual([
+    "config.json",
+    "r-one.jsonl",
+    "r-two.jsonl",
+  ]);
+});
+
+// --- the copy is atomic: an interrupted copy leaves NO log ------------------------
+
+test("an interrupted copy leaves the target with NO log, so the next attempt retries", () => {
+  const legacy = tempRoot();
+  const target = tempRoot();
+  const legacyId = roomIdFor(legacy);
+  fs.mkdirSync(path.join(legacy, "room"), { recursive: true });
+  fs.writeFileSync(path.join(legacy, "room", `${legacyId}.jsonl`), '{"seq":1}\n');
+  fs.writeFileSync(
+    path.join(legacy, "room", "config.json"),
+    `${JSON.stringify({ roomId: legacyId })}\n`,
+  );
+  // The staging path of the log is a DIRECTORY: the staged copy fails (EISDIR) exactly where a
+  // crash would interrupt it — deterministically, with no mocking.
+  fs.mkdirSync(path.join(target, "room"), { recursive: true });
+  fs.mkdirSync(migrationTempPath(path.join(target, "room", `${legacyId}.jsonl`)), {
+    recursive: true,
+  });
+
+  expect(migrateLegacyRoom(legacy, target)).toBe(false);
+  // NO log at all — not a truncated one. The "never clobbers" guard only looks for ".jsonl",
+  // so the half-written staging name does not block the next attempt.
+  const names = fs.readdirSync(path.join(target, "room"));
+  expect(names.filter((name) => name.endsWith(".jsonl"))).toEqual([]);
+  expect(fs.existsSync(path.join(target, "room", `${legacyId}.jsonl`))).toBe(false);
+
+  // The next attempt retries: the blocker is gone and the room migrates for real.
+  fs.rmSync(path.join(target, "room"), { recursive: true, force: true });
+  expect(migrateLegacyRoom(legacy, target)).toBe(true);
+  expect(fs.existsSync(path.join(target, "room", `${legacyId}.jsonl`))).toBe(true);
+});
+
+// --- the lock hand-off: no window between the migration and the open -------------
+
+test("the room's lock covers the migration and the open: a second writer is refused", () => {
+  const { legacy } = legacyRoomWithLog();
+  const target = tempRoot();
+  const targetId = roomIdFor(target);
+
+  // ONE lock hold covers the migration AND the open: the room opens…
+  const opened = openMigratedRoom(legacy, target, () => openRoomLog(target, targetId));
+  expect(opened.ok).toBe(true);
+  // …and the lock is still held, so a second live writer is refused…
+  expect(fs.existsSync(lockPathFor(target))).toBe(true);
+  const second = openRoomLog(target, "r-second");
+  expect(second.ok).toBe(false);
+  if (!second.ok) expect(second.error).toBe("room file locked by another session");
+  // …the exclusive create a second PROCESS performs fails too.
+  expect(() =>
+    fs.writeFileSync(lockPathFor(target), String(process.pid), { flag: "wx" }),
+  ).toThrow();
+
+  // Closing the room releases the lock: the next opener gets the room.
+  closeRoomLog(target, targetId);
+  expect(fs.existsSync(lockPathFor(target))).toBe(false);
+  const reopened = openRoomLog(target, targetId);
+  expect(reopened.ok).toBe(true);
+  closeRoomLog(target, targetId);
 });

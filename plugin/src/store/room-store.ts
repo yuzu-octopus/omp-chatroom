@@ -7,7 +7,7 @@ import { type ClaimState, expireStale, hydrateClaims } from "./claims";
 import { startCompactor, stopCompactor } from "./compactor";
 import { loadRoomConfig, type RoomConfig, resolveRoomId } from "./config";
 import { appendLine, closeRoomLog, openRoomLog, replay } from "./log";
-import { legacyRoomRoot, migrateLegacyRoom, roomRootFor } from "./room-root";
+import { legacyRoomRoot, openMigratedRoom, roomRootFor } from "./room-root";
 import type { RoomRecord, RoomRecordDraft } from "./schema";
 import { invalidateTree } from "./tree-store";
 
@@ -237,15 +237,18 @@ function rootOf(ctx: ExtensionContext): string {
 export function roomStoreFor(ctx: ExtensionContext): RoomStore {
   // [invented] R10
   const root = rootOf(ctx);
-  // One-time move of a legacy project-local room into the global store. It runs on the FIRST
-  // open of the root only (the store is cached per root afterwards) and is a no-op once the
-  // global room holds a log.
-  if (!STORES.has(root)) migrateLegacyRoom(legacyRoomRoot(ctx.cwd), root);
   const agentId = ctx.agent.id;
   const live = SESSIONS.get(root);
   // One ref per session: a repeat call from the same agent must not bump the refcount again.
   if (live?.has(agentId) && STORES.has(root)) return STORES.get(root)!;
-  const store = storeFor(root, resolveRoomId(root));
+  // The FIRST open of this root also moves the legacy project-local room into the global store
+  // (the store is cached per root afterwards, and the migration is a no-op once the global room
+  // holds a log). The room's lock is held ACROSS the migration and the open: releasing it in
+  // between would let a second omp process on the same project take it, and our open would then
+  // fail — a hard loss of the room for that session.
+  const store = STORES.has(root)
+    ? storeFor(root, resolveRoomId(root))
+    : openMigratedRoom(legacyRoomRoot(ctx.cwd), root, () => storeFor(root, resolveRoomId(root)));
   const members = live ?? new Set<string>();
   if (live === undefined) SESSIONS.set(root, members);
   members.add(agentId);

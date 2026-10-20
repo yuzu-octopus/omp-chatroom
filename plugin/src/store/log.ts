@@ -15,6 +15,22 @@ export function lockPathFor(root: string): string {
 }
 
 /**
+ * The lock holds THIS process keeps, keyed by root (K9: globalThis-anchored, one per root).
+ *
+ * `count` is how many holds we have on the root; `room` marks one of them as the ROOM's own:
+ * the room's open ADOPTS that hold instead of taking a second one — a second
+ * `acquireRoomLock` from the same process fails by design, see below — and the room's close
+ * releases it. The registry (not the lock file) is the source of truth for "we hold it": a lock
+ * file can name our pid without being ours (a probe writes one to simulate another process),
+ * and only a hold we took ourselves may be treated as already held.
+ */
+interface LockHold {
+  count: number;
+  room: boolean;
+}
+const HOLDS = globalMap<string, LockHold>("__roomLockHolds");
+
+/**
  * Cross-process single-writer lock (plan 017 followup). Two omp processes on one project root
  * would mint colliding seqs and never see each other's records (proven: 10 duplicate seqs over
  * 40 records with a rendezvous probe) — silent divergence, not an error. The lock makes the
@@ -27,6 +43,8 @@ export function acquireRoomLock(root: string): void {
   fs.mkdirSync(lockPath.slice(0, lockPath.lastIndexOf("/")), { recursive: true });
   try {
     fs.writeFileSync(lockPath, String(process.pid), { flag: "wx" });
+    const held = HOLDS.get(root);
+    HOLDS.set(root, { count: (held?.count ?? 0) + 1, room: held?.room ?? false });
     return;
   } catch (error) {
     if ((error as { code?: string }).code !== "EEXIST") throw error;
@@ -50,11 +68,20 @@ export function acquireRoomLock(root: string): void {
   }
   fs.rmSync(lockPath, { force: true });
   fs.writeFileSync(lockPath, String(process.pid), { flag: "wx" });
+  const held = HOLDS.get(root);
+  HOLDS.set(root, { count: (held?.count ?? 0) + 1, room: held?.room ?? false });
 }
 
 /** Release the lock taken by `acquireRoomLock`. Only the owner unlinks (pid check). */
 export function releaseRoomLock(root: string): void {
   const lockPath = lockPathFor(root);
+  // The hold bookkeeping runs first: a missing or stolen lock file must not strand our hold.
+  const hold = HOLDS.get(root);
+  if (hold) {
+    hold.count -= 1;
+    if (hold.count > 0) return; // another of our holds is still live — keep the lock
+    HOLDS.delete(root);
+  }
   try {
     const owner = Number.parseInt(fs.readFileSync(lockPath, "utf-8"), 10);
     if (owner === process.pid) fs.rmSync(lockPath, { force: true });
@@ -63,17 +90,60 @@ export function releaseRoomLock(root: string): void {
   }
 }
 
+/**
+ * True when THIS process holds the lock on `root` (a hold taken through `acquireRoomLock`).
+ *
+ * The registry, not the lock file: a lock file can carry our pid without being ours, and only a
+ * hold we took ourselves may be treated as already-held.
+ */
+export function holdsRoomLock(root: string): boolean {
+  const hold = HOLDS.get(root);
+  return hold !== undefined && hold.count > 0;
+}
+
+/**
+ * Earmark this process's hold on `root` for the room's own open.
+ *
+ * The room's open adopts the earmarked hold instead of taking a second one (a second
+ * `acquireRoomLock` from the same process fails by design), and the room's close releases it.
+ * This is what closes the window between the migration and the open: the lock is never
+ * released in between, so no second omp process can take the room while we copy into it.
+ *
+ * @returns false when this process holds no lock on `root`.
+ */
+export function reserveRoomLock(root: string): boolean {
+  const hold = HOLDS.get(root);
+  if (!hold || hold.count <= 0) return false;
+  hold.room = true;
+  return true;
+}
+
 export function roomLogFd(root: string, roomId: string): number {
   // mkdirSync + O_APPEND|O_CLOEXEC
   const path = logPathFor(root, roomId);
   const existing = FDS.get(path);
   if (existing !== undefined) return existing;
-  acquireRoomLock(root);
+  // The room's open ADOPTS the lock handed to it by the migration (see `reserveRoomLock`):
+  // taking a second one would fail — a second acquire from the same process is an error by
+  // design — and the hold the room adopts is the one the room's close releases.
+  const held = HOLDS.get(root);
+  if (held && held.count > 0 && held.room) {
+    held.room = false;
+  } else {
+    acquireRoomLock(root);
+  }
   fs.mkdirSync(path.slice(0, path.lastIndexOf("/")), { recursive: true });
-  const fd = fs.openSync(
-    path,
-    fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_APPEND | O_CLOEXEC,
-  );
+  let fd: number;
+  try {
+    fd = fs.openSync(
+      path,
+      fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_APPEND | O_CLOEXEC,
+    );
+  } catch (error) {
+    // The room never opened: hand the lock back instead of leaking it.
+    releaseRoomLock(root);
+    throw error;
+  }
   FDS.set(path, fd);
   return fd;
 }
