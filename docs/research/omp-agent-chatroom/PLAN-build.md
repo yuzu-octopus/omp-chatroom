@@ -61,6 +61,40 @@ against 18.7.0 with a consistent +5..+10 drift, so the evidence holds and only t
 > :958 — are body prose describing the build as it happened and were left untouched under the
 > historical-record rule.
 
+> **Addendum 2026-10-21 — the effectiveness round: five capabilities and four record kinds.**
+> The build above is a historical record. This round (driven by the research in
+> `docs/research/large-swarm-coordination/REPORT.md`) changed the log format and the claim
+> semantics. What follows is what is true now.
+>
+> 1. **The claim record carries two new optional fields.** `dependsOn: string[]` (R3) — the
+>    resources that must be free before the claim can start; a claim is *refused* while one of them
+>    is held, and the refusal names the resource and its holder. `gen: number` (R1) — the fencing
+>    token: a per-resource counter that rises when **ownership** changes and stays put on a
+>    renewal. Both are optional, so a log written by an older build still replays.
+> 2. **The `claim` op takes `dependsOn?` and `gen?`; the `post` op takes `idemKey?` and `gen?`.**
+>    `idemKey` (R7) makes a repeated post return the first one instead of appending a second — a
+>    double post double-wakes every mentioned peer. `gen` on a post is the write-path fence: a post
+>    into a topic the poster claims must carry that claim's current generation.
+> 3. **Claiming a resource you already hold RENEWS it** (R2). The same op, no new one: the lease's
+>    start moves to now. A claim refused with "held by *you*" was a wart; it is now the renewal.
+> 4. **Three new record kinds** (R5): `contended` (a claim attempt that lost: the loser, the
+>    resource, the holder), `wait` (the waiter, the mechanism, the target, the outcome, and when it
+>    was enqueued) and `delivered` (the recipient, the delivered seq, the tier). The arbiter stays
+>    PURE on a loss (§3.4's rule is unchanged): the two user-facing entry points record the
+>    contention, because the arbitration decision is not state but the *attempt* is.
+> 5. **The `member{leave}` kind is still never appended.** An agent parked between turns is alive,
+>    so a leave on park would churn the roster; and the metric it would make exact is already
+>    computable from today's records.
+> 6. **A wait that would close a cycle is refused** (R4), with the cycle in `details.cycle`. The
+>    wait-for graph is per room root and spans all three wait mechanisms, because a cycle can span
+>    them. The graph is in memory — the waits it describes are in memory too (a promise, not a
+>    record).
+> 7. **The delivery counters live in memory, not in the log.** A log record per delivery was
+>    measured at **3.3 ms per append** on the room store's filesystem (the fsync), so a post
+>    reaching ten agents would cost the delivery path 33 ms of pure fsync. The tier counts are
+>    therefore session-scoped counters on the store, exposed on the board; only the **T0** — the
+>    interruption budget, and rare — is logged.
+
 > **Addendum 2026-10-20 — the human-facing card now names its topic.** The §7.3 table row for
 > `room:message` said the collapsed card is `✉ room ⟵ author · 2m ago` + 3 quote-bordered lines. It
 > is now `✉ room ⟵ author · topic · [reply] · 2m ago` (`plugin/src/cards/message-cards.ts`,
