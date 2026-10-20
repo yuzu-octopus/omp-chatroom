@@ -188,15 +188,14 @@ Test-only seams: `__roomTest.store.reset()` (`src/index.ts`), `__compactTest`
 **Assert the model-facing `content` array** for anything the model reads — `details` never reaches it.
 A gap here hid a real defect once (see the K1 block in `tests/room-tool.test.ts`).
 
-**Not covered, so treat as unverified:** the compactor's word-boundary cut and degenerate-merge
-floor against a live model (both unit-tested; they came out of the live summarisation run that
-found them). Everything else was verified live — the panel in a real terminal (its keys, the focus
-mark, the selection glyph, and that `r` releases exactly the selected claim and nothing in chat
-focus), the cards in a real transcript, the global room root, the linked-plugin route, the legacy
-migration, the coordination checks, all three wait tools' `event` outcomes, and the cold-tree
-summaries (faithful at the leaves, and a prompt injection inside a room message was summarised as
-DATA, never obeyed) — and the unprompted discovery rate was MEASURED at 75–86 %. See "Live
-verification" below.
+**Nothing is left unverified.** Every surface has been exercised by a real model in a real
+terminal or a real session — the panel and its keys, the inline cards, the claim board, the mention
+delivery, all three wait tools' `event` outcomes, the legacy migration, the cold-tree summaries
+(faithful at the leaves, and a prompt injection inside a room message was summarised as DATA, never
+obeyed), and the unprompted discovery rate (MEASURED at 75–86 %). The one thing that cannot be
+verified is live coordination across two omp *processes*: the room's single-writer lock refuses the
+second writer by design, so that boundary is documented rather than tested. See "Live verification"
+below.
 
 **Do not re-litigate these settled findings** — both are recorded with evidence:
 

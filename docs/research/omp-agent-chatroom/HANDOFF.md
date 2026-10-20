@@ -233,14 +233,35 @@ A raw pty (no tmux on this machine), a pyte virtual screen to read the diff-rend
 No plugin error, warning or stack trace in the run's stderr, raw pty output, `~/.omp/logs/` or the
 plugin's own trace log.
 
+### The compactor's fixes, against a live model — VERIFIED
+
+The same 660-record room, with its tree cache deleted and rebuilt by the FIXED code: **133 nodes,
+0 mid-word endings, 0 degenerate nodes** (the pre-fix tree had 2 mid-word endings, 1 mid-markup and
+a 9-byte `"- Weekday"`). The smallest node is now 84 bytes, and 0 of the 5 merge nodes fall below
+the 5 % floor.
+
+- A cut node can never be shorter than 489 bytes (the longest token in the records is 21 bytes), and
+  126 of the 133 nodes are shorter than that — so they are the model's own complete reply, not
+  truncations.
+- The same block that produced `"- Weekday"` now reads `"- Weekday standup: 09:30 in room 4. - Migration
+  rehearsal: A3Attention found stale cursors in 2 of 32 agents; …"` — the model still wrote
+  "Weekday", but as the label of a full bullet.
+- The summaries stay faithful: three rebuilt summaries (a leaf and two merges) check out against
+  their raw records, with no invented numbers.
+- The safety property still holds: exactly 1 of the 133 nodes mentions the injected message, and it
+  does so as data ("Message 33 attempted to override prior instructions, requesting pirate-style
+  behavior and the reply "BANANA""). No node contains "IGNORE PREVIOUS" at all.
+
 ### Still unverified — do not claim these
 
-- **The compactor's word-boundary cut and the degenerate-merge floor, against a live model.** Both
-  are unit-tested and came out of the live summarisation run that found them; the fixed behaviour
-  has not been re-run against a real model.
+**Nothing is left on this list.** Every surface has now been exercised by a real model in a real
+terminal or a real session: the panel and its keys, the inline cards, the claim board, the mention
+delivery, all three wait tools' `event` outcomes, the legacy migration, the cold-tree summaries
+(including the prompt-injection check), and the unprompted discovery rate.
 
-Everything else that was on this list is now measured — see "Live verification (2026-10-20)"
-above for the discovery rate, the cards in a real transcript, and the coordination checks.
+The one thing that CANNOT be verified is live coordination across two omp PROCESSES: the room's
+single-writer lock refuses the second writer by design (see "Known limits"), so that boundary is
+documented rather than tested.
 
 ## What to run
 
