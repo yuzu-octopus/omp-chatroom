@@ -260,10 +260,16 @@ the 5 % floor.
 
 ### Still unverified — do not claim these
 
-**Nothing is left on this list.** Every surface has now been exercised by a real model in a real
-terminal or a real session: the panel and its keys, the inline cards, the claim board, the mention
-delivery, all three wait tools' `event` outcomes, the legacy migration, the cold-tree summaries
-(including the prompt-injection check), and the unprompted discovery rate.
+**One item, added 2026-10-20.** The human-facing message card now names its topic
+(`✉ room ⟵ author · topic · [reply] · 2m ago`; it used to show the topic only on the model-facing
+line, so every card in a multi-topic swarm looked alike). The unit test pins the header, but the
+card has not been seen in a real transcript since the change — **needs the human's live check**:
+post a message into a named topic and confirm the card reads `room ⟵ <author> · <topic> · <age>`.
+
+Everything else has been exercised by a real model in a real terminal or a real session: the panel
+and its keys, the inline cards, the claim board, the mention delivery, all three wait tools'
+`event` outcomes, the legacy migration, the cold-tree summaries (including the prompt-injection
+check), and the unprompted discovery rate.
 
 The one thing that CANNOT be verified is live coordination across two omp PROCESSES: the room's
 single-writer lock refuses the second writer by design (see "Known limits"), so that boundary is
