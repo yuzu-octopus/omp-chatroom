@@ -171,7 +171,22 @@ async function callSummarizer(ctx: ExtensionContext, context: Context): Promise<
   return message;
 }
 
-/** §4 — the "too long" follow-up, sent in the same conversation; the cut shows where the limit is. */
+/**
+ * §4 — the "too short" follow-up, sent in the same conversation.
+ *
+ * The mirror of the too-long cut: the model is told what it produced, what the floor is, and that
+ * the answer has to carry the block. A silent retry leaves it guessing, and it very likely answers
+ * the same way.
+ */
+function tooShortMessage(bytes: number, minUsefulBytes: number): string {
+  return (
+    `Too short: your line is ${bytes} bytes, under the ${minUsefulBytes}-byte minimum for this ` +
+    "block. A summary that short cannot carry the block it summarises. Write it again, keeping " +
+    "what the block actually says, and keep it under the ruler's length."
+  );
+}
+
+/** §4 — the "too long" follow-up, sent in the same conversation; the cut shows where the limit fell. */
 function tooLongMessage(text: string): string {
   const bytes = Buffer.byteLength(text, "utf-8");
   const cut = truncateBytes(text, TREE_REC);
@@ -199,10 +214,16 @@ export async function summarizeBlock(
   hi: number,
 ): Promise<string> {
   let body: string;
+  // The block's RAW size — the reference the merge floor is measured against. It must NOT be the
+  // input summaries' size: those are the thing that may be degenerate (a merge of two truncated
+  // halves gave "- Weekday", nine bytes), and a floor computed from them is defeated exactly when
+  // it is needed.
+  let rawBytes = 0;
   if (hi - lo <= RAW_MAX) {
     const lines = store.records.slice(lo, hi).map(recordLine);
     if (lines.length < hi - lo) return "";
     body = lines.map((line) => `  ${line}`).join("\n");
+    rawBytes = Buffer.byteLength(body, "utf-8");
   } else {
     const mid = (lo + hi) / 2;
     const tree = openTreeStore(store.treePath, store.records.length);
@@ -210,6 +231,10 @@ export async function summarizeBlock(
     const right = tree.getNode(mid, hi);
     if (left === null || right === null) return ""; // a half is unbuilt — not a failure, just early
     body = `  [${lo},${mid}) ${left}\n  [${mid},${hi}) ${right}`;
+    // The raw records under this block: the halves' summaries are measured against THEM.
+    rawBytes = store.records
+      .slice(lo, hi)
+      .reduce((sum, record) => sum + Buffer.byteLength(recordLine(record), "utf-8"), 0);
   }
   const task =
     `${UNTRUSTED_TASK_PREFIX}\n\n` +
@@ -222,10 +247,11 @@ export async function summarizeBlock(
   // A summary that carries almost nothing is not a summary — but only a MERGE can be degenerate
   // this way: its input is two already-summarised halves, and the merge of two TRUNCATED halves
   // produced "- Weekday" (nine bytes) for a 400-byte input. That garbage became the input of the
-  // next merge. So the floor applies to the merge path only, and it is a FRACTION of the input: a
-  // leaf (raw records in) may legitimately summarise to a short line.
+  // next merge. So the floor applies to the merge path only, and it is a FRACTION OF THE BLOCK'S
+  // RAW SIZE — not of the input summaries, which are the thing that may be degenerate. A leaf (raw
+  // records in) may legitimately summarise to a short line.
   const minUsefulBytes =
-    hi - lo > RAW_MAX ? Math.max(1, Math.floor(Buffer.byteLength(body, "utf-8") * 0.05)) : 1;
+    hi - lo > RAW_MAX ? Math.min(TREE_REC - 1, Math.max(1, Math.floor(rawBytes * 0.05))) : 1;
   let best = "";
   let bestBytes = Number.POSITIVE_INFINITY;
   for (let attempt = 0; attempt < COMPACT_MAX_RETRIES; attempt++) {
@@ -234,7 +260,17 @@ export async function summarizeBlock(
       const text = replyText(message);
       if (text === "") continue; // no text is not a usable summary; try again
       const bytes = Buffer.byteLength(text, "utf-8");
-      if (bytes < minUsefulBytes) continue; // degenerate — it cannot carry the block; try again
+      if (bytes < minUsefulBytes) {
+        // Degenerate: it cannot carry the block. TELL the model why — a silent retry gives it no
+        // idea what was wrong, so it very likely answers the same way, five times, and the node is
+        // never built (which leaves everything ABOVE it unbuildable too).
+        context.messages.push(message, {
+          role: "user",
+          content: tooShortMessage(bytes, minUsefulBytes),
+          timestamp: Date.now(),
+        });
+        continue;
+      }
       if (bytes < bestBytes) {
         best = text;
         bestBytes = bytes;

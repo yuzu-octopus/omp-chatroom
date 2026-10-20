@@ -144,7 +144,12 @@ registerCustomApi(FAKE_API, (_model, context, options) => {
   // Deterministic: the summary is a pure function of the block the prompt names, so a rebuild
   // that reproduces the same prompt must reproduce the same node (T1).
   const block = lastPrompt.match(/Block \[(\d+),(\d+)\)/);
-  const text = block ? `S${block[1]}-${block[2]}` : "S?";
+  // A summary has to CARRY its block: the merge floor is 5% of the block's raw size, so the
+  // fake writes a line that scales with the block - a five-byte summary of a kilobyte block is
+  // exactly the degeneracy the floor exists to catch.
+  const text = block
+    ? `S${block[1]}-${block[2]} ${filler(Math.min(400, 10 * (Number(block[2]) - Number(block[1])) + 20))}`
+    : "S?";
   queueMicrotask(() => stream.end(assistantMessage(text)));
   return stream;
 });
@@ -362,7 +367,7 @@ test("the compaction spend cap is a daily RATE: at the cap the compactor pauses 
 
   // The tree is a cache: reads never block on the cap (T3).
   const tree = openTreeStore(treePath, 4);
-  expect(tree.getNode(0, 2)).toBe("S0-2");
+  expect(tree.getNode(0, 2)).toContain("S0-2");
   expect(tree.cover(4, 96)).toHaveLength(4);
 
   __compactTest.resetSpend();
@@ -418,7 +423,7 @@ test("a summarizer that fails every attempt skips the node without pausing the t
   // The very next block still builds: one bad node never pauses the whole tree.
   llmFailures = 0;
   expect(await compactOnce(store, ctx, [0, 2])).toBe(true);
-  expect(openTreeStore(treePath, 4).getNode(0, 2)).toBe("S0-2");
+  expect(openTreeStore(treePath, 4).getNode(0, 2)).toContain("S0-2");
   __compactTest.resetSpend();
 });
 
@@ -610,6 +615,36 @@ test("dispose() on the last session stops all three jobs — each timer cleared 
 });
 
 // --- 10. F6/F7 — the compaction task, the ruler, and the length retry -------
+
+test("a degenerate merge is rejected AND the model is told why", async () => {
+  // The floor is a fraction of the block's RAW size, not of the input summaries: the input
+  // summaries are the thing that may be degenerate (two truncated halves gave "- Weekday", nine
+  // bytes, and that garbage became the next merge's input). And a rejection the model is not told
+  // about is a silent stall: the same answer comes back, five times, and the node is never built.
+  const { treePath } = tmpRootTree();
+  const store = fakeStore(
+    treePath,
+    Array.from({ length: 32 }, (_, i) => msg(i)),
+  );
+  const { ctx } = fakeCtx("main");
+  // A MERGE block: both halves must be built for it to be summarisable at all.
+  const tree = openTreeStore(treePath, 32);
+  expect(tree.putNode(0, 16, "left half summary")).toBe(true);
+  expect(tree.putNode(16, 32, "right half summary")).toBe(true);
+
+  llmCalls = 0;
+  lastMessageCount = 0;
+  replyFor = () => "ab"; // three bytes: far under any floor for a real block
+
+  const got = await summarizeBlock(ctx, store, 0, 32);
+  expect(got).toBe(""); // nothing usable was produced
+  expect(llmCalls).toBeGreaterThan(1); // it was retried
+  // Each retry pushed a message back into the conversation: the model was TOLD. A silent retry
+  // would leave it guessing, and it would answer the same way.
+  expect(lastMessageCount).toBeGreaterThan(1);
+
+  replyFor = undefined;
+});
 
 test("a compaction reply over the limit is retried in the same conversation, keeping the shortest", async () => {
   const { treePath } = tmpRootTree();
