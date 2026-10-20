@@ -137,7 +137,7 @@ is there for.
 asserted against the same constant, so the second bump is covered by the same test.
 
 **The gate is green on 18.12.3**: `tsc` 0 errors, `biome` clean over 51 files, and
-`bun test tests/` → 274 pass / 0 fail / 3398 assertions / 15 files.
+`bun test tests/` → 289 pass / 0 fail / 15 files.
 
 ## Item 2 — the room root moves into the global omp session store
 
@@ -225,9 +225,28 @@ Four further findings from the same audit, all fixed.
 | c | **The copied log is named after the id the TARGET resolves** — the legacy config's `roomId` when it is a valid non-empty id, else the id minted from the target root. A log named after a different id would be copied into a file the target never reads, and the migrated history would be invisible | `plugin/src/store/room-root.ts` (`migrateLegacyRoom`) | `plugin/tests/room-root.test.ts` — "migration names the copied log after the id the TARGET resolves (F6)", "migration names the copied log after the target's minted id when the config pins none (F6)" |
 | d | **The hook logs a broken room.** An agent that cannot see the room behaves as if it were alone in it, so the degradation is no longer silent: the failure is logged with `pi.logger.warn` and the error that caused it | `plugin/src/onboarding/hook.ts` | `plugin/tests/onboarding.test.ts` — "the hook logs a broken room instead of silently dropping the digest (F7)" |
 
+## Item 6 — the second audit round, and the panel round
+
+A second, hostile review of the tree as it stood (a read-only audit of the three commits above,
+then a live pty run of the panel) found more. All of it is fixed.
+
+| # | Fix | Files touched | Test that pins it |
+|---|---|---|---|
+| a | **The retention `gap` is CARRIED by the next pass.** It is T1 for every viewer but the prune appends it OUTSIDE any op's batch, so no pass ever carried it: it counted as owed, pinned every cursor forever, and every T0 above it was re-delivered on every pass (an interrupt storm) | `plugin/src/tools/room.ts` (`deliverToTarget`, `t1Admitted`) | `plugin/tests/attention.test.ts` — "a gap in the pending set is delivered to the recipient on the next pass", "the same T0 is never delivered twice once a gap no longer pins the cursor", "a T1 the K/B cap refused still stays above the cursor — the floor holds under a gap" |
+| b | **The expiry notice respects the cursor floor.** It is a T0 at the room head; an uncapped bump carried the holder's cursor over every record it had not read, and `room{op:"read"}` could never return them | `plugin/src/tools/room.ts` (`owedFloorFor`), `plugin/src/onboarding/hook.ts` | `plugin/tests/onboarding.test.ts` — "the expiry notice does not carry the holder's cursor over its unread records" |
+| c | **A delivered T0 is delivered ONCE.** While an older record is still owed the cursor cannot advance past the T0, so the next pass re-selected and re-sent it (a T0 is a wake+steer). The delivered T0s are remembered per room root and per recipient | `plugin/src/store/cursors.ts` (`markDeliveredT0`, `deliveredT0s`), `plugin/src/attention/delivery.ts`, `plugin/src/tools/room.ts` | `plugin/tests/attention.test.ts` — "a T0 is not re-delivered while an older refused record pins the cursor" |
+| d | **The panel releases the row you selected, and shows its state.** One shared selection index was clamped by the FOCUSED pane's row count but applied to the BOARD's rows: with the chat focused, `r` released a claim you had never selected. Each pane has its own cursor, the board's action addresses the row in DISPLAY order, `r`/`o` act only while the board has the focus, and the focused pane and the selected row are finally VISIBLE (`[chat]|board` in the title, the theme's `nav.selected` glyph on the row) | `plugin/src/panel/panel.ts`, `plugin/src/panel/board-pane.ts`, `plugin/src/panel/chat-pane.ts` | `plugin/tests/panel.test.ts` — "`r` in CHAT focus releases nothing", "`r` in board focus releases the row the user sees", "the focused pane is visible in the rendered panel", "the selected row is marked in the board pane" |
+| e | **The migration never adopts an arbitrary log, copies atomically, and holds the lock.** The source is the log the legacy room itself would have opened (with several candidates and no match, the migration declines); every file is staged and renamed into place, so an interrupted copy leaves NO log instead of a truncated one that blocked every later attempt; the target's lock is held across the migration AND the open | `plugin/src/store/room-root.ts`, `plugin/src/store/log.ts`, `plugin/src/store/room-store.ts` | `plugin/tests/room-root.test.ts` — three new tests |
+| f | **`/room join` records membership, not a cursor.** The hook's `initCursor` runs for every agent, so the cursor-keyed check never fired: a command-joined agent got no `member{join}` record and stayed out of the board roster and the log | `plugin/src/commands/room-command.ts` | `plugin/tests/room-command.test.ts` — "`/room join` records membership even when the agent already has a cursor" |
+| g | **The room jobs restart after the main session dies.** The host clears that session's timers but the room's timer REGISTRY survived, so the sweep/retention/compactor jobs were dead while the registry claimed they ran: claims never expired and the log never pruned again | `plugin/src/onboarding/hook.ts` (`session_shutdown`) | `plugin/tests/onboarding.test.ts` — "the room jobs restart after the main session's shutdown (F6)" |
+| h | **The no-timer fallback never waits.** A ctx without the host's timer API (only a test double) must not fall back to the unbounded wait the bound exists to prevent: the send is issued and not awaited | `plugin/src/attention/delivery.ts` (`sendBounded`) | `plugin/tests/attention.test.ts` — "a ctx without the timer API still does not wait for the target's turn (F8)" |
+| i | **The routing rule contradicted itself.** It told the model twice that a room mention does NOT steer a running agent, while its own corrections section — and the implementation (the host's IRC bridge and the room's T0 delivery both end in `agent.steer()`) — say it does. The stale claim pushed every directed correction toward `agent://` instead of the room | `plugin/src/onboarding/routing-rule.md`, `plugin/skills/omp-agent-chatroom/SKILL.md`, `plugin/README.md`, `plugin/src/attention/delivery.ts` (comment) | model-facing prose — no test; the behaviour is pinned by the delivery tests |
+| j | **The discovery probe counted a bash append as "the model did nothing"** — it only recognised `edit`/`write` as mutations, so two trials that had actually done the whole task were scored HARNESS-ERROR | `plugin/scripts/discovery-probe.sh` | verified by hand against three synthetic event streams (a bash append → NOT-DISCOVERED, a claim then an edit → DISCOVERED, a read only → HARNESS-ERROR) |
+| k | **The wait-heavy test files got a load-robust per-test budget.** They wait on the room's own 5 s wait timeout, which is also bun's default per-test timeout: on a loaded box the wait's timer fired late and the watchdog killed the test first, so the suite failed while the behaviour was correct | `plugin/tests/e2e-room.test.ts`, `plugin/tests/wait-tools.test.ts` | — |
+
 ## Test plan
 
-- `bun test tests/` — **274 pass / 0 fail, 3398 assertions, 15 files** (was 233 / 13 before this
+- `bun test tests/` — **289 pass / 0 fail, 15 files** (was 233 / 13 before this
   round; the new files are `plugin/tests/room-root.test.ts` and `plugin/tests/room-root-e2e.test.ts`).
 - `bunx --bun tsc --noEmit -p tsconfig.json` — 0 errors.
 - `bunx --bun @biomejs/biome check src tests` — clean.
@@ -255,7 +274,8 @@ Four further findings from the same audit, all fixed.
 - [x] The P0 delivery deadlock is fixed: every send is bounded (250 ms), the per-recipient
       deliveries run concurrently, and the cursor floor applies to every cursor bump.
 - [x] The four follow-up audit fixes are in the tree, each with its test.
-- [x] `bun test tests/` → 274 pass / 0 fail / 3398 assertions / 15 files; `tsc` 0 errors;
+- [x] The second audit round and the panel round are in the tree (item 6), each with its test.
+- [x] `bun test tests/` → 289 pass / 0 fail / 15 files; `tsc` 0 errors;
       `biome` clean.
 - [x] `AGENTS.md`, `docs/research/omp-agent-chatroom/HANDOFF.md` and `plans/README.md` state the
       new pin, the new room root, the new counts and what is still unverified.
