@@ -97,7 +97,7 @@ host coerces a result without it to an error) plus `details` carrying `ok` and t
 |---|---|---|---|
 | `join` | — | register membership; mint a cursor at `logEnd − 50`. Idempotent | `{ ok, digest, cursor }` |
 | `read` | `since?`, `limit?` | records after the cursor; 50 default / 200 max | `{ ok, records, cursor, more }` |
-| `post` | `topic`, `body`, `mention?`, `replyTo?`, `performative?`, `idemKey?`, `gen?` | append a msg, then notify per recipient | `{ ok, id, seq, tier, idempotent? }` |
+| `post` | `topic`, `body`, `mention?`, `replyTo?`, `performative?`, `idemKey?`, `gen?`, `status?` | append a msg, then notify per recipient | `{ ok, id, seq, tier, idempotent? }` |
 | `claim` | `topic`, `key`, `ttl?`, `dependsOn?`, `gen?` | grant exclusive ownership of `"<topic>/<key>"`; claiming it again renews your lease | `{ ok, holder, expiresAt, gen }` |
 | `release` | `topic`, `key` | drop a claim you hold | `{ ok }` |
 | `board` | — | claims + roster + per-agent lag + topic unread counts, and **who is blocked on what** | `{ ok, board }` |
@@ -147,6 +147,13 @@ not as a mutex on the filesystem.
 cycle named in `details.cycle`. The graph spans all three wait mechanisms, because a cycle can span
 them: an agent waiting for a claim while another waits for a message from the first is as deadlocked
 as two agents waiting for each other's claims.
+
+**The topic's status ledger.** A post may carry `status`: Magentic-One's five keys
+(`is_request_satisfied`, `is_in_loop`, `is_progress_being_made`, `next_speaker`,
+`instruction_or_question`), each `{reason, answer}`, checked on write. Only the agent **holding the
+topic's claim** may write it — in a flat room that is the coordination role, and the claim holder is
+the router. A ledger whose `is_in_loop` answer is `"yes"` **interrupts** the agents following that
+topic, and only them: the failure it prevents is a swarm repeating itself until the timeout.
 
 **Idempotency.** A post may carry an `idemKey`: a repeat with the same key returns the **first**
 post instead of appending a second (a double post double-wakes every agent it mentions). A key
