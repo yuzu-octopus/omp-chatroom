@@ -130,11 +130,31 @@ async function waitForClaim(
       : clamp(params.maxWaitMs, CLAIM_WAIT_MIN_MS, CLAIM_WAIT_MAX_MS);
   const startedAt = Date.now();
 
-  if (signal?.aborted) return abortResult(resource);
+  // R5 — a wait that is not recorded cannot be measured: the wait's outcome is the room's only
+  // evidence that a blocked agent was blocked rather than idle. The record is T2 (bookkeeping), so
+  // it never reaches anyone's context.
+  const recordWait = (outcome: WaitOutcome): void => {
+    store.append({
+      kind: "wait",
+      from: agentId,
+      waited: "claim",
+      target: resource,
+      outcome,
+      enqueuedAt: startedAt,
+    });
+  };
+
+  if (signal?.aborted) {
+    recordWait("aborted");
+    return abortResult(resource);
+  }
 
   // Fast path: this agent already holds the lease — waiting would be a no-op.
   const held = store.claims.get(resource);
-  if (held?.holder === agentId) return eventResult(resource, held);
+  if (held?.holder === agentId) {
+    recordWait("event");
+    return eventResult(resource, held);
+  }
   // M-8 — mark this agent as waiting on the resource so classify returns T1 for claim/release.
   const viewer = viewerFor(store, agentId);
   viewer.waitedResource = resource;
@@ -147,6 +167,7 @@ async function waitForClaim(
   const finish = (result: WaitForClaimResult): void => {
     if (finished) return;
     finished = true;
+    recordWait(result.details?.outcome ?? "aborted");
     settle(result);
   };
 

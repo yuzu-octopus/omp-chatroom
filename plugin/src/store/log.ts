@@ -229,11 +229,23 @@ export const LOG_VALIDATION_FIELDS: Readonly<Record<RecordKind, readonly string[
   member: ["v", "seq", "ts", "kind", "id", "from", "action"],
   gap: ["v", "seq", "ts", "kind", "id", "from", "skipped", "reason"],
   contended: ["v", "seq", "ts", "kind", "id", "from", "resource", "holder"],
+  wait: ["v", "seq", "ts", "kind", "id", "from", "waited", "target", "outcome", "enqueuedAt"],
+  delivered: ["v", "seq", "ts", "kind", "id", "from", "deliveredSeq", "tier"],
 };
 
 // §3.3 S3 — per-kind field validation on replay. A record that parses but does not match the
 // RoomRecord shape is quarantined with gap{reason:"invalid"}.
-const KINDS = new Set<string>(["msg", "claim", "release", "note", "member", "gap", "contended"]);
+const KINDS = new Set<string>([
+  "msg",
+  "claim",
+  "release",
+  "note",
+  "member",
+  "gap",
+  "contended",
+  "wait",
+  "delivered",
+]);
 const RELEASE_REASONS = new Set<string>(["released", "expired", "reclaimed", "aborted"]);
 const GAP_REASONS = new Set<string>(["retention", "invalid", "corrupt"]);
 const MEMBER_ACTIONS = new Set<string>(["join", "leave"]);
@@ -246,6 +258,9 @@ const PERFORMATIVES = new Set<string>([
   "query",
   "failure",
 ]);
+const WAITED_KINDS = new Set<string>(["claim", "agent", "message"]);
+const WAIT_OUTCOMES = new Set<string>(["event", "timeout", "aborted"]);
+const TIERS = new Set<string>(["T0", "T1", "T2"]);
 const STRING_FIELDS = [
   "id",
   "from",
@@ -259,6 +274,10 @@ const STRING_FIELDS = [
   "replyWith",
   "replyBy",
   "holder",
+  "waited",
+  "target",
+  "outcome",
+  "tier",
 ] as const;
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -301,6 +320,20 @@ export function validateRecord(value: unknown): RoomRecord | null {
   if (kind === "member" && !inSet(value.action, MEMBER_ACTIONS)) return null;
   if (kind === "release" && !inSet(value.reason, RELEASE_REASONS)) return null;
   if (kind === "gap" && (!Number.isInteger(value.skipped) || !inSet(value.reason, GAP_REASONS))) {
+    return null;
+  }
+  if (
+    kind === "wait" &&
+    (!inSet(value.waited, WAITED_KINDS) ||
+      !inSet(value.outcome, WAIT_OUTCOMES) ||
+      !Number.isFinite(value.enqueuedAt))
+  ) {
+    return null;
+  }
+  if (
+    kind === "delivered" &&
+    (!Number.isInteger(value.deliveredSeq) || !inSet(value.tier, TIERS))
+  ) {
     return null;
   }
   // Every field was validated above; this cast is the validated boundary.

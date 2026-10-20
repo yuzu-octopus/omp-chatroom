@@ -34,6 +34,7 @@ export interface WaitForMessageParams {
   from?: string;
   mention?: boolean;
   source?: "room";
+  topic?: string;
   timeout?: number;
 }
 
@@ -69,6 +70,10 @@ function describeMatch(record: RoomRecord): string {
       return `${record.skipped} record(s) skipped (${record.reason})`;
     case "contended":
       return `${safe(record.from)} wanted ${safe(record.resource)} — held by ${safe(record.holder)}`;
+    case "wait":
+      return `${safe(record.from)} waited for ${safe(record.target)} — ${record.outcome}`;
+    case "delivered":
+      return `${safe(record.from)} got seq ${record.deliveredSeq} at ${record.tier}`;
   }
 }
 
@@ -126,6 +131,9 @@ async function waitForMessage(
   const agentId = ctx.agent.id;
   const wantMention = params.mention === true;
   const from = params.from;
+  const topic = params.topic;
+  // What the wait was FOR — the target of the record.
+  const waitTarget = topic ?? from ?? (wantMention ? "@me" : "*");
 
   // U6 — a missing/unwritable/corrupt room file is a normal result, never a throw.
   let store: RoomStore;
@@ -140,7 +148,31 @@ async function waitForMessage(
     };
   }
 
-  if (signal?.aborted) return abortResult();
+  if (signal?.aborted) {
+    store.append({
+      kind: "wait",
+      from: agentId,
+      waited: "message",
+      target: waitTarget,
+      outcome: "aborted",
+      enqueuedAt: Date.now(),
+    });
+    return abortResult();
+  }
+
+  const startedAt = Date.now();
+  // R5 — a wait that is not recorded cannot be measured: the wait's outcome is the room's only
+  // evidence that a blocked agent was blocked rather than idle.
+  const recordWait = (outcome: WaitOutcome): void => {
+    store.append({
+      kind: "wait",
+      from: agentId,
+      waited: "message",
+      target: waitTarget,
+      outcome,
+      enqueuedAt: startedAt,
+    });
+  };
 
   let settle!: (result: WaitForMessageResult) => void;
   const done = new Promise<WaitForMessageResult>((resolve) => {
@@ -150,6 +182,7 @@ async function waitForMessage(
   const finish = (result: WaitForMessageResult): void => {
     if (finished) return;
     finished = true;
+    recordWait(result.details?.outcome ?? "aborted");
     settle(result);
   };
 
@@ -158,6 +191,7 @@ async function waitForMessage(
   const matches = (record: RoomRecord): boolean => {
     if (record.kind !== "msg") return false;
     if (from !== undefined && record.from !== from) return false;
+    if (topic !== undefined && record.topic !== topic) return false;
     if (wantMention && !record.mention?.includes(agentId)) return false;
     return true;
   };
@@ -175,7 +209,6 @@ async function waitForMessage(
   signal?.addEventListener("abort", onAbort, { once: true });
 
   // U5 heartbeat — the TUI repaints "Waiting for … (elapsed Ns)" without the tool resolving.
-  const startedAt = Date.now();
   const heartbeat = onUpdate
     ? ctx.setInterval(() => {
         onUpdate({
@@ -209,6 +242,7 @@ export function registerWaitForMessage(pi: ExtensionAPI): void {
       .optional()
       .describe("only resolve on a message that mentions you (default false)"),
     source: z.enum(["room"]).optional().describe('v1 ships only "room" — the room store listener'),
+    topic: z.string().optional().describe("only resolve on a message in this topic"),
     timeout: z.number().optional().describe("ms to wait; default 30000, min 1000, max 1800000"),
   });
 

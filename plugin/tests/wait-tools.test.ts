@@ -134,6 +134,48 @@ test(
   WAIT_TIMEOUT_MS,
 );
 test(
+  "R5: a resolved wait is recorded, so wait productivity is measurable",
+  async () => {
+    const root = freshRoot();
+    const bus = new EventBus();
+    const registry = new AgentRegistry();
+    const a = await newSession(bus, registry, root, "AgentA");
+    const b = await newSession(bus, registry, root, "AgentB");
+    try {
+      const roomA = toolOf(a, "room");
+      const waitB = toolOf(b, "wait_for_claim");
+
+      await roomA.execute("c-claim", {
+        op: "claim",
+        topic: "build",
+        key: "step",
+        ttl: 300_000,
+      });
+      const waitP = waitB.execute("c-wait", {
+        resource: "build/step",
+        ttl: 300_000,
+        timeout: 5_000,
+      });
+      await roomA.execute("c-release", { op: "release", topic: "build", key: "step" });
+      const winner = await Promise.race([waitP, Bun.sleep(2_000).then(() => null)]);
+      expect(winner).not.toBeNull();
+
+      // The record is in the ROOM LOG, not in the tool's result: the metric is computed from the
+      // log, and the log is what survives the session.
+      const roomB = toolOf(b, "room");
+      const read = await roomB.execute("c-read", { op: "read", since: 0, limit: 50 });
+      const text = read.content.map((c) => c.text ?? "").join("\n");
+      expect(text).toContain("wait");
+      expect(text).toContain("build/step");
+    } finally {
+      await a.dispose();
+      await b.dispose();
+    }
+  },
+  WAIT_TIMEOUT_MS,
+);
+
+test(
   "wait_for_claim times out normally: {outcome:'timeout', acquired:false}, useless:true, no throw",
   async () => {
     const root = freshRoot();

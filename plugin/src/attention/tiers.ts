@@ -40,5 +40,10 @@ export function classify(record: RoomRecord, viewer: MemberState): Tier {
       // does not need an interrupt for it — the record is for the LOG (contention is measurable),
       // not for anyone's context.
       return "T2";
+    case "wait":
+    case "delivered":
+      // Bookkeeping: how long agents waited, and what was delivered at what tier. Neither is for
+      // an agent's context — they are for the log, where the coordination metrics are computed.
+      return "T2";
   }
 }

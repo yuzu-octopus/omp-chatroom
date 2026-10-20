@@ -41,6 +41,14 @@ export interface RoomStore {
   waiters: Map<string, string[]>;
   listeners: Set<(r: RoomRecord) => void>;
   config: RoomConfig;
+  /**
+   * R5 — delivery telemetry: how many records reached an agent at each tier. Session-scoped, not
+   * logged: a log record per delivery would cost one fsync each (measured: 3.3 ms on the room
+   * store's filesystem), so the fan-out of one post would cost the delivery path 3.3 ms × N
+   * recipients. The T0 count — the interruption budget — is also logged, because a T0 is rare and
+   * its cost is noise next to the send it precedes.
+   */
+  deliveries: { T0: number; T1: number; T2: number };
 
   // K15 — the ONLY write path: mint seq/ts/v/id, append the line, project, notify listeners.
   // Without it every writer module would import this module at runtime and close a cycle.
@@ -144,6 +152,7 @@ function createStore(root: string, roomId: string): RoomStore {
     members: new Map(),
     waiters: new Map(),
     listeners: new Set(),
+    deliveries: { T0: 0, T1: 0, T2: 0 },
     seq: 0,
 
     append(draft: RoomRecordDraft): RoomRecord {

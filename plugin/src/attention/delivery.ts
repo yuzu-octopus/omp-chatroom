@@ -2,7 +2,7 @@ import { AgentRegistry, type ExtensionAPI, type ExtensionContext } from "@oh-my-
 import { cardTypeFor } from "../cards/message-cards";
 import { safeRoomText } from "../onboarding/escape";
 import { bumpCursor, markDeliveredT0 } from "../store/cursors";
-import { roomStoreFor } from "../store/room-store";
+import { type RoomStore, roomStoreFor } from "../store/room-store";
 import type { RoomRecord } from "../store/schema";
 import type { Tier } from "./tiers";
 
@@ -109,6 +109,11 @@ export async function deliver(
     // refused, or a T0 record past the batch ceiling, still sits above the cursor and is still
     // readable. `cursorCap` is that floor (the seq just below the oldest owed record). Without it
     // a T2 delivery would skip the owed record and `room{op:"read"}` could never return it.
+    //
+    // R5 — the record IS consumed (the cursor moves past it, so it will never be pushed), so it
+    // counts as a T2 delivery even though nothing was injected: the tier distribution is the
+    // share of the room's traffic that each tier carries.
+    store.deliveries.T2++;
     bumpCursor(store, target, Math.min(record.seq, cap));
     return;
   }
@@ -147,7 +152,7 @@ export async function deliver(
 
   if (target === ctx.agent.id) {
     pi.sendMessage(payload, options);
-    if (tier === "T0") markDeliveredT0(store.root, target, record.seq);
+    recordDelivery(store, target, record, tier);
     bumpCursor(store, target, Math.min(record.seq, cap));
     return;
   }
@@ -159,10 +164,31 @@ export async function deliver(
     Promise.resolve(ref!.session!.sendCustomMessage(payload, options)),
   );
   if (!outcome.ok) throw outcome.error;
-  // A delivered T0 is remembered: while an older record is still owed the cursor cannot advance
-  // past it, and without this the next pass would select and RE-SEND it (a wake+steer storm).
-  if (tier === "T0") markDeliveredT0(store.root, target, record.seq);
+  recordDelivery(store, target, record, tier);
   bumpCursor(store, target, Math.min(record.seq, cap));
+}
+
+/**
+ * R5 — the delivery, recorded as telemetry.
+ *
+ * The tier count is in memory: a log record per delivery would cost one fsync each (measured:
+ * 3.3 ms on the room store's filesystem), and a post that reaches ten agents would cost the
+ * delivery path 33 ms of pure fsync. A **T0** is also logged: it is rare, its cost is noise next
+ * to the send it precedes, and it is the interruption budget — the number nobody else publishes.
+ */
+function recordDelivery(store: RoomStore, target: string, record: RoomRecord, tier: Tier): void {
+  store.deliveries[tier]++;
+  if (tier === "T0") {
+    // A delivered T0 is remembered: while an older record is still owed the cursor cannot advance
+    // past it, and without this the next pass would select and RE-SEND it (a wake+steer storm).
+    markDeliveredT0(store.root, target, record.seq);
+    store.append({
+      kind: "delivered",
+      from: target,
+      deliveredSeq: record.seq,
+      tier,
+    });
+  }
 }
 export function roomBodyOf(record: RoomRecord): string {
   switch (record.kind) {
@@ -179,6 +205,10 @@ export function roomBodyOf(record: RoomRecord): string {
       return `${record.skipped} record(s) skipped (${record.reason})`;
     case "contended":
       return `${record.from} wanted ${record.resource} — held by ${record.holder}`;
+    case "wait":
+      return `${record.from} waited for ${record.target} — ${record.outcome}`;
+    case "delivered":
+      return `${record.from} got seq ${record.deliveredSeq} at ${record.tier}`;
   }
 }
 
@@ -196,7 +226,11 @@ export function renderLine(record: RoomRecord, safeBody: string, tier: Tier): st
           ? "retention"
           : record.kind === "contended"
             ? `resource:${safeRoomText(record.resource)}`
-            : `topic:${safeRoomText(record.topic)}`; // msg | note
+            : record.kind === "wait"
+              ? `wait:${safeRoomText(record.target)}`
+              : record.kind === "delivered"
+                ? `tier:${record.tier}`
+                : `topic:${safeRoomText(record.topic)}`; // msg | note
   return `[${tier}] room ⟵ ${safeRoomText(record.from)} · ${where} · ${safeBody}`;
 }
 

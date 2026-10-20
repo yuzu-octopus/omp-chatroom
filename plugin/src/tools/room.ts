@@ -197,6 +197,10 @@ function recordLine(record: RoomRecord): string {
       return `${head} · gap · ${record.skipped} skipped (${record.reason})`;
     case "contended":
       return `${head} · contended ${safe(record.resource)} — lost to ${safe(record.holder)}`;
+    case "wait":
+      return `${head} · wait ${safe(record.target)} — ${record.outcome}`;
+    case "delivered":
+      return `${head} · delivered seq ${record.deliveredSeq} — ${record.tier}`;
   }
 }
 
@@ -270,7 +274,7 @@ function buildBoard(store: RoomStore, viewer: MemberState): BoardResult {
     row.lastSeq = record.seq;
     if (record.seq > cursor) row.unread++;
   }
-  return { ok: true, claims, roster, topics };
+  return { ok: true, claims, roster, topics, deliveries: { ...store.deliveries } };
 }
 
 /** The schema's documented bounds are the contract; this is the one place they are applied. */

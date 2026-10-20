@@ -514,6 +514,35 @@ test("deliver: a parked target's delivery is skipped, not thrown", async () => {
   expect(roomStoreFor(ctx).cursors.get(parked)).toBeUndefined(); // and the cursor did not advance
 });
 
+test("R5: deliveries are counted per tier, and a T0 is logged", async () => {
+  const root = tempRoot();
+  const ctx = fakeCtx(root, "Sender");
+  const store = roomStoreFor(ctx);
+
+  const piT1 = fakePi();
+  await deliver(piT1.pi, ctx, "Sender", msg(1, { from: "Other", topic: "build" }), "T1");
+  const piT0 = fakePi();
+  await deliver(piT0.pi, ctx, "Sender", msg(2, { from: "Other", mention: ["Sender"] }), "T0");
+  const piT2 = fakePi();
+  await deliver(piT2.pi, ctx, "Sender", msg(3, { from: "Other", topic: "build" }), "T2");
+
+  // The tier counts are the metric the report wants: T0 is the interruption budget.
+  expect(store.deliveries.T1).toBe(1);
+  expect(store.deliveries.T0).toBe(1);
+  expect(store.deliveries.T2).toBe(1);
+
+  // A T0 is ALSO logged - it is rare, and it is the number nobody else publishes. A T1 is not:
+  // one fsync per delivery would cost the delivery path 3.3 ms x the fan-out.
+  const delivered = store.records.filter((r) => r.kind === "delivered");
+  expect(delivered).toHaveLength(1);
+  const record = delivered[0]!;
+  if (record.kind === "delivered") {
+    expect(record.from).toBe("Sender");
+    expect(record.tier).toBe("T0");
+    expect(record.deliveredSeq).toBe(2);
+  }
+});
+
 test("deliver: T0 steers, T1 is an aside, T2 only bumps the cursor", async () => {
   const root = tempRoot();
   const ctx = fakeCtx(root, "Sender");

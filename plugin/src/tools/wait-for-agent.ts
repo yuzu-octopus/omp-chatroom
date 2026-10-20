@@ -15,6 +15,7 @@ import {
   renderWaitCall,
   renderWaitResult,
 } from "../cards/tool-cards";
+import { roomStoreFor } from "../store/room-store";
 import type { WaitOutcome } from "./wait-for-claim"; // K11 — declared once, there
 
 export const WAIT_FOR_AGENT_NAME = "wait_for_agent";
@@ -126,8 +127,31 @@ async function waitForAgent(
   const timeoutMs = clamp(params.timeout ?? WAIT_DEFAULT_TIMEOUT_MS, WAIT_MIN_MS, WAIT_MAX_MS);
   const require = params.require ?? "any";
   const startedAt = Date.now();
+  const agentId = ctx.agent.id;
 
-  if (signal?.aborted) return abortResult(snapshot(registry, ids));
+  // R5 — a wait that is not recorded cannot be measured: the wait's outcome is the room's only
+  // evidence that a blocked agent was blocked rather than idle. This tool waits on the PROCESS's
+  // agent registry, not on the room, so the room is opened best-effort: if it cannot be opened the
+  // wait still works, it is just not recorded.
+  const recordWait = (outcome: WaitOutcome): void => {
+    try {
+      roomStoreFor(ctx).append({
+        kind: "wait",
+        from: agentId,
+        waited: "agent",
+        target: ids.join(","),
+        outcome,
+        enqueuedAt: startedAt,
+      });
+    } catch {
+      // The room is optional here — the wait itself does not depend on it.
+    }
+  };
+
+  if (signal?.aborted) {
+    recordWait("aborted");
+    return abortResult(snapshot(registry, ids));
+  }
 
   let settle!: (result: WaitForAgentResult) => void;
   const done = new Promise<WaitForAgentResult>((resolve) => {
@@ -137,6 +161,7 @@ async function waitForAgent(
   const finish = (result: WaitForAgentResult): void => {
     if (finished) return;
     finished = true;
+    recordWait(result.details?.outcome ?? "aborted");
     settle(result);
   };
 

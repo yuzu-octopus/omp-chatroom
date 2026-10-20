@@ -76,6 +76,28 @@ export type RoomRecord =
       from: string; // the agent that LOST the claim
       resource: string;
       holder: string; // the agent that holds it
+    }
+  | {
+      v: 1;
+      seq: number;
+      ts: number;
+      kind: "wait";
+      id: string;
+      from: string; // the waiter
+      waited: "claim" | "agent" | "message";
+      target: string; // the resource, the agent id(s), or the topic
+      outcome: "event" | "timeout" | "aborted";
+      enqueuedAt: number; // when the wait started — `ts` is when it resolved
+    }
+  | {
+      v: 1;
+      seq: number;
+      ts: number;
+      kind: "delivered";
+      id: string;
+      from: string; // the RECIPIENT
+      deliveredSeq: number; // the seq of the record that was delivered
+      tier: "T0" | "T1" | "T2";
     };
 
 export type Performative =
@@ -97,7 +119,9 @@ export type RoomRecordDraft =
   | Omit<Extract<RoomRecord, { kind: "note" }>, "v" | "seq" | "ts" | "id">
   | Omit<Extract<RoomRecord, { kind: "member" }>, "v" | "seq" | "ts" | "id">
   | Omit<Extract<RoomRecord, { kind: "gap" }>, "v" | "seq" | "ts" | "id">
-  | Omit<Extract<RoomRecord, { kind: "contended" }>, "v" | "seq" | "ts" | "id">;
+  | Omit<Extract<RoomRecord, { kind: "contended" }>, "v" | "seq" | "ts" | "id">
+  | Omit<Extract<RoomRecord, { kind: "wait" }>, "v" | "seq" | "ts" | "id">
+  | Omit<Extract<RoomRecord, { kind: "delivered" }>, "v" | "seq" | "ts" | "id">;
 
 // K11 — WaitOutcome is declared ONCE, in tools/wait-for-claim.ts (§22), and imported here for the
 // `details` payloads; no redeclaration.
@@ -128,4 +152,6 @@ export interface BoardResult {
   claims: ClaimRow[];
   roster: RosterRow[];
   topics: TopicRow[];
+  /** R5 — session-scoped delivery telemetry: what reached an agent at each tier. */
+  deliveries: { T0: number; T1: number; T2: number };
 }

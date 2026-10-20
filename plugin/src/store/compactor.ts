@@ -142,6 +142,10 @@ function recordLine(record: RoomRecord): string {
       return `[${record.seq}] gap ${record.skipped} skipped (${record.reason})`;
     case "contended":
       return `[${record.seq}] contended ${record.from} ${record.resource} (held by ${record.holder})`;
+    case "wait":
+      return `[${record.seq}] wait ${record.from} ${record.target} (${record.outcome})`;
+    case "delivered":
+      return `[${record.seq}] delivered ${record.from} seq ${record.deliveredSeq} (${record.tier})`;
   }
 }
 

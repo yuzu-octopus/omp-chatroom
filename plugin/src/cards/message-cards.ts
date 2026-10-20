@@ -40,6 +40,8 @@ export function cardTypeFor(record: RoomRecord): CardType {
     case "member":
     case "gap":
     case "contended":
+    case "wait":
+    case "delivered":
       return "room:board-delta";
   }
 }
