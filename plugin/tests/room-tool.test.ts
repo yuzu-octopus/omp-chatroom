@@ -108,6 +108,23 @@ test("renew: a non-holder cannot renew somebody else's lease", () => {
   expect(s.seq).toBe(seqBefore);
 });
 
+test("R5: a lost claim is recorded, so contention is measurable", async () => {
+  const { store, ctx } = newTestStore();
+  expect(grant(store, "build/step", "AgentB", 60_000).ok).toBe(true);
+
+  const denied = await invokeRoom(ctx, { op: "claim", topic: "build", key: "step" });
+  expect(denied.details).toMatchObject({ ok: false });
+
+  const contended = store.records.filter((r) => r.kind === "contended");
+  expect(contended).toHaveLength(1);
+  const record = contended[0]!;
+  if (record.kind === "contended") {
+    expect(record.from).toBe("AgentA"); // the agent that lost
+    expect(record.holder).toBe("AgentB"); // the agent that holds it
+    expect(record.resource).toBe("build/step");
+  }
+});
+
 // --- test 2 — release promotes the oldest waiter --------------------------------
 test("release promotes the oldest waiter AND grants it the lease", () => {
   const s = newStore();

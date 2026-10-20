@@ -228,11 +228,12 @@ export const LOG_VALIDATION_FIELDS: Readonly<Record<RecordKind, readonly string[
   note: ["v", "seq", "ts", "kind", "id", "from", "topic", "body"],
   member: ["v", "seq", "ts", "kind", "id", "from", "action"],
   gap: ["v", "seq", "ts", "kind", "id", "from", "skipped", "reason"],
+  contended: ["v", "seq", "ts", "kind", "id", "from", "resource", "holder"],
 };
 
 // §3.3 S3 — per-kind field validation on replay. A record that parses but does not match the
 // RoomRecord shape is quarantined with gap{reason:"invalid"}.
-const KINDS = new Set<string>(["msg", "claim", "release", "note", "member", "gap"]);
+const KINDS = new Set<string>(["msg", "claim", "release", "note", "member", "gap", "contended"]);
 const RELEASE_REASONS = new Set<string>(["released", "expired", "reclaimed", "aborted"]);
 const GAP_REASONS = new Set<string>(["retention", "invalid", "corrupt"]);
 const MEMBER_ACTIONS = new Set<string>(["join", "leave"]);
@@ -257,6 +258,7 @@ const STRING_FIELDS = [
   "prevHolder",
   "replyWith",
   "replyBy",
+  "holder",
 ] as const;
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

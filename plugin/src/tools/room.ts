@@ -195,6 +195,8 @@ function recordLine(record: RoomRecord): string {
       return `${head} · ${record.action}`;
     case "gap":
       return `${head} · gap · ${record.skipped} skipped (${record.reason})`;
+    case "contended":
+      return `${head} · contended ${safe(record.resource)} — lost to ${safe(record.holder)}`;
   }
 }
 
@@ -835,6 +837,15 @@ export function registerRoomTool(pi: ExtensionAPI): void {
                   renewalFailure,
                 );
               }
+              // R5 — contention must be VISIBLE. A denied claim used to append nothing, so duplicate
+              // work and contention were structurally unmeasurable. The record says who wanted
+              // what and who had it.
+              store.append({
+                kind: "contended",
+                from: agentId,
+                resource,
+                holder: result.holder,
+              });
               return fail(
                 `claim ${resource} denied — held by ${result.holder}`,
                 result.holder,

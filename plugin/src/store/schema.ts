@@ -66,6 +66,16 @@ export type RoomRecord =
       from: string;
       skipped: number;
       reason: "retention" | "invalid" | "corrupt";
+    }
+  | {
+      v: 1;
+      seq: number;
+      ts: number;
+      kind: "contended";
+      id: string;
+      from: string; // the agent that LOST the claim
+      resource: string;
+      holder: string; // the agent that holds it
     };
 
 export type Performative =
@@ -86,7 +96,8 @@ export type RoomRecordDraft =
   | Omit<Extract<RoomRecord, { kind: "release" }>, "v" | "seq" | "ts" | "id">
   | Omit<Extract<RoomRecord, { kind: "note" }>, "v" | "seq" | "ts" | "id">
   | Omit<Extract<RoomRecord, { kind: "member" }>, "v" | "seq" | "ts" | "id">
-  | Omit<Extract<RoomRecord, { kind: "gap" }>, "v" | "seq" | "ts" | "id">;
+  | Omit<Extract<RoomRecord, { kind: "gap" }>, "v" | "seq" | "ts" | "id">
+  | Omit<Extract<RoomRecord, { kind: "contended" }>, "v" | "seq" | "ts" | "id">;
 
 // K11 — WaitOutcome is declared ONCE, in tools/wait-for-claim.ts (§22), and imported here for the
 // `details` payloads; no redeclaration.

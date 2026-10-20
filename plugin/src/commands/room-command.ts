@@ -265,6 +265,13 @@ export function registerRoomCommand(pi: ExtensionAPI): void {
                 return;
               }
             }
+            // R5 — a lost claim is a measurement, not a silent no-op.
+            store.append({
+              kind: "contended",
+              from: agentId,
+              resource,
+              holder: result.holder,
+            });
             report(
               ctx,
               pi,

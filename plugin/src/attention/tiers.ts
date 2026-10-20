@@ -35,5 +35,10 @@ export function classify(record: RoomRecord, viewer: MemberState): Tier {
       return "T2";
     case "gap":
       return "T1"; // K12 — a promised notify
+    case "contended":
+      // Bookkeeping: a claim attempt that lost. The loser already knows it lost, and the holder
+      // does not need an interrupt for it — the record is for the LOG (contention is measurable),
+      // not for anyone's context.
+      return "T2";
   }
 }

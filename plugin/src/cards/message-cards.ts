@@ -39,6 +39,7 @@ export function cardTypeFor(record: RoomRecord): CardType {
       return "room:claim";
     case "member":
     case "gap":
+    case "contended":
       return "room:board-delta";
   }
 }
@@ -237,7 +238,9 @@ export function renderBoardDeltaCard(
         ? `room board: ${record.skipped} record(s) skipped`
         : record?.kind === "member"
           ? `room board: ${record.from} ${record.action === "join" ? "joined" : "left"}`
-          : "room board";
+          : record?.kind === "contended"
+            ? `room board: ${record.from} lost ${record.resource} to ${record.holder}`
+            : "room board";
     const lines = [
       renderStatusLine({ iconOverride: "▦", title, meta: [ageOf(message.timestamp)] }, theme),
     ];

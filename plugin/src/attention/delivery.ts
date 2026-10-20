@@ -177,6 +177,8 @@ export function roomBodyOf(record: RoomRecord): string {
       return `${record.from} ${record.action === "join" ? "joined" : "left"} the room`;
     case "gap":
       return `${record.skipped} record(s) skipped (${record.reason})`;
+    case "contended":
+      return `${record.from} wanted ${record.resource} — held by ${record.holder}`;
   }
 }
 
@@ -192,7 +194,9 @@ export function renderLine(record: RoomRecord, safeBody: string, tier: Tier): st
         ? "presence"
         : record.kind === "gap"
           ? "retention"
-          : `topic:${safeRoomText(record.topic)}`; // msg | note
+          : record.kind === "contended"
+            ? `resource:${safeRoomText(record.resource)}`
+            : `topic:${safeRoomText(record.topic)}`; // msg | note
   return `[${tier}] room ⟵ ${safeRoomText(record.from)} · ${where} · ${safeBody}`;
 }
 

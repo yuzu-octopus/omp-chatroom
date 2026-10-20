@@ -67,6 +67,8 @@ function describeMatch(record: RoomRecord): string {
       return `${safe(record.from)} ${record.action === "join" ? "joined" : "left"} the room`;
     case "gap":
       return `${record.skipped} record(s) skipped (${record.reason})`;
+    case "contended":
+      return `${safe(record.from)} wanted ${safe(record.resource)} — held by ${safe(record.holder)}`;
   }
 }
 

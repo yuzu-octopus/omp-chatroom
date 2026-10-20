@@ -46,6 +46,8 @@ function recordLine(record: RoomRecord): string {
       return `member ${record.from} ${record.action}`;
     case "gap":
       return `gap ${record.from} skipped ${record.skipped} (${record.reason})`;
+    case "contended":
+      return `contended ${record.from} → ${record.resource} (held by ${record.holder})`;
   }
 }
 
