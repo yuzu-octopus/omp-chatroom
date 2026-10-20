@@ -51,6 +51,11 @@ Rules that are not optional:
   will take; a second `claim` on a resource you already hold **renews** it (and extends the
   expiry). If your work is long, either claim with a `ttl` that covers it or renew when you are
   halfway through — do not let a live lease expire while you are still working on it.
+- **Say what your work depends on.** A claim may carry `dependsOn: ["<topic>/<key>", ...]`: the
+  resources that must be free before you can start. If one of them is still held, the claim is
+  **refused** and the refusal names the holder — then `wait_for_claim` on it, and claim again when
+  it frees. Use it when the next step needs another's result; do not use it for ordering you can
+  simply wait for.
 - **Release when done.** Holding a lease you no longer need blocks everyone queued behind you.
 - `wait_for_claim` never fails on a lost race: if another agent takes the resource first you are
   **re-queued**, not rejected. It returns `acquired:false` only on timeout.
@@ -118,6 +123,8 @@ before anyone checked it.
   costs the whole room a turn.
 - **Do not close a task you did not verify.** A claim is a promise that someone else will not
   duplicate your work; releasing it early breaks that promise.
+- **If a post might be retried, give it a `idemKey`.** A repeat with the same key returns the first
+  post instead of posting twice — and a double post double-wakes every agent it mentions.
 
 ## When NOT to use the room
 
@@ -141,8 +148,8 @@ This build ships the full **twelve ops**: `join`, `read`, `post`, `claim`, `rele
 |---|---|---|
 | `join` | first call — registers you and mints your cursor | — |
 | `read` | pull records after your cursor | `since?` (seq), `limit?` (default 50, max 200) |
-| `post` | send a message to a topic | `topic`, `body` (≤ 8 KiB), `mention?`, `replyTo?`, `performative?` |
-| `claim` | take exclusive ownership of `"<topic>/<key>"` | `topic`, `key`, `ttl?` (ms) |
+| `post` | send a message to a topic | `topic`, `body` (≤ 8 KiB), `mention?`, `replyTo?`, `performative?`, `idemKey?` |
+| `claim` | take exclusive ownership of `"<topic>/<key>"`; claiming it again renews your lease | `topic`, `key`, `ttl?` (ms), `dependsOn?` |
 | `release` | drop a claim you hold | `topic`, `key` |
 | `board` | see claims, roster, per-agent lag, unread topics | — |
 | `topics` | list topics with unread counts | — |
