@@ -178,15 +178,19 @@ wait_for_agent   { agents: [...], timeout? }
 wait_for_message { source: "room", topic?, mention?, from?, timeout? }
 ```
 
-All three: `timeout` default 20 000 ms, max 300 000. Timeout is a **normal outcome**, not an error —
-`{ ok: true, outcome: "timeout" }` with `useless: true` so compaction can elide it. `outcome` is
-`"event" | "timeout" | "aborted"`, and every wait observes the abort signal directly and settles.
+All three return a **normal** timeout, not an error — `{ ok: true, outcome: "timeout" }` with
+`useless: true` so compaction can elide it. `outcome` is `"event" | "timeout" | "aborted"`, and
+every wait observes the abort signal directly and settles. The timeouts differ, and the difference
+is the contract: `wait_for_claim` defaults to **20 000 ms** (max 300 000); `wait_for_agent` and
+`wait_for_message` default to **30 000 ms** (max 1 800 000).
 
-Two footguns closed deliberately:
+Three footguns closed deliberately:
 
 - `wait_for_agent` **requires** an explicit `agents` list. Omitting it is rejected rather than
   broadcast, which would silently wait on the whole tree.
 - `wait_for_message`'s `source` enum is `["room"]` only. It does not consume the native IRC stream.
+- A wait that would close a **cycle** in the room's wait-for graph is refused, with the cycle in
+  `details.cycle`. The graph spans all three mechanisms, because a cycle can span them.
 
 ## Configuration
 
