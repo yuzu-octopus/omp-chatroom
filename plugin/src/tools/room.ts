@@ -27,7 +27,7 @@ import { buildDigest, DIGEST_CLAIMS_CAP, ROSTER_CAP } from "../onboarding/digest
 import { safeRoomText } from "../onboarding/escape";
 import { contended, grant, reclaimIfStale, release } from "../store/claims";
 import { type RoomConfig, resolveRoomConfig } from "../store/config";
-import { bumpCursor, cursorFor, initCursor, lagFor } from "../store/cursors";
+import { bumpCursor, cursorFor, deliveredT0s, initCursor, lagFor } from "../store/cursors";
 import { type MemberState, type RoomStore, roomStoreFor } from "../store/room-store";
 import type { BoardResult, Performative, RoomRecord, TopicRow } from "../store/schema";
 import {
@@ -447,7 +447,13 @@ async function deliverToTarget(
       (r) => r.seq > cursor && !isMuted(store, viewer, r) && classify(r, viewer) !== "T2",
     );
     // N5 — past its ceiling the T0 set batches into ONE digest interrupt, never dropped.
-    const t0 = selectT0(pending.filter((r) => classify(r, viewer) === "T0"));
+    // A T0 this recipient has ALREADY been given is skipped: while an older record is still
+    // owed the cursor cannot advance past it, so the T0 would stay pending and every later pass
+    // would re-send it — a wake+steer storm.
+    const alreadyDelivered = deliveredT0s(store.root, target);
+    const t0 = selectT0(
+      pending.filter((r) => classify(r, viewer) === "T0" && !alreadyDelivered.has(r.seq)),
+    );
     const admitted = [...t0.injected];
     for (const record of records) {
       if (isMuted(store, viewer, record)) continue;
@@ -518,6 +524,33 @@ async function deliverToTarget(
   } catch (error) {
     return error instanceof Error ? error.message : "delivery failed";
   }
+}
+
+/**
+ * The seq just below the oldest record this recipient still OWES — the floor no cursor bump may
+ * cross. `null` when it owes nothing.
+ *
+ * Shared with the sweep's expiry notice (plugin/src/onboarding/hook.ts), which delivers OUTSIDE a
+ * delivery pass: the notice is a T0 at the room head, and an uncapped bump would carry the
+ * holder's cursor over every record it had not read yet — those records would fall below the
+ * cursor and `room{op:"read"}` could never return them.
+ *
+ * `exceptSeq` excludes the record being delivered (the notice's own release record).
+ */
+export function owedFloorFor(store: RoomStore, target: string, exceptSeq?: number): number | null {
+  const viewer = viewerStateFor(store, target);
+  const cursor = store.cursors.get(target) ?? 0;
+  const owed = store.records.filter(
+    (r) =>
+      r.seq > cursor &&
+      r.seq !== exceptSeq &&
+      // A `gap` is CARRIED by the next pass, not owed (see `deliverToTarget`).
+      r.kind !== "gap" &&
+      !isMuted(store, viewer, r) &&
+      classify(r, viewer) !== "T2",
+  );
+  if (owed.length === 0) return null;
+  return owed.reduce((min, r) => Math.min(min, r.seq), Number.POSITIVE_INFINITY);
 }
 
 /** The records an operation appended: everything with a seq above the pre-op watermark. */

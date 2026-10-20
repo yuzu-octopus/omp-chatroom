@@ -1,7 +1,7 @@
 import { AgentRegistry, type ExtensionAPI, type ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { cardTypeFor } from "../cards/message-cards";
 import { safeRoomText } from "../onboarding/escape";
-import { bumpCursor } from "../store/cursors";
+import { bumpCursor, markDeliveredT0 } from "../store/cursors";
 import { roomStoreFor } from "../store/room-store";
 import type { RoomRecord } from "../store/schema";
 import type { Tier } from "./tiers";
@@ -141,6 +141,7 @@ export async function deliver(
 
   if (target === ctx.agent.id) {
     pi.sendMessage(payload, options);
+    if (tier === "T0") markDeliveredT0(store.root, target, record.seq);
     bumpCursor(store, target, Math.min(record.seq, cap));
     return;
   }
@@ -152,6 +153,9 @@ export async function deliver(
     Promise.resolve(ref!.session!.sendCustomMessage(payload, options)),
   );
   if (!outcome.ok) throw outcome.error;
+  // A delivered T0 is remembered: while an older record is still owed the cursor cannot advance
+  // past it, and without this the next pass would select and RE-SEND it (a wake+steer storm).
+  if (tier === "T0") markDeliveredT0(store.root, target, record.seq);
   bumpCursor(store, target, Math.min(record.seq, cap));
 }
 export function roomBodyOf(record: RoomRecord): string {

@@ -789,3 +789,55 @@ test("the hook logs a broken room instead of silently dropping the digest (F7)",
   expect(warnings[0]).toContain("room unavailable");
   expect(warnings[0]).toContain("EEXIST");
 });
+
+test("the expiry notice does not carry the holder's cursor over its unread records", async () => {
+  // The sweep's notice is a T0 at the room head. Without a floor, the delivery's cursor bump
+  // would jump the holder's cursor to the head — every record it had not read would fall below
+  // the cursor and `room{op:"read"}` could never return it.
+  const holder = { sent: 0 };
+  AgentRegistry.global().register({
+    id: "Holder",
+    displayName: "Holder",
+    kind: "sub",
+    status: "running",
+    session: {
+      sendCustomMessage: () => {
+        holder.sent += 1;
+        return Promise.resolve();
+      },
+    } as unknown as AgentSession,
+  });
+
+  const { pi, fire } = fakePi();
+  registerHooks(pi);
+  await fire(
+    "before_agent_start",
+    { type: "before_agent_start", prompt: "hi", systemPrompt: [] },
+    fakeCtx("AgentA"),
+  );
+
+  // Two records the holder has not read, then a lease that is already stale. The holder FOLLOWS
+  // the topic, so the records are T1 for it — records it owes and would be owed again (a T2
+  // record is consumed by the cursor by design, so it is not what the floor protects).
+  store.members.set("Holder", {
+    agentId: "Holder",
+    joinedAtSeq: 0,
+    topics: new Set(["t"]),
+    muted: new Set(),
+    threadRoots: new Set(),
+    heldTopics: new Set(),
+  });
+  store.append({ kind: "msg", from: "X", topic: "t", body: "unread one" });
+  store.append({ kind: "msg", from: "X", topic: "t", body: "unread two" });
+  store.append({ kind: "claim", from: "Holder", resource: "build/step", ttlMs: 0 });
+
+  const intervals = captureSweep(store.root);
+  await intervals[1]!();
+
+  // The notice was delivered…
+  expect(holder.sent).toBe(1);
+  // …and the cursor did NOT jump over the unread records: they stay above it, readable.
+  const cursor = store.cursors.get("Holder") ?? 0;
+  const unread = store.records.filter((r) => r.kind === "msg" && r.seq > cursor);
+  expect(unread.length).toBe(2);
+});

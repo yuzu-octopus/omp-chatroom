@@ -89,6 +89,8 @@ uses, auto-discovered) and `omp plugin link .` (packaged, verified with `omp plu
 | I9 | a recipient's cursor never advances past a record it has not seen — the owed floor is applied to **every** cursor bump in `deliver()` (the T0/T1 path included, not only the T2 one) | `attention/delivery.ts:78-83`, `tools/room.ts:450-457` |
 | I10 | the load-time host-drift check **warns**, it never throws — a working room beats a plugin that refuses to load | `index.ts:31-47` |
 | I11 | a delivery never waits for the recipient's whole turn — the host's send resolves at the end of the **target's** turn, so every send is bounded (250 ms); a rejection inside the bound still surfaces as `deliveryError`, and the per-recipient deliveries run concurrently so one slow recipient cannot hold up the others | `attention/delivery.ts:25`, `attention/delivery.ts:38-63`, `attention/delivery.ts:145-153`, `tools/room.ts:333-337` |
+| I12 | a delivered T0 is delivered ONCE — while an older record is still owed the cursor cannot advance past it, so the T0 would be re-selected and re-sent (a wake+steer storm); the delivered T0s are remembered per room root and per recipient | `store/cursors.ts:32-72`, `attention/delivery.ts:144-158`, `tools/room.ts:449-456` |
+| I13 | the retention `gap` record is CARRIED by the next pass — it is T1 for every viewer but is appended outside any op's batch, so left uncarried it pinned every cursor and froze the room | `tools/room.ts:462-480`, `attention/tiers.ts:36` |
 
 **The room lives in the global omp session store, not in the project tree.** The room root is
 `getSessionsDir()/rooms/<16 hex chars of the project path>` — i.e. `~/.omp/agent/sessions/rooms/<hash>`

@@ -21,6 +21,7 @@ import {
   roomStoreFor,
   unregisterSweepNotifier,
 } from "../store/room-store";
+import { owedFloorFor } from "../tools/room";
 import { buildDigest } from "./digest";
 import rule from "./routing-rule.md" with { type: "text" };
 
@@ -72,7 +73,14 @@ export function registerHooks(pi: ExtensionAPI): void {
           // transport rejection) must not swallow the rest of the batch, and the rejection must
           // never escape the notifier (the sweep timer would see an unhandled rejection).
           try {
-            await deliver(pi, ctx, claim.prev, claim.record, "T0");
+            // The notice is a T0 at the room head. An uncapped cursor bump would carry the
+            // holder's cursor over every record it had not read yet — those records would fall
+            // below the cursor and `room{op:"read"}` could never return them. So the bump is
+            // capped at the floor of what the holder still owes (the notice's own record
+            // excluded: it is being delivered, not owed).
+            const floor = owedFloorFor(store, claim.prev, claim.record.seq);
+            const cap = floor === null ? undefined : floor - 1;
+            await deliver(pi, ctx, claim.prev, claim.record, "T0", [], cap);
           } catch (error) {
             pi.logger.warn(
               `omp-agent-chatroom: expiry notice to ${claim.prev} failed: ` +

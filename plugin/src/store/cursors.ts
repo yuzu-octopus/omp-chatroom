@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { globalMap } from "../globals";
 import type { RoomStore } from "./room-store";
 export const JOIN_BACKLOG = 50; // §3.5 "starts at logEnd - 50"
 export const OWN_CURSOR_ENTRY_TYPE = "chatroom:cursor"; // §3.5 — must match onboarding/hook.ts
@@ -27,6 +28,48 @@ export function bumpCursor(store: RoomStore, agentId: string, seq: number): void
 export function lagFor(store: RoomStore, agentId: string): number {
   // logEnd - cursor
   return Math.max(0, store.seq - cursorFor(store, agentId));
+}
+
+// --- what a recipient has ALREADY been given -------------------------------
+//
+// The cursor is a single scalar, so a T0 delivered while an OLDER record is still owed (a T1 the
+// K/B cap refused) cannot advance it: the cursor is pinned below the owed record, and the T0
+// stays above the cursor — so the next pass would select it again and re-send it. A T0 is a
+// wake+steer: re-sending it is an interrupt storm.
+//
+// So the delivered T0s are remembered per room root and per recipient, and the pass skips them.
+// The registry is bounded (the oldest entries are dropped): it only has to cover the window in
+// which a floor holds the cursor back.
+const DELIVERED_T0 = globalMap<string, Map<string, Set<number>>>("__roomDeliveredT0");
+const DELIVERED_T0_MAX = 256;
+
+export function markDeliveredT0(root: string, agentId: string, seq: number): void {
+  let byAgent = DELIVERED_T0.get(root);
+  if (byAgent === undefined) {
+    byAgent = new Map();
+    DELIVERED_T0.set(root, byAgent);
+  }
+  let seqs = byAgent.get(agentId);
+  if (seqs === undefined) {
+    seqs = new Set();
+    byAgent.set(agentId, seqs);
+  }
+  seqs.add(seq);
+  if (seqs.size > DELIVERED_T0_MAX) {
+    // Drop the oldest entries: they are the ones a long-passed floor can no longer revive.
+    const oldest = [...seqs].sort((a, b) => a - b).slice(0, seqs.size - DELIVERED_T0_MAX);
+    for (const entry of oldest) seqs.delete(entry);
+  }
+}
+
+/** The T0 seqs this recipient has already been given. */
+export function deliveredT0s(root: string, agentId: string): ReadonlySet<number> {
+  return DELIVERED_T0.get(root)?.get(agentId) ?? new Set<number>();
+}
+
+/** Forget a room's delivered-T0 registry (the room was disposed). */
+export function forgetDeliveredT0(root: string): void {
+  DELIVERED_T0.delete(root);
 }
 
 // §3.5 — the session's own cursor survives resume via pi.appendEntry("chatroom:cursor", …)

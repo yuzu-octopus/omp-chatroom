@@ -1240,3 +1240,35 @@ test("a T1 the K/B cap refused still stays above the cursor — the floor holds 
   expect(h.store.records.filter((r) => r.kind === "gap" && r.seq > cursor).length).toBe(1);
   expect(gap.seq).toBeGreaterThan(cursor);
 });
+
+test("a T0 is not re-delivered while an older refused record pins the cursor", async () => {
+  const root = tempRoot();
+  const bCalls: Send[] = [];
+  const b = `attn-t0once-${Date.now()}`;
+  registerSession(b, bCalls);
+  const h = roomHarness(root, "A");
+  // B follows "build" and there are 15 pending T1 records for it, so the K/B cap (10) refuses
+  // them: the floor holds B's cursor below the refused records.
+  h.store.members.set(b, {
+    agentId: b,
+    joinedAtSeq: 0,
+    topics: new Set(["build"]),
+    muted: new Set(),
+    threadRoots: new Set(),
+    heldTopics: new Set(),
+  });
+  for (let i = 0; i < 15; i++) {
+    h.store.append({ kind: "msg", from: "X", topic: "build", body: `filler ${i}` });
+  }
+  // A mention for B: it is T0, so it is delivered — but the cursor cannot advance past the
+  // refused records, so the T0 would be selected again by the next pass. It must be sent ONCE.
+  await h.execute({ op: "post", topic: "build", body: "over to you", mention: [b] });
+  const first = bCalls.length;
+  expect(first).toBe(1);
+
+  // A second pass must not re-send it: a T0 is a wake+steer, and re-sending it is an interrupt
+  // storm.
+  await h.execute({ op: "post", topic: "build", body: "another one" });
+  const mentions = bCalls.filter((c) => String(c.payload.content).includes("over to you"));
+  expect(mentions.length).toBe(1);
+});
