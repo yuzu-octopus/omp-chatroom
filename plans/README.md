@@ -26,6 +26,7 @@ conditions, and update your row when done.
 | 015 | Spike — resolve the panel's three dead keys and two inert flags | P3 | S | — | DONE (recommendation (b): remove dead bindings; Q2 = no public input component) |
 | 016 | Spike — a harness that proves a real model reaches for the room unprompted | P3 | S | — | DONE (recommendation (a): build; model reachable, `getEntries()` is the assertion surface) |
 | 017 | Spike — replace the single-writer assumption with a cross-process story | P3 | S | — | DONE (recommendation (b): document + loud lockfile error; collision confirmed 10 dup seqs/40) |
+| 018 | Re-pin the host to 18.12.2, move the room root into the global session store, land the audit fixes | P1 | M | — | DONE (260 tests / 14 files green; the global room root has no live run yet) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJECTED (with one-line rationale — finding fixed independently or approach abandoned)
 

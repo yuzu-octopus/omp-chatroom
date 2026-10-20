@@ -1,6 +1,110 @@
 # omp-agent-chatroom — build handoff
 
 Date 2026-10-07. **Option B is built, tested, and verified live.**
+Updated 2026-10-19: host re-pinned to **18.12.2**, the room root moved into the **global omp
+session store**, and the audit fixes landed. See "Current state" below.
+Updated 2026-10-20: a fresh **live verification** against host 18.12.2 — the `/room` panel, the
+global room root, the linked-plugin route and the legacy migration are now verified live. See
+"Live verification (2026-10-20)" below.
+
+## Current state (2026-10-19)
+
+| Thing | Value |
+|---|---|
+| Host pin | **18.12.2** — `HOST_VERSION_PIN` (`plugin/src/version.ts`), `plugin/package.json` (peer + dev), `plugin/bun.lock` |
+| Declared host deps | `@oh-my-pi/pi-coding-agent`, `@oh-my-pi/pi-tui`, `@oh-my-pi/pi-ai`, **`@oh-my-pi/pi-utils`** (was imported by eight source files while undeclared) |
+| Room root | `getSessionsDir()/rooms/<16 hex of the project path>` — the global omp session store (`~/.omp/agent/sessions`, or `$XDG_DATA_HOME/omp/sessions`), **not** `<cwd>/.omp-room` |
+| Room-root exceptions | a project under the system temp dir stays project-local; a legacy `<cwd>/.omp-room` is copied into the global store once (its `config.json` travels with it, so the pinned `roomId` survives) |
+| Tests | **260 pass / 0 fail, 3325 assertions, 14 files** (`bun test tests/`) |
+| New test file | `plugin/tests/room-root.test.ts` (8 tests: global vs temp resolution, one-room-per-project, the migration and its no-clobber rule) |
+
+### Verified in this round
+
+- The suite is green: 260 pass / 0 fail across 14 files, plus `tsc --noEmit` 0 errors and
+  `biome check src tests` clean.
+- The re-pin: the installed host, the global host install, `HOST_VERSION_PIN` and `package.json`
+  all name 18.12.2 (`tests/drift.test.ts`, incl. the global-install leg).
+- The room-root resolver and the one-time legacy migration (`tests/room-root.test.ts`).
+- The audit fixes that a test pins: the escaped delivery line (`tests/attention.test.ts`), the
+  cursor floor and the per-root delivery serialisation (`tests/attention.test.ts`), the
+  per-root compactor write mutex (`tests/tree.test.ts`), the routing rule in the system prompt
+  (`tests/onboarding.test.ts`), the reclaim outcome, the sweep notifier,
+  the throwing mutation returned as `{ok:false}` and the refused catastrophic-backtracking regex
+  (`tests/room-tool.test.ts`).
+- The audit fixes that are code-only (no dedicated test): the escaping of the tool's failure
+  text (the `resource`/`holder` values in `room → …`), the compactor's interval callback
+  returning its promise, and the rule-only degraded turn when the room is unavailable.
+- The live verification below (2026-10-20) covers the parts the suite cannot: the plugin loading
+  against the live host, the `room` tool in a real model turn, the global room root, the legacy
+  migration and the `/room` panel in a real terminal.
+
+### Live verification (2026-10-20)
+
+Run against the **live host omp 18.12.2** — the exact version the plugin pins. `omp --version`
+prints `omp/18.12.2`; `plugin/package.json` (peer + dev deps) and `plugin/node_modules` are all
+18.12.2. The **packaged/linked route** is live: `omp plugin list` shows
+`omp-agent-chatroom@0.1.0  Available: [room, wait-tools, panel]`, linked at
+`~/.omp/plugins/node_modules/omp-agent-chatroom -> /home/yuzu/projects/omp-chatroom/plugin`.
+
+The `room` tool was exercised in a **real model turn** (a fresh omp process, `--mode json`,
+`--tools=room`, `--auto-approve`; note `--mode print` does not exist — the modes are
+text/json/rpc/rpc-ui):
+
+- `room join` → `rb1665961b913ad8e · 0 claim(s) · 1 member(s) · cursor 0`
+- `room board` → `0 claim(s), 1 member(s), 0 topic(s)` / `Main · running · lag 1`
+- a second run: `join` → `post` (`t1 · seq 2`) → `claim` (`t1/k1` → granted, expires in 300s)
+- the plugin's digest reached the model as a real custom message with `customType` `room:digest`
+
+**Global room root — live-verified.** The room data lands in the **global** store, never in the
+project: `~/.omp/agent/sessions/rooms/<16 hex of the project path>/room/{config.json,<roomId>.jsonl}`.
+The 16-hex leaf equals `sha256(projectPath).slice(0,16)`, and the project directory stayed empty
+(no `.omp-room` anywhere). The **XDG branch** of `getSessionsDir()` was confirmed too: with
+`XDG_DATA_HOME` set **and** `$XDG_DATA_HOME/omp` existing it resolves to
+`$XDG_DATA_HOME/omp/sessions`; without that app dir it falls back to `~/.omp/agent/sessions`.
+
+**Legacy migration — live-verified.** A project-local `.omp-room/room/<id>.jsonl` + `config.json`
+was copied into the global room with the **same room id**, the legacy record preserved as seq 1, and
+the legacy directory left in place. The project-local branch was confirmed as well: a project
+genuinely under `os.tmpdir()` stays project-local and creates no global room.
+
+**`/room` panel — live-verified in a real terminal.** `tmux` is **not** installed on this machine,
+so a raw pty was used: a python `pty.fork()` driver with `TIOCSWINSZ` (120x40) writing `/room` to
+the master fd. The panel rendered, ANSI-stripped:
+
+```
+╭─ Room #ra8e446a25274a427 · chat|board ·  1 running ─────────────────────┬───────────────────────────────────────────╮
+│ 14:48:15 Main · t1hello                                               │t1/k1                      Main   exp… held│
+│                                                                          │                                           │
+├──────────────────────────────────────────────────────────────────────────┴───────────────────────────────────────────┤
+│ esc close · tab narrow · j/k move · g/G ends · o jump · r release · 1/2 pane                                         │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+```
+
+The panel showed the **live** room: the posted message in the chat pane and the held claim in the
+board pane, and the room id in the title matched the id in the global store file. The plugin's own
+panel trace shows `boxRound=object` (the field that used to crash the panel with `theme.boxRound`
+undefined) and `RoomPanel ctor: theme=object fg=function`, with no `FAILED` line and no
+`Room panel unavailable` notification.
+
+**No noise.** The plugin produced no errors, warnings or stack traces across all runs (plugin
+stderr 0 bytes; no matching entries in `~/.omp/logs/`). The only unrelated host-level warning was
+an MCP 401 for the `composio` server, and it appeared only in the XDG-redirected run because that
+run had no access to the redirected-away credential store.
+
+**The check is not vacuous.** The same harness was run against a deliberately broken extension,
+which produced `Failed to load extension ...: NEGATIVE-CONTROL deliberate extension failure` — so
+the clean runs' silence is real signal, not a harness that cannot fail.
+
+### Still unverified — do not claim these
+
+- **The inline cards in a real transcript.** The panel is verified (above); the cards are not. The
+  card renderers are unit-tested; no real transcript has shown one.
+- **A real model choosing to call the room unprompted.** The live runs above drove the tool from a
+  prompt that named it. The discovery probe (`plugin/scripts/discovery-probe.sh`, plan 016) measured
+  **NOT-DISCOVERED on trial 1**: the model edited a file at event 2 without ever calling
+  `room{op:"claim"}`.
+- **Real-model summarisation quality** (the cold-tree summaries).
+- **`wait_for_agent`'s happy `event` path under a real model.** The unit test covers it.
 
 ## What to run
 
@@ -21,12 +125,18 @@ omp                    # from this directory; .omp/extensions/chatroom.ts is pic
 The `.omp/extensions/chatroom.ts` shim re-exports `plugin/src/index.ts`, so edits to the plugin are
 picked up on the next session (no hot reload — restart omp).
 
+The room itself now lives **outside the project tree**, in the global omp session store:
+`getSessionsDir()/rooms/<16 hex of the project path>` (`~/.omp/agent/sessions/rooms/<hash>`, or
+`$XDG_DATA_HOME/omp/sessions/rooms/<hash>`). A project under the system temp dir keeps
+`<cwd>/.omp-room` instead. An existing `<cwd>/.omp-room` is copied into the global store the first
+time the room is opened, so the pinned room id survives.
+
 ## Gates (all green)
 
 | Gate | Result |
 |---|---|
 | `bunx --bun tsc --noEmit -p tsconfig.json` | **0 errors** |
-| `bun test tests/` | **232 pass / 1 fail**, 3259 assertions, 13 files (as of 2026-10-13; the 1 fail is the plan-008 skew pin, failing by design) |
+| `bun test tests/` | **260 pass / 0 fail**, 3325 assertions, 14 files (as of 2026-10-19; the plan-008 skew pin is gone — retention now invalidates the tree) |
 | `bunx --bun @biomejs/biome check src tests` | **0 errors, 0 warnings** |
 | Remaining `not implemented` stubs | **0** |
 | Plugin loads in a real session | **0 extension errors**, all 4 tools + `/room` registered |
@@ -35,7 +145,9 @@ picked up on the next session (no hot reload — restart omp).
 | Mutation testing (store) | 8/12 caught; 5 load-bearing tests non-vacuous |
 | Mutation testing (tree) | **12/12 caught** |
 | Panel keys | **wired via `ctx.ui.onTerminalInput`** — the host never focuses an overlay component |
-| Room root | **`<project cwd>/.omp-room`** — one room per project, shared by subagents |
+| Panel rendering | **verified live** — the `/room` panel renders in a real terminal (raw pty, 120x40) against host 18.12.2, showing the live chat and board panes |
+| Room root | **the global omp session store** — `getSessionsDir()/rooms/<16 hex of the project path>`; one room per project, shared by subagents; a temp-dir project stays project-local; a legacy `<cwd>/.omp-room` is migrated in once |
+| Live verification (2026-10-20, host 18.12.2) | **pass** — plugin loads with zero stderr; `room` works in a real model turn; the global room root, the legacy migration, the linked-plugin route and the `/room` panel in a real pty are all confirmed. See "Live verification (2026-10-20)" |
 
 ## What it does
 
@@ -50,7 +162,7 @@ all three wait tools, the attention governor, the cold summary tree, the panel, 
 - **`/room`** — the TUI panel (3-pane, narrow fallback, windowed rendering)
 - **Inline cards** — `room:message`, `room:mention`, `room:claim`, `room:board-delta`
 - **Onboarding** — a bounded digest + the routing rule appended to the system prompt
-- **Config** — `local://room/config.json`, editable via `/room config`
+- **Config** — `<room root>/room/config.json`, editable via `/room config`
 
 ## Two defects the green suite hid — and the lesson
 
@@ -71,6 +183,12 @@ the suite cannot do for itself.
 
 ## Verification that is not a test
 
+> These checks predate the 2026-10-19 round: they were run against host 18.10.3 and the old
+> `<cwd>/.omp-room` room root. Re-run them against 18.12.2 and the global room root before
+> quoting them as current. The 2026-10-20 live verification re-ran the `room` tool itself against
+> 18.12.2 and the global room root (see "Live verification (2026-10-20)"), but not the
+> three-session delivery and mute/recall/zoom checks below.
+
 - **Delivery, live**: three sessions in one process, one shared room. A posts a message mentioning B;
   B receives `{"type":"room:mention","deliverAs":"steer"}` and its cursor advances. Before the fix, B
   received `[]`.
@@ -85,7 +203,8 @@ the suite cannot do for itself.
 
 - **Mute and topic-follow are session-scoped.** They live in the in-memory `MemberState` and are not
   written to the log. Only the read cursor persists (`pi.appendEntry`).
-- **In-process only.** One omp process per `local://` root; a second writer would tear lines.
+- **In-process only.** One omp process per room root (the global store's `rooms/<hash>` directory);
+  a second writer would tear lines.
 - **`ctx.signal` does not exist.** The panel aborts via `pi.on("session_shutdown", …)`.
 - **The room is not a token-cost win.** Its value is correctness, not efficiency.
 - **Room message volume has no study behind it** — the design caps it rather than proving it helps.
@@ -100,3 +219,6 @@ the suite cannot do for itself.
 | `docs/research/omp-agent-chatroom/review6/wiring.md` | the caller table + every dead symbol |
 | `docs/research/omp-agent-chatroom/review6/host.md` | host-contract review |
 | `docs/research/omp-agent-chatroom/PROBES.md` | host-surface probes |
+| `plans/018-global-room-root-and-audit-fixes.md` | this round — the re-pin, the global room root, the audit fixes |
+| `plugin/tests/room-root.test.ts` | the room-root resolver and the one-time legacy migration |
+| this file, "Live verification (2026-10-20)" | the live evidence against host 18.12.2 — panel rendering, global room root, legacy migration, linked-plugin route |

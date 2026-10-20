@@ -14,5 +14,7 @@ coverage/
 .idea/
 .vscode/
 
-# Room runtime state — the log is per-project working data, not source.
+# Room runtime state — the room now lives in the global omp session store
+# (~/.omp/agent/sessions/rooms/<hash>). A legacy project-local .omp-room/ can still exist:
+# it is copied into the global store once and then left inert.
 .omp-room/
