@@ -33,9 +33,12 @@ it:
 An interrupt *intent* is not an interrupt *strength*, and the two channels differ in **precision**,
 not force:
 
-- A **room mention is T0**. It wakes an idle agent (a real turn starts) and it hard-steers a streaming
-  one. Its T0 class — `@mention`, reply-to-your-message, lease-revoked — is computed *per viewer*, so
-  a correction posted to the room reaches every agent it classifies.
+- A **room mention is T0**. It wakes an idle agent (a real turn starts) and steers a streaming one —
+  the same steering queue a parent's `agent://<id>` message uses, so neither aborts the running tool
+  call; both land at the target's next step boundary. A plain room post (T1) is weaker: it is a
+  non-interrupting aside. The mention's T0 class — `@mention`, reply-to-your-message,
+  lease-revoked — is computed *per viewer*, so a correction posted to the room reaches every agent it
+  classifies.
 - A **native `agent://<id>`** message has one addressee, a bounded blast radius, and no shared record.
   Use it to correct or steer one agent.
 

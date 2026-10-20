@@ -19,8 +19,9 @@ read that as the source of truth; this is the operational summary.
 
 1. Exactly one agent is the intended recipient.
 2. Several recipients must NOT see each other's responses.
-3. The message must interrupt a specific **running** agent — a parent `agent://` message
-   hard-steers; a room mention does not.
+3. The message must steer a specific **running** agent. A parent `agent://<id>` message steers that
+   one agent; a room mention steers every agent the mention classifies as T0, so it is not a private
+   redirect.
 4. It is a direct command, correction, or steering instruction for one agent.
 5. Broadcasting it would amplify an error (corrections, unverified claims).
 
@@ -33,9 +34,12 @@ read that as the source of truth; this is the operational summary.
 
 When in doubt, use the room.
 
-The asymmetry that trips people up: an interrupt *intent* is not an interrupt *strength*. A room
-post does **not** hard-steer a streaming agent — it may keep working on the wrong thing until its
-next step boundary. If you must correct a running agent, use `agent://<id>`.
+The asymmetry that trips people up: an interrupt *intent* is not an interrupt *strength*. A plain
+room post (T1) does not steer a streaming agent — it may keep working on the wrong thing until its
+next step boundary. A room **mention** is T0: it steers the agent it names, at its next step
+boundary, and it steers every other agent the mention classifies as T0. If you must correct one
+running agent and no one else, use `agent://<id>` — the difference is precision and the shared
+record, not force.
 
 ## The claim workflow
 

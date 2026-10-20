@@ -126,12 +126,14 @@ export async function deliver(
     display: true,
     details: record,
   };
-  // T0 must reach an agent whether it is streaming or idle. `deliverAs: "steer"` alone hard-steers a
-  // running agent but, per the host rule at agent-session.ts:8796-8798 ("Explicit `deliverAs`
-  // queues without starting a turn in either state"), an explicit deliverAs at an IDLE session only
-  // appends — no turn. A mention that does not wake the agent it names is a mention that does
-  // nothing, so T0 also sets `triggerTurn`: the host checks it before the idle fallthrough
-  // (agent-session.ts:8758) and starts a turn, while the streaming branch ignores it and steers.
+  // T0 must reach an agent whether it is streaming or idle. `deliverAs: "steer"` steers a running
+  // agent — the host's steering queue, delivered at the target's next step boundary, the same
+  // mechanism a parent's `agent://<id>` message uses (neither aborts the running tool call) — but,
+  // per the host rule at agent-session.ts:8796-8798 ("Explicit `deliverAs` queues without starting a
+  // turn in either state"), an explicit deliverAs at an IDLE session only appends — no turn. A
+  // mention that does not wake the agent it names is a mention that does nothing, so T0 also sets
+  // `triggerTurn`: the host checks it before the idle fallthrough (agent-session.ts:8758) and starts
+  // a turn, while the streaming branch ignores it and steers.
   const options =
     tier === "T0"
       ? { deliverAs: "steer" as const, triggerTurn: true }

@@ -3,8 +3,8 @@
 Use `agent://<id>` (peer message) when:
 1. Exactly one agent is the intended recipient.
 2. Several recipients must NOT see each other's responses — send separate `agent://` messages.
-3. The message must interrupt a specific running agent (a parent's message hard-steers; a room
-   mention does not).
+3. The message must steer a specific running agent. A parent's `agent://<id>` steers that one agent;
+   a room mention steers every agent the mention classifies as T0, so it is not a private redirect.
 4. It is a direct command, correction, or steering instruction for one agent.
 5. Broadcasting it would amplify an error (corrections, unverified claims).
 
@@ -16,17 +16,20 @@ Use the room (`room{op:"post"}`) when:
 When in doubt, use the room.
 
 Corrections:
-- A correction for a RUNNING agent goes to `agent://<id>` — a room mention is T0, so it DOES
-  hard-steer the running agent, and it steers every agent the mention classifies, not just the one
-  you meant.
+- A correction for a RUNNING agent goes to `agent://<id>` — a room mention is T0, so it DOES steer
+  the running agent (at its next step boundary), and it steers every agent the mention classifies,
+  not just the one you meant.
 - A directed correction inside a multi-recipient collaboration goes to `agent://<id>` — the
   room is for shared context, not private redirection.
 
 Asymmetry to remember: an interrupt *intent* is not an interrupt *strength*.
 
-A **room mention is T0**: it wakes an idle agent (a real turn starts) and hard-steers a streaming
-one. The advantage of native `agent://<id>` is not strength but precision — one addressee, a bounded
-blast radius, and no shared record. The room's T0 class (`@mention`, reply-to-your-message,
+A **room mention is T0**: it wakes an idle agent (a real turn starts) and steers a streaming one —
+the same steering queue a parent's `agent://<id>` message uses, so neither aborts the running tool
+call; both land at the target's next step boundary. The advantage of native `agent://<id>` is not
+strength but precision — one addressee, a bounded blast radius, and no shared record. A plain room
+post (T1) is weaker still: it is a non-interrupting aside, so a running agent may keep working on
+the wrong thing until its next step boundary. The room's T0 class (`@mention`, reply-to-your-message,
 lease-revoked) is computed *per viewer*, so a correction posted to the room reaches everyone it
 classifies.
 
