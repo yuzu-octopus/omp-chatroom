@@ -27,6 +27,7 @@ conditions, and update your row when done.
 | 016 | Spike — a harness that proves a real model reaches for the room unprompted | P3 | S | — | DONE (recommendation (a): build; model reachable, `getEntries()` is the assertion surface) |
 | 017 | Spike — replace the single-writer assumption with a cross-process story | P3 | S | — | DONE (recommendation (b): document + loud lockfile error; collision confirmed 10 dup seqs/40) |
 | 018 | Re-pin the host to 18.12.2, move the room root into the global session store, land the audit fixes | P1 | M | — | DONE (260 tests / 14 files green; the global room root has no live run yet) |
+| 019 | The human-facing card names its topic; escape the room-authored strings the header rendered raw; the scratch ledger and the verification policy | P2 | S | — | DONE (302 tests / 15 files green; the card header needs the human's live check) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJECTED (with one-line rationale — finding fixed independently or approach abandoned)
 
