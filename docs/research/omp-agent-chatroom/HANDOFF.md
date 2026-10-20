@@ -15,12 +15,12 @@ global room root, the linked-plugin route and the legacy migration are now verif
 | Declared host deps | `@oh-my-pi/pi-coding-agent`, `@oh-my-pi/pi-tui`, `@oh-my-pi/pi-ai`, **`@oh-my-pi/pi-utils`** (was imported by eight source files while undeclared) |
 | Room root | `getSessionsDir()/rooms/<16 hex of the project path>` — the global omp session store (`~/.omp/agent/sessions`, or `$XDG_DATA_HOME/omp/sessions`), **not** `<cwd>/.omp-room` |
 | Room-root exceptions | a project under the system temp dir stays project-local; a legacy `<cwd>/.omp-room` is copied into the global store once (its `config.json` travels with it, so the pinned `roomId` survives) — but a legacy room held by a LIVE process is left alone, and the copy is taken under both rooms' locks |
-| Tests | **289 pass / 0 fail, 15 files** (`bun test tests/`) |
+| Tests | **294 pass / 0 fail, 15 files** (`bun test tests/`) |
 | New test files | `plugin/tests/room-root.test.ts` (13 tests: global vs temp resolution, one-room-per-project, the migration, its no-clobber rule and its two locks) and `plugin/tests/room-root-e2e.test.ts` (2 tests: the room really lands in the global store, and a legacy room is migrated — both in a child process with a fresh XDG base) |
 
 ### Verified in this round
 
-- The suite is green: 289 pass / 0 fail across 15 files, plus `tsc --noEmit` 0 errors and
+- The suite is green: 294 pass / 0 fail across 15 files, plus `tsc --noEmit` 0 errors and
   `biome check src tests` clean.
 - The re-pin: the installed host, the global host install, `HOST_VERSION_PIN` and `package.json`
   all name 18.12.3 (`tests/drift.test.ts`, incl. the global-install leg).
@@ -217,12 +217,24 @@ tool_execution_end  wait_for_agent
   happens to be queued. The abort path is well-formed (`ok: true`, `useless: true`, no throw) — it
   is the host's interrupt, not a plugin defect.
 
+### The panel's keys and indicators, in a real terminal — VERIFIED
+
+A raw pty (no tmux on this machine), a pyte virtual screen to read the diff-rendered TUI:
+
+| key | result |
+|---|---|
+| `/room` | the panel opens; the title marks the focused pane: `Room #r… · [chat]|board · …` |
+| `2` | the title becomes `… · chat|[board] ·` — the focus is VISIBLE (before this the key changed nothing on screen) |
+| `j` | the theme's selection glyph moves from the `t/k1` row to the `t/k2` row |
+| `r` (board focus) | releases exactly the SELECTED claim — one `release` record in the room log for `t/k2`, `t/k1` untouched |
+| `r` (chat focus) | releases NOTHING — the board is unchanged and no record is appended (this was the bug the first pty run found) |
+| the chat pane | the selection glyph sits on the newest row |
+
+No plugin error, warning or stack trace in the run's stderr, raw pty output, `~/.omp/logs/` or the
+plugin's own trace log.
+
 ### Still unverified — do not claim these
 
-- **The panel's focus/selection indicators and the board-only release, in a real terminal.** The
-  code is unit-tested (the release reaches the store, the focus is marked, the selected row carries
-  the theme's glyph) and the previous pty run verified the OLD behaviour, but the new indicators
-  landed after it.
 - **The compactor's word-boundary cut and the degenerate-merge floor, against a live model.** Both
   are unit-tested and came out of the live summarisation run that found them; the fixed behaviour
   has not been re-run against a real model.
@@ -260,7 +272,7 @@ time the room is opened, so the pinned room id survives.
 | Gate | Result |
 |---|---|
 | `bunx --bun tsc --noEmit -p tsconfig.json` | **0 errors** |
-| `bun test tests/` | **289 pass / 0 fail**, 15 files (as of 2026-10-20; the plan-008 skew pin is gone — retention now invalidates the tree) |
+| `bun test tests/` | **294 pass / 0 fail**, 15 files (as of 2026-10-20; the plan-008 skew pin is gone — retention now invalidates the tree) |
 | `bunx --bun @biomejs/biome check src tests` | **0 errors, 0 warnings** |
 | Remaining `not implemented` stubs | **0** |
 | Plugin loads in a real session | **0 extension errors**, all 4 tools + `/room` registered |

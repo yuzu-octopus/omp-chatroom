@@ -60,7 +60,7 @@ advanced on delivery into context, never on send.
 
 ```sh
 cd plugin
-bun test tests/                                 # the whole suite (289 pass, 15 files)
+bun test tests/                                 # the whole suite (294 pass, 15 files)
 bunx --bun tsc --noEmit -p tsconfig.json        # typecheck only; Bun executes the TS
 bunx --bun @biomejs/biome check src tests       # lint + format
 bunx --bun @biomejs/biome check src tests --write   # apply fixes
@@ -188,15 +188,15 @@ Test-only seams: `__roomTest.store.reset()` (`src/index.ts`), `__compactTest`
 **Assert the model-facing `content` array** for anything the model reads — `details` never reaches it.
 A gap here hid a real defect once (see the K1 block in `tests/room-tool.test.ts`).
 
-**Not covered, so treat as unverified:** the panel's focus/selection indicators and the board-only
-release, in a real terminal (the code is unit-tested; the pty run predates them), and the
-compactor's word-boundary cut and degenerate-merge floor against a live model (both unit-tested;
-they came out of the live summarisation run that found them). Everything else was verified live — the
-panel in a real terminal, the cards in a real transcript, the global room root, the linked-plugin
-route, the legacy migration, the coordination checks, all three wait tools' `event` outcomes, and the
-cold-tree summaries (faithful at the leaves, and a prompt injection inside a room message was
-summarised as DATA, never obeyed) — and the unprompted discovery rate was MEASURED at 75–86 %. See
-"Live verification" below.
+**Not covered, so treat as unverified:** the compactor's word-boundary cut and degenerate-merge
+floor against a live model (both unit-tested; they came out of the live summarisation run that
+found them). Everything else was verified live — the panel in a real terminal (its keys, the focus
+mark, the selection glyph, and that `r` releases exactly the selected claim and nothing in chat
+focus), the cards in a real transcript, the global room root, the linked-plugin route, the legacy
+migration, the coordination checks, all three wait tools' `event` outcomes, and the cold-tree
+summaries (faithful at the leaves, and a prompt injection inside a room message was summarised as
+DATA, never obeyed) — and the unprompted discovery rate was MEASURED at 75–86 %. See "Live
+verification" below.
 
 **Do not re-litigate these settled findings** — both are recorded with evidence:
 
