@@ -138,7 +138,9 @@ test("a successful migration moves the tree cache along with the log", () => {
 
   expect(migrateLegacyRoom(legacy, target)).toBe(true);
   // The cache travelled, and the legacy one is gone with the room.
-  expect(fs.readFileSync(path.join(target, "room", "tree", "64"), "utf-8")).toBe("tree-cache-bytes");
+  expect(fs.readFileSync(path.join(target, "room", "tree", "64"), "utf-8")).toBe(
+    "tree-cache-bytes",
+  );
   expect(fs.existsSync(path.join(legacy, "room", "tree"))).toBe(false);
   expect(fs.existsSync(legacy)).toBe(false);
 });

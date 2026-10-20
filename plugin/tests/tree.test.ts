@@ -839,7 +839,7 @@ test("a stored summary is cut at a word boundary, never mid-word", () => {
   // model summarising two such halves produced "- Weekday" — nine bytes that carried nothing.
   const treePath = tmpTreePath();
   const tree = openTreeStore(treePath);
-  const long = "alpha beta gamma delta " + "x".repeat(600);
+  const long = `alpha beta gamma delta ${"x".repeat(600)}`;
   expect(tree.putNode(0, 2, long)).toBe(true);
   const stored = tree.getNode(0, 2)!;
   expect(stored).toBe("alpha beta gamma delta");
