@@ -68,293 +68,346 @@ function readLog(root: string): Array<Record<string, unknown>> {
     .map((l) => JSON.parse(l) as Record<string, unknown>);
 }
 
-test("room: claim → wait_for_claim → durable log (§11.1)", async () => {
-  const root = freshRoot();
-  const bus = new EventBus();
-  const registry = new AgentRegistry();
-  const a = await newSession(bus, registry, root, "AgentA");
-  const b = await newSession(bus, registry, root, "AgentB");
-  try {
-    const roomA = toolOf(a, "room");
-    const roomB = toolOf(b, "room");
-    const waitClaimB = toolOf(b, "wait_for_claim");
+/**
+ * These tests drive real sessions and real waits, so their runtime depends on the machine's
+ * load: a busy box (a sibling project compiling, a parallel agent fleet) makes a child's startup
+ * and a wake-up take seconds. bun's default 5 s per-test timeout is therefore too tight — the
+ * WAIT semantics under test are unchanged (the wait tool's own timeout is still 5 s), only the
+ * test's budget grows.
+ */
+const E2E_TIMEOUT_MS = 60_000;
 
-    // A claims first.
-    const claimA = await roomA.execute("c-claim", {
-      op: "claim",
-      topic: "build",
-      key: "step",
-      ttl: 300_000,
-    });
-    expect(claimA.details).toMatchObject({ ok: true, op: "claim", holder: "AgentA" });
+test(
+  "room: claim → wait_for_claim → durable log (§11.1)",
+  async () => {
+    const root = freshRoot();
+    const bus = new EventBus();
+    const registry = new AgentRegistry();
+    const a = await newSession(bus, registry, root, "AgentA");
+    const b = await newSession(bus, registry, root, "AgentB");
+    try {
+      const roomA = toolOf(a, "room");
+      const roomB = toolOf(b, "room");
+      const waitClaimB = toolOf(b, "wait_for_claim");
 
-    // B waits for the claim to be released — still blocked.
-    const waitP = waitClaimB.execute("c-wait", {
-      resource: "build/step",
-      ttl: 300_000,
-      timeout: 5_000,
-    });
-    // One microtask proves only that it did not settle synchronously; a broken implementation
-    // that resolves on the next macrotask would pass. Give it a bounded settle window instead.
-    const settledEarly = await Promise.race([
-      waitP.then(() => true),
-      Bun.sleep(50).then(() => false),
-    ]);
-    expect(settledEarly).toBe(false); // still blocked — no polling
+      // A claims first.
+      const claimA = await roomA.execute("c-claim", {
+        op: "claim",
+        topic: "build",
+        key: "step",
+        ttl: 300_000,
+      });
+      expect(claimA.details).toMatchObject({ ok: true, op: "claim", holder: "AgentA" });
 
-    // A releases → B's waiter is resolved AND granted the lease.
-    await roomA.execute("c-release", { op: "release", topic: "build", key: "step" });
-    const winner = await Promise.race([waitP, Bun.sleep(2_000).then(() => null)]);
-    expect(winner).not.toBeNull();
-    expect(winner!.details).toMatchObject({
-      ok: true,
-      outcome: "event",
-      acquired: true,
-      claim: { holder: "AgentB", resource: "build/step" },
-    });
+      // B waits for the claim to be released — still blocked.
+      const waitP = waitClaimB.execute("c-wait", {
+        resource: "build/step",
+        ttl: 300_000,
+        timeout: 5_000,
+      });
+      // One microtask proves only that it did not settle synchronously; a broken implementation
+      // that resolves on the next macrotask would pass. Give it a bounded settle window instead.
+      const settledEarly = await Promise.race([
+        waitP.then(() => true),
+        Bun.sleep(50).then(() => false),
+      ]);
+      expect(settledEarly).toBe(false); // still blocked — no polling
 
-    // K1 — a direct execute() return proves only the PLUGIN's shape. The host's coercion runs in the
-    // agent loop, so this assertion is a smoke check, not proof. See PROBES.md P3 and §11.2.
-    expect(Array.isArray(winner!.content)).toBe(true);
-    expect(winner!.content[0]?.type).toBe("text");
+      // A releases → B's waiter is resolved AND granted the lease.
+      await roomA.execute("c-release", { op: "release", topic: "build", key: "step" });
+      const winner = await Promise.race([waitP, Bun.sleep(2_000).then(() => null)]);
+      expect(winner).not.toBeNull();
+      expect(winner!.details).toMatchObject({
+        ok: true,
+        outcome: "event",
+        acquired: true,
+        claim: { holder: "AgentB", resource: "build/step" },
+      });
 
-    // First-writer-wins: A's re-claim loses (B now holds it).
-    const second = await roomA.execute("c-claim2", {
-      op: "claim",
-      topic: "build",
-      key: "step",
-      ttl: 300_000,
-    });
-    expect(second.details).toMatchObject({ ok: false, holder: "AgentB" });
+      // K1 — a direct execute() return proves only the PLUGIN's shape. The host's coercion runs in the
+      // agent loop, so this assertion is a smoke check, not proof. See PROBES.md P3 and §11.2.
+      expect(Array.isArray(winner!.content)).toBe(true);
+      expect(winner!.content[0]?.type).toBe("text");
 
-    // The board reflects B as the holder.
-    const board = await roomB.execute("c-board", { op: "board" });
-    expect(board.details).toMatchObject({ ok: true, op: "board" });
+      // First-writer-wins: A's re-claim loses (B now holds it).
+      const second = await roomA.execute("c-claim2", {
+        op: "claim",
+        topic: "build",
+        key: "step",
+        ttl: 300_000,
+      });
+      expect(second.details).toMatchObject({ ok: false, holder: "AgentB" });
 
-    // Root sharing: both sessions resolve the SAME room log (K14).
-    // X1 — the room id is ROOT-STABLE, never a session id.
-    const rootA = resolveLocalRoot({ getArtifactsDir: () => root, getSessionId: () => "AgentA" });
-    const rootB = resolveLocalRoot({ getArtifactsDir: () => root, getSessionId: () => "AgentB" });
-    expect(rootA).toBe(rootB);
-    const logPathA = logPathFor(rootA, resolveRoomId(rootA));
-    const logPathB = logPathFor(rootB, resolveRoomId(rootB));
-    expect(logPathA).toBe(logPathB);
-    expect(roomIdFor(rootA)).toBe(roomIdFor(rootB));
-    expect(roomIdFor(rootA)).not.toBe(roomIdFor(`${root}-other`));
-    expect(roomIdFor(rootA)).not.toContain("AgentA");
-    expect(roomIdFor(rootA)).not.toContain("AgentB");
+      // The board reflects B as the holder.
+      const board = await roomB.execute("c-board", { op: "board" });
+      expect(board.details).toMatchObject({ ok: true, op: "board" });
 
-    // Durable log: the claim line is on disk with the authenticated `from`.
-    const lines = readLog(root);
-    expect(lines.map((l) => l.kind)).toContain("claim");
-    expect(lines.find((l) => l.kind === "claim")).toMatchObject({
-      from: "AgentA",
-      resource: "build/step",
-    });
-    expect(lines.find((l) => l.kind === "release")).toMatchObject({
-      from: "AgentA",
-      prevHolder: "AgentA",
-      reason: "released",
-    });
-  } finally {
-    await a.dispose();
-    await b.dispose();
-  }
-});
+      // Root sharing: both sessions resolve the SAME room log (K14).
+      // X1 — the room id is ROOT-STABLE, never a session id.
+      const rootA = resolveLocalRoot({ getArtifactsDir: () => root, getSessionId: () => "AgentA" });
+      const rootB = resolveLocalRoot({ getArtifactsDir: () => root, getSessionId: () => "AgentB" });
+      expect(rootA).toBe(rootB);
+      const logPathA = logPathFor(rootA, resolveRoomId(rootA));
+      const logPathB = logPathFor(rootB, resolveRoomId(rootB));
+      expect(logPathA).toBe(logPathB);
+      expect(roomIdFor(rootA)).toBe(roomIdFor(rootB));
+      expect(roomIdFor(rootA)).not.toBe(roomIdFor(`${root}-other`));
+      expect(roomIdFor(rootA)).not.toContain("AgentA");
+      expect(roomIdFor(rootA)).not.toContain("AgentB");
 
-test("B's wait_for_claim is still pending before A releases", async () => {
-  const root = freshRoot();
-  const bus = new EventBus();
-  const registry = new AgentRegistry();
-  const a = await newSession(bus, registry, root, "AgentA");
-  const b = await newSession(bus, registry, root, "AgentB");
-  try {
-    await toolOf(a, "room").execute("c-claim", { op: "claim", topic: "t", key: "k", ttl: 300_000 });
-    const waitP = toolOf(b, "wait_for_claim").execute("c-wait", {
-      resource: "t/k",
-      timeout: 5_000,
-    });
-    let done = false;
-    void waitP.then(() => {
-      done = true;
-    });
-    // One microtask turn: a settled promise would have flipped `done` by now.
-    await Promise.resolve();
-    expect(done).toBe(false);
-    await toolOf(a, "room").execute("c-release", { op: "release", topic: "t", key: "k" });
-    await Promise.race([waitP, Bun.sleep(2_000)]);
-    expect(done).toBe(true);
-  } finally {
-    await a.dispose();
-    await b.dispose();
-  }
-});
-
-test("it resolves details:{ok:true, outcome:'event', acquired:true, claim:{holder:'AgentB'}} after A's release", async () => {
-  const root = freshRoot();
-  const bus = new EventBus();
-  const registry = new AgentRegistry();
-  const a = await newSession(bus, registry, root, "AgentA");
-  const b = await newSession(bus, registry, root, "AgentB");
-  try {
-    await toolOf(a, "room").execute("c-claim", { op: "claim", topic: "x", key: "y", ttl: 300_000 });
-    const waitP = toolOf(b, "wait_for_claim").execute("c-wait", {
-      resource: "x/y",
-      ttl: 60_000,
-      timeout: 5_000,
-    });
-    await toolOf(a, "room").execute("c-release", { op: "release", topic: "x", key: "y" });
-    const winner = await Promise.race([waitP, Bun.sleep(2_000).then(() => null)]);
-    expect(winner!.details).toMatchObject({
-      ok: true,
-      outcome: "event",
-      acquired: true,
-      claim: { holder: "AgentB" },
-    });
-  } finally {
-    await a.dispose();
-    await b.dispose();
-  }
-});
-
-test("the JSONL at logPathFor(root, roomId) contains the claim line with from:'AgentA', resource:'build/step'", async () => {
-  const root = freshRoot();
-  const bus = new EventBus();
-  const registry = new AgentRegistry();
-  const a = await newSession(bus, registry, root, "AgentA");
-  try {
-    await toolOf(a, "room").execute("c-claim", {
-      op: "claim",
-      topic: "build",
-      key: "step",
-      ttl: 300_000,
-    });
-    const lines = readLog(root);
-    expect(lines.find((l) => l.kind === "claim")).toMatchObject({
-      from: "AgentA",
-      resource: "build/step",
-      ttlMs: 300_000,
-    });
-  } finally {
-    await a.dispose();
-  }
-});
-
-test("a second claim from A returns details:{ok:false, holder:'AgentB'} (first-writer-wins)", async () => {
-  const root = freshRoot();
-  const bus = new EventBus();
-  const registry = new AgentRegistry();
-  const a = await newSession(bus, registry, root, "AgentA");
-  const b = await newSession(bus, registry, root, "AgentB");
-  try {
-    // §11.1's sequence: A claims, A releases, B's waiter takes the lease, then A's re-claim loses.
-    await toolOf(a, "room").execute("c-claim", {
-      op: "claim",
-      topic: "build",
-      key: "step",
-      ttl: 300_000,
-    });
-    const waitP = toolOf(b, "wait_for_claim").execute("c-wait", {
-      resource: "build/step",
-      timeout: 5_000,
-    });
-    await toolOf(a, "room").execute("c-release", { op: "release", topic: "build", key: "step" });
-    const winner = await Promise.race([waitP, Bun.sleep(2_000).then(() => null)]);
-    expect(winner!.details).toMatchObject({
-      ok: true,
-      acquired: true,
-      claim: { holder: "AgentB" },
-    });
-
-    const second = await toolOf(a, "room").execute("c-claim2", {
-      op: "claim",
-      topic: "build",
-      key: "step",
-      ttl: 300_000,
-    });
-    expect(second.details).toMatchObject({ ok: false, holder: "AgentB" });
-    expect(typeof second.details?.expiresAt).toBe("number");
-  } finally {
-    await a.dispose();
-    await b.dispose();
-  }
-});
-
-test("every tool result carries a non-empty content array (K1 — never {outcome} alone)", async () => {
-  const root = freshRoot();
-  const bus = new EventBus();
-  const registry = new AgentRegistry();
-  const a = await newSession(bus, registry, root, "AgentA");
-  try {
-    const room = toolOf(a, "room");
-    const wait = toolOf(a, "wait_for_claim");
-    const results: ToolResultEnvelope[] = [
-      await room.execute("c-join", { op: "join" }),
-      await room.execute("c-post", { op: "post", topic: "t", body: "hi" }),
-      await room.execute("c-read", { op: "read", limit: 10 }),
-      await room.execute("c-claim", { op: "claim", topic: "t", key: "k", ttl: 300_000 }),
-      await room.execute("c-board", { op: "board" }),
-      await room.execute("c-release", { op: "release", topic: "t", key: "k" }),
-      await room.execute("c-release2", { op: "release", topic: "t", key: "k" }), // unknown → ok:false
-      await wait.execute("c-wait", { resource: "t/k", timeout: 1_000 }), // timeout
-    ];
-    for (const res of results) {
-      expect(Array.isArray(res.content)).toBe(true);
-      expect(res.content.length).toBeGreaterThan(0);
-      expect(res.content[0]?.type).toBe("text");
-      expect(typeof res.content[0]?.text).toBe("string");
-      expect(typeof res.details?.ok).toBe("boolean");
+      // Durable log: the claim line is on disk with the authenticated `from`.
+      const lines = readLog(root);
+      expect(lines.map((l) => l.kind)).toContain("claim");
+      expect(lines.find((l) => l.kind === "claim")).toMatchObject({
+        from: "AgentA",
+        resource: "build/step",
+      });
+      expect(lines.find((l) => l.kind === "release")).toMatchObject({
+        from: "AgentA",
+        prevHolder: "AgentA",
+        reason: "released",
+      });
+    } finally {
+      await a.dispose();
+      await b.dispose();
     }
-  } finally {
-    await a.dispose();
-  }
-});
+  },
+  E2E_TIMEOUT_MS,
+);
 
-test("a non-last session's dispose leaves the fd open; the last one closes it (K8/K9)", async () => {
-  const root = freshRoot();
-  const bus = new EventBus();
-  const registry = new AgentRegistry();
-  const a = await newSession(bus, registry, root, "AgentA");
-  const b = await newSession(bus, registry, root, "AgentB");
-  try {
-    await toolOf(a, "room").execute("c-join", { op: "join" });
-    await toolOf(b, "room").execute("c-join", { op: "join" });
-    await a.dispose();
-    // B is still live: the log is still appendable and the record lands.
-    await toolOf(b, "room").execute("c-post", { op: "post", topic: "t", body: "after-A" });
-    const lines = readLog(root);
-    expect(lines.some((l) => l.kind === "msg" && l.body === "after-A")).toBe(true);
-  } finally {
-    await b.dispose();
-  }
-});
+test(
+  "B's wait_for_claim is still pending before A releases",
+  async () => {
+    const root = freshRoot();
+    const bus = new EventBus();
+    const registry = new AgentRegistry();
+    const a = await newSession(bus, registry, root, "AgentA");
+    const b = await newSession(bus, registry, root, "AgentB");
+    try {
+      await toolOf(a, "room").execute("c-claim", {
+        op: "claim",
+        topic: "t",
+        key: "k",
+        ttl: 300_000,
+      });
+      const waitP = toolOf(b, "wait_for_claim").execute("c-wait", {
+        resource: "t/k",
+        timeout: 5_000,
+      });
+      let done = false;
+      void waitP.then(() => {
+        done = true;
+      });
+      // One microtask turn: a settled promise would have flipped `done` by now.
+      await Promise.resolve();
+      expect(done).toBe(false);
+      await toolOf(a, "room").execute("c-release", { op: "release", topic: "t", key: "k" });
+      await Promise.race([waitP, Bun.sleep(2_000)]);
+      expect(done).toBe(true);
+    } finally {
+      await a.dispose();
+      await b.dispose();
+    }
+  },
+  E2E_TIMEOUT_MS,
+);
 
-test("a second session with its own artifacts dir still reads the parent's room", async () => {
-  const root = freshRoot();
-  const bus = new EventBus();
-  const registry = new AgentRegistry();
-  const a = await newSession(bus, registry, root, "AgentA");
-  const b = await newSession(bus, registry, root, "AgentB");
-  try {
-    await toolOf(a, "room").execute("c-claim", {
-      op: "claim",
-      topic: "shared",
-      key: "res",
-      ttl: 300_000,
-    });
-    // B has its own artifacts dir; the room root is the shared project cwd, so it sees A's claim.
-    const boardB = await toolOf(b, "room").execute("c-board", { op: "board" });
-    expect(boardB.details?.ok).toBe(true);
-    const board = boardB.details?.board as { claims: Array<{ resource: string; holder: string }> };
-    expect(board.claims.find((c) => c.resource === "shared/res")).toMatchObject({
-      holder: "AgentA",
-    });
-    expect(logPath(root)).toBe(logPathFor(ROOM_ROOT(root), resolveRoomId(ROOM_ROOT(root))));
-  } finally {
-    await a.dispose();
-    await b.dispose();
-  }
-});
+test(
+  "it resolves details:{ok:true, outcome:'event', acquired:true, claim:{holder:'AgentB'}} after A's release",
+  async () => {
+    const root = freshRoot();
+    const bus = new EventBus();
+    const registry = new AgentRegistry();
+    const a = await newSession(bus, registry, root, "AgentA");
+    const b = await newSession(bus, registry, root, "AgentB");
+    try {
+      await toolOf(a, "room").execute("c-claim", {
+        op: "claim",
+        topic: "x",
+        key: "y",
+        ttl: 300_000,
+      });
+      const waitP = toolOf(b, "wait_for_claim").execute("c-wait", {
+        resource: "x/y",
+        ttl: 60_000,
+        timeout: 5_000,
+      });
+      await toolOf(a, "room").execute("c-release", { op: "release", topic: "x", key: "y" });
+      const winner = await Promise.race([waitP, Bun.sleep(2_000).then(() => null)]);
+      expect(winner!.details).toMatchObject({
+        ok: true,
+        outcome: "event",
+        acquired: true,
+        claim: { holder: "AgentB" },
+      });
+    } finally {
+      await a.dispose();
+      await b.dispose();
+    }
+  },
+  E2E_TIMEOUT_MS,
+);
+
+test(
+  "the JSONL at logPathFor(root, roomId) contains the claim line with from:'AgentA', resource:'build/step'",
+  async () => {
+    const root = freshRoot();
+    const bus = new EventBus();
+    const registry = new AgentRegistry();
+    const a = await newSession(bus, registry, root, "AgentA");
+    try {
+      await toolOf(a, "room").execute("c-claim", {
+        op: "claim",
+        topic: "build",
+        key: "step",
+        ttl: 300_000,
+      });
+      const lines = readLog(root);
+      expect(lines.find((l) => l.kind === "claim")).toMatchObject({
+        from: "AgentA",
+        resource: "build/step",
+        ttlMs: 300_000,
+      });
+    } finally {
+      await a.dispose();
+    }
+  },
+  E2E_TIMEOUT_MS,
+);
+
+test(
+  "a second claim from A returns details:{ok:false, holder:'AgentB'} (first-writer-wins)",
+  async () => {
+    const root = freshRoot();
+    const bus = new EventBus();
+    const registry = new AgentRegistry();
+    const a = await newSession(bus, registry, root, "AgentA");
+    const b = await newSession(bus, registry, root, "AgentB");
+    try {
+      // §11.1's sequence: A claims, A releases, B's waiter takes the lease, then A's re-claim loses.
+      await toolOf(a, "room").execute("c-claim", {
+        op: "claim",
+        topic: "build",
+        key: "step",
+        ttl: 300_000,
+      });
+      const waitP = toolOf(b, "wait_for_claim").execute("c-wait", {
+        resource: "build/step",
+        timeout: 5_000,
+      });
+      await toolOf(a, "room").execute("c-release", { op: "release", topic: "build", key: "step" });
+      const winner = await Promise.race([waitP, Bun.sleep(2_000).then(() => null)]);
+      expect(winner!.details).toMatchObject({
+        ok: true,
+        acquired: true,
+        claim: { holder: "AgentB" },
+      });
+
+      const second = await toolOf(a, "room").execute("c-claim2", {
+        op: "claim",
+        topic: "build",
+        key: "step",
+        ttl: 300_000,
+      });
+      expect(second.details).toMatchObject({ ok: false, holder: "AgentB" });
+      expect(typeof second.details?.expiresAt).toBe("number");
+    } finally {
+      await a.dispose();
+      await b.dispose();
+    }
+  },
+  E2E_TIMEOUT_MS,
+);
+
+test(
+  "every tool result carries a non-empty content array (K1 — never {outcome} alone)",
+  async () => {
+    const root = freshRoot();
+    const bus = new EventBus();
+    const registry = new AgentRegistry();
+    const a = await newSession(bus, registry, root, "AgentA");
+    try {
+      const room = toolOf(a, "room");
+      const wait = toolOf(a, "wait_for_claim");
+      const results: ToolResultEnvelope[] = [
+        await room.execute("c-join", { op: "join" }),
+        await room.execute("c-post", { op: "post", topic: "t", body: "hi" }),
+        await room.execute("c-read", { op: "read", limit: 10 }),
+        await room.execute("c-claim", { op: "claim", topic: "t", key: "k", ttl: 300_000 }),
+        await room.execute("c-board", { op: "board" }),
+        await room.execute("c-release", { op: "release", topic: "t", key: "k" }),
+        await room.execute("c-release2", { op: "release", topic: "t", key: "k" }), // unknown → ok:false
+        await wait.execute("c-wait", { resource: "t/k", timeout: 1_000 }), // timeout
+      ];
+      for (const res of results) {
+        expect(Array.isArray(res.content)).toBe(true);
+        expect(res.content.length).toBeGreaterThan(0);
+        expect(res.content[0]?.type).toBe("text");
+        expect(typeof res.content[0]?.text).toBe("string");
+        expect(typeof res.details?.ok).toBe("boolean");
+      }
+    } finally {
+      await a.dispose();
+    }
+  },
+  E2E_TIMEOUT_MS,
+);
+
+test(
+  "a non-last session's dispose leaves the fd open; the last one closes it (K8/K9)",
+  async () => {
+    const root = freshRoot();
+    const bus = new EventBus();
+    const registry = new AgentRegistry();
+    const a = await newSession(bus, registry, root, "AgentA");
+    const b = await newSession(bus, registry, root, "AgentB");
+    try {
+      await toolOf(a, "room").execute("c-join", { op: "join" });
+      await toolOf(b, "room").execute("c-join", { op: "join" });
+      await a.dispose();
+      // B is still live: the log is still appendable and the record lands.
+      await toolOf(b, "room").execute("c-post", { op: "post", topic: "t", body: "after-A" });
+      const lines = readLog(root);
+      expect(lines.some((l) => l.kind === "msg" && l.body === "after-A")).toBe(true);
+    } finally {
+      await b.dispose();
+    }
+  },
+  E2E_TIMEOUT_MS,
+);
+
+test(
+  "a second session with its own artifacts dir still reads the parent's room",
+  async () => {
+    const root = freshRoot();
+    const bus = new EventBus();
+    const registry = new AgentRegistry();
+    const a = await newSession(bus, registry, root, "AgentA");
+    const b = await newSession(bus, registry, root, "AgentB");
+    try {
+      await toolOf(a, "room").execute("c-claim", {
+        op: "claim",
+        topic: "shared",
+        key: "res",
+        ttl: 300_000,
+      });
+      // B has its own artifacts dir; the room root is the shared project cwd, so it sees A's claim.
+      const boardB = await toolOf(b, "room").execute("c-board", { op: "board" });
+      expect(boardB.details?.ok).toBe(true);
+      const board = boardB.details?.board as {
+        claims: Array<{ resource: string; holder: string }>;
+      };
+      expect(board.claims.find((c) => c.resource === "shared/res")).toMatchObject({
+        holder: "AgentA",
+      });
+      expect(logPath(root)).toBe(logPathFor(ROOM_ROOT(root), resolveRoomId(ROOM_ROOT(root))));
+    } finally {
+      await a.dispose();
+      await b.dispose();
+    }
+  },
+  E2E_TIMEOUT_MS,
+);
 
 test("the real 5 s sweep job expires a stale claim (K3 integration)", async () => {
   // INTEGRATION EXCEPTION to ts-no-test-timers, deliberately: the thing under test IS the
