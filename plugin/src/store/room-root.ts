@@ -84,7 +84,24 @@ function rmQuiet(target: string): void {
   try {
     fs.rmSync(target, { force: true });
   } catch {
-    // Best-effort: a staging name that cannot be removed is harmless (it is not a ".jsonl").
+    // Best-effort: a staging name that cannot be removed is harmless (it is not a ".jsonl"),
+    // and a legacy file that cannot be removed is a leftover, not a loss.
+  }
+}
+
+/**
+ * Remove a directory tree, best-effort.
+ *
+ * A path that is not a real directory (a symlink, a file) is left ALONE: the removal must
+ * never follow a link out of the tree it names. `fs.rmSync` with `recursive` unlinks a symlink
+ * as a link, so even the recursion below cannot reach outside the legacy room.
+ */
+function rmTreeQuiet(target: string): void {
+  try {
+    if (!fs.lstatSync(target).isDirectory()) return;
+    fs.rmSync(target, { recursive: true, force: true });
+  } catch {
+    // Best-effort: the legacy room is inert once its history is in the target.
   }
 }
 
@@ -137,18 +154,39 @@ function copyStaged(staged: StagedCopy[], restore: (() => void) | null): boolean
     return false;
   }
   const renamed: StagedCopy[] = [];
+  // Undo a rename that landed: the renamed files go, the target's previous config comes back,
+  // and the staging names are cleaned up.
+  const undoRenames = (): void => {
+    for (const item of renamed) rmQuiet(item.dest);
+    if (restore) restore();
+    for (const item of staged) rmQuiet(item.tmp);
+  };
   try {
     for (const item of staged) {
       fs.renameSync(item.tmp, item.dest);
       renamed.push(item);
     }
   } catch {
-    for (const item of renamed) rmQuiet(item.dest);
-    if (restore) restore();
-    for (const item of staged) rmQuiet(item.tmp);
+    undoRenames();
+    return false;
+  }
+  // The copy is VERIFIED IN PLACE before the legacy side is removed: every renamed file must
+  // be there. One that is not is rolled back, so the target never keeps a config that pins an
+  // id whose log is missing — and the legacy room is never deleted for a copy that did not land.
+  for (const item of renamed) {
+    if (fs.existsSync(item.dest)) continue;
+    undoRenames();
     return false;
   }
   return true;
+}
+
+/** What a successful copy took out of the legacy room: the exact paths to remove afterwards. */
+interface LegacyCopy {
+  /** The legacy files the copy took: the logs, and the config when there was one. */
+  files: string[];
+  /** The legacy tree cache the copy took, when there was one to take. */
+  tree: string | null;
 }
 
 /**
@@ -174,6 +212,10 @@ function copyStaged(staged: StagedCopy[], restore: (() => void) | null): boolean
  * already holds the target's lock (the room's lock hand-off, see `openMigratedRoom`) the
  * migration leaves that lock alone — it is released when the room is closed.
  *
+ * The migration is a MOVE: once the copy is in place, the legacy room is removed, so nothing is
+ * left behind in the user's working tree. A skipped or failed migration removes NOTHING — the
+ * legacy room survives byte for byte (see `removeLegacyRoom`).
+ *
  * @returns true when files were copied.
  */
 export function migrateLegacyRoom(legacyRoot: string, targetRoot: string): boolean {
@@ -188,113 +230,181 @@ export function migrateLegacyRoom(legacyRoot: string, targetRoot: string): boole
   } catch {
     return false; // a live owner holds the legacy room
   }
+  let copied: LegacyCopy | null = null;
   try {
-    // Re-read under the lock: the legacy room's contents are stable while we hold it.
-    const logs = legacyLogs(legacyRoomDir);
-    if (logs.length === 0) return false;
-    // F6 — the copied log must carry the id the TARGET will use. `resolveRoomId` reads the
-    // room's config and falls back to the id minted from the root, so the target's id is the
-    // legacy config's `roomId` when that is a valid non-empty id, and the target's minted id
-    // otherwise (`roomId: ""` means "mint from the root"). A log named after a DIFFERENT id
-    // would be copied into a file the target never reads, and the history would be invisible.
-    const pinned = loadRoomConfig(legacyRoot).roomId;
-    const pinnedValid = pinned !== "" && isValidRoomId(pinned);
-    // The id the LEGACY room resolves for itself — its own log is the file the migration
-    // copies (the one the legacy room would have opened).
-    const legacyId = pinnedValid ? pinned : roomIdFor(legacyRoot);
-    const targetId = pinnedValid ? pinned : roomIdFor(targetRoot);
-    const source = pickSourceLog(logs, legacyId);
-    if (source === null) {
-      // Ambiguous: the legacy dir holds several logs and none of them is the log the legacy
-      // room opens. Copying one of them would adopt an arbitrary history and hide the rest —
-      // decline and leave the legacy room alone.
-      return false;
-    }
-    // The copy takes the TARGET's lock, so two omp processes starting on the same project at
-    // the same time cannot both copy into the same room. The caller may already hold it (the
-    // room's lock hand-off): then it is ours, and it stays ours until the room is closed.
-    const targetHeld = holdsRoomLock(targetRoot);
-    if (!targetHeld) {
-      try {
-        acquireRoomLock(targetRoot);
-      } catch {
-        return false; // another process owns the target room
-      }
-    }
-    try {
-      // It never clobbers: a target that already holds a log is left alone.
-      try {
-        if (fs.readdirSync(targetRoomDir).some((name) => name.endsWith(".jsonl"))) return false;
-      } catch {
-        // no target room yet — proceed
-      }
-      fs.mkdirSync(targetRoomDir, { recursive: true });
-      const staged: StagedCopy[] = [];
-      const configSrc = path.join(legacyRoomDir, "config.json");
-      const configDest = path.join(targetRoomDir, "config.json");
-      if (fs.existsSync(configSrc)) {
-        staged.push({ src: configSrc, tmp: migrationTempPath(configDest), dest: configDest });
-      }
-      const primaryDest = path.join(targetRoomDir, `${targetId}.jsonl`);
-      staged.push({
-        src: path.join(legacyRoomDir, source.name),
-        tmp: migrationTempPath(primaryDest),
-        dest: primaryDest,
-      });
-      // Any other legacy log (a leftover from an earlier id) travels under its own name, so the
-      // migration never silently drops history.
-      for (const log of logs) {
-        if (log.name === source.name) continue;
-        const dest = path.join(targetRoomDir, log.name);
-        staged.push({
-          src: path.join(legacyRoomDir, log.name),
-          tmp: migrationTempPath(dest),
-          dest,
-        });
-      }
-      // The config is renamed into place FIRST: the target's room id comes from it, so the log
-      // must never be there without the config that names it.
-      let originalConfig: Buffer | null = null;
-      try {
-        originalConfig = fs.readFileSync(configDest);
-      } catch {
-        originalConfig = null; // the target has no config yet
-      }
-      const restoreConfig = (): void => {
-        if (originalConfig === null) return; // the rollback already removed ours
-        try {
-          fs.writeFileSync(configDest, originalConfig);
-        } catch {
-          // Best-effort: the config is a cache of the room's id, not history.
-        }
-      };
-      if (!copyStaged(staged, restoreConfig)) return false;
-      // The tree is a rebuildable cache over the log — copy it so the first read after the move is
-      // warm instead of rebuilding the summaries from scratch. Staged and renamed like the log:
-      // a half-copied cache would be worse than none.
-      const legacyTree = path.join(legacyRoomDir, "tree");
-      if (fs.existsSync(legacyTree)) {
-        const treeDest = path.join(targetRoomDir, "tree");
-        const treeTmp = migrationTempPath(treeDest);
-        try {
-          // Recursive: a staging name left by a crashed run is a directory.
-          fs.rmSync(treeTmp, { recursive: true, force: true });
-          fs.cpSync(legacyTree, treeTmp, { recursive: true });
-          fs.renameSync(treeTmp, treeDest);
-        } catch {
-          try {
-            fs.rmSync(treeTmp, { recursive: true, force: true });
-          } catch {
-            // Best-effort: the cache rebuilds from the log.
-          }
-        }
-      }
-      return true;
-    } finally {
-      if (!targetHeld) releaseRoomLock(targetRoot);
-    }
+    copied = copyLegacyRoom(legacyRoot, targetRoot, legacyRoomDir, targetRoomDir);
   } finally {
+    // The legacy lock is released BEFORE the removal below: the lock file lives inside the
+    // legacy room directory, and the removal must not race another process for that room.
     releaseRoomLock(legacyRoot);
+  }
+  // Skipped or failed: the legacy room stays exactly as it was.
+  if (copied === null) return false;
+  // The copy is in place: the legacy room goes, so nothing lingers in the project tree.
+  removeLegacyRoom(legacyRoot, legacyRoomDir, targetRoot, copied);
+  return true;
+}
+
+/**
+ * Remove the legacy room once its history has been copied into the target.
+ *
+ * The removal is a fixed sequence of EXACT paths: the files the copy took (the log(s) and the
+ * config), then the tree cache, then the legacy `room/` directory, then the legacy root that
+ * held it. Nothing sweeps the project and no path is derived from the project's contents, so a
+ * stray file in the project tree can never be deleted by it.
+ *
+ * `fs.rmSync` unlinks a symlink AS a link and never follows it into its target, and every
+ * directory removal is guarded by an `lstat` check, so a link planted inside the legacy room
+ * cannot make the removal reach outside the tree.
+ *
+ * The tree cache goes with the room whether or not its copy succeeded: it is a rebuildable
+ * cache OVER THE LOG, and the log is what travelled — the target rebuilds it from that.
+ */
+function removeLegacyRoom(
+  legacyRoot: string,
+  legacyRoomDir: string,
+  targetRoot: string,
+  copied: LegacyCopy,
+): void {
+  // A legacy root that is not a real directory (a symlink, a file) is left ALONE: following it
+  // would delete whatever it points at, which is outside the project tree. `lstat` does not
+  // follow the link, so a symlinked legacy root fails this check.
+  try {
+    if (!fs.lstatSync(legacyRoot).isDirectory()) return;
+  } catch {
+    return; // the legacy root is already gone
+  }
+  // The legacy root must not CONTAIN the room the copy landed in: removing it would take the
+  // target with it.
+  const rel = path.relative(path.resolve(legacyRoot), path.resolve(targetRoot));
+  if (rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel)) return;
+  // 1. the copied files: the log(s) and the config.
+  for (const file of copied.files) rmQuiet(file);
+  // 2. the tree cache.
+  if (copied.tree !== null) rmTreeQuiet(copied.tree);
+  // 3. the legacy room directory.
+  rmTreeQuiet(legacyRoomDir);
+  // 4. the legacy root itself, so the project tree ends up with no `.omp-room` at all.
+  rmTreeQuiet(legacyRoot);
+}
+
+/**
+ * Copy the legacy room's contents into the target room dir.
+ *
+ * @returns what was copied, or null when the migration was skipped or the copy failed.
+ */
+function copyLegacyRoom(
+  legacyRoot: string,
+  targetRoot: string,
+  legacyRoomDir: string,
+  targetRoomDir: string,
+): LegacyCopy | null {
+  // Re-read under the lock: the legacy room's contents are stable while we hold it.
+  const logs = legacyLogs(legacyRoomDir);
+  if (logs.length === 0) return null;
+  // F6 — the copied log must carry the id the TARGET will use. `resolveRoomId` reads the
+  // room's config and falls back to the id minted from the root, so the target's id is the
+  // legacy config's `roomId` when that is a valid non-empty id, and the target's minted id
+  // otherwise (`roomId: ""` means "mint from the root"). A log named after a DIFFERENT id
+  // would be copied into a file the target never reads, and the history would be invisible.
+  const pinned = loadRoomConfig(legacyRoot).roomId;
+  const pinnedValid = pinned !== "" && isValidRoomId(pinned);
+  // The id the LEGACY room resolves for itself — its own log is the file the migration
+  // copies (the one the legacy room would have opened).
+  const legacyId = pinnedValid ? pinned : roomIdFor(legacyRoot);
+  const targetId = pinnedValid ? pinned : roomIdFor(targetRoot);
+  const source = pickSourceLog(logs, legacyId);
+  if (source === null) {
+    // Ambiguous: the legacy dir holds several logs and none of them is the log the legacy
+    // room opens. Copying one of them would adopt an arbitrary history and hide the rest —
+    // decline and leave the legacy room alone.
+    return null;
+  }
+  // The copy takes the TARGET's lock, so two omp processes starting on the same project at
+  // the same time cannot both copy into the same room. The caller may already hold it (the
+  // room's lock hand-off): then it is ours, and it stays ours until the room is closed.
+  const targetHeld = holdsRoomLock(targetRoot);
+  if (!targetHeld) {
+    try {
+      acquireRoomLock(targetRoot);
+    } catch {
+      return null; // another process owns the target room
+    }
+  }
+  try {
+    // It never clobbers: a target that already holds a log is left alone.
+    try {
+      if (fs.readdirSync(targetRoomDir).some((name) => name.endsWith(".jsonl"))) return null;
+    } catch {
+      // no target room yet — proceed
+    }
+    fs.mkdirSync(targetRoomDir, { recursive: true });
+    const staged: StagedCopy[] = [];
+    const configSrc = path.join(legacyRoomDir, "config.json");
+    const configDest = path.join(targetRoomDir, "config.json");
+    if (fs.existsSync(configSrc)) {
+      staged.push({ src: configSrc, tmp: migrationTempPath(configDest), dest: configDest });
+    }
+    const primaryDest = path.join(targetRoomDir, `${targetId}.jsonl`);
+    staged.push({
+      src: path.join(legacyRoomDir, source.name),
+      tmp: migrationTempPath(primaryDest),
+      dest: primaryDest,
+    });
+    // Any other legacy log (a leftover from an earlier id) travels under its own name, so the
+    // migration never silently drops history.
+    for (const log of logs) {
+      if (log.name === source.name) continue;
+      const dest = path.join(targetRoomDir, log.name);
+      staged.push({
+        src: path.join(legacyRoomDir, log.name),
+        tmp: migrationTempPath(dest),
+        dest,
+      });
+    }
+    // The config is renamed into place FIRST: the target's room id comes from it, so the log
+    // must never be there without the config that names it.
+    let originalConfig: Buffer | null = null;
+    try {
+      originalConfig = fs.readFileSync(configDest);
+    } catch {
+      originalConfig = null; // the target has no config yet
+    }
+    const restoreConfig = (): void => {
+      if (originalConfig === null) return; // the rollback already removed ours
+      try {
+        fs.writeFileSync(configDest, originalConfig);
+      } catch {
+        // Best-effort: the config is a cache of the room's id, not history.
+      }
+    };
+    if (!copyStaged(staged, restoreConfig)) return null;
+    // The tree is a rebuildable cache over the log — copy it so the first read after the move is
+    // warm instead of rebuilding the summaries from scratch. Staged and renamed like the log:
+    // a half-copied cache would be worse than none.
+    const legacyTree = path.join(legacyRoomDir, "tree");
+    let tree: string | null = null;
+    if (fs.existsSync(legacyTree)) {
+      const treeDest = path.join(targetRoomDir, "tree");
+      const treeTmp = migrationTempPath(treeDest);
+      try {
+        // Recursive: a staging name left by a crashed run is a directory.
+        fs.rmSync(treeTmp, { recursive: true, force: true });
+        fs.cpSync(legacyTree, treeTmp, { recursive: true });
+        fs.renameSync(treeTmp, treeDest);
+        tree = legacyTree;
+      } catch {
+        try {
+          fs.rmSync(treeTmp, { recursive: true, force: true });
+        } catch {
+          // Best-effort: the cache rebuilds from the log.
+        }
+      }
+    }
+    // The copy is in place: these are the legacy paths that may now go.
+    return { files: staged.map((item) => item.src), tree };
+  } finally {
+    if (!targetHeld) releaseRoomLock(targetRoot);
   }
 }
 

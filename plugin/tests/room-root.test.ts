@@ -24,6 +24,35 @@ function fakeCtx(cwd: string): ExtensionContext {
   return { cwd, agent: { id: "Main" } } as unknown as ExtensionContext;
 }
 
+/**
+ * A byte-for-byte snapshot of a directory tree: every file's relative path and base64 content.
+ *
+ * Two snapshots that match prove the tree was not touched — the "the legacy room survives
+ * intact" claim, checked on the CONTENT and not just on the file names.
+ */
+function snapshotTree(dir: string): string[] {
+  const out: string[] = [];
+  const walk = (current: string, prefix: string): void => {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true });
+    } catch {
+      return; // the directory is gone
+    }
+    for (const entry of entries) {
+      const rel = prefix === "" ? entry.name : `${prefix}/${entry.name}`;
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        walk(full, rel);
+      } else {
+        out.push(`${rel}:${fs.readFileSync(full).toString("base64")}`);
+      }
+    }
+  };
+  walk(dir, "");
+  return out.sort();
+}
+
 test("a project outside the temp dir resolves to the global room store", () => {
   const root = roomRootFor(fakeCtx("/home/someone/project"));
   expect(root).toBe(globalRoomRoot("/home/someone/project"));
@@ -67,6 +96,51 @@ test("migration copies the legacy log and config, and keeps the pinned room id",
   expect(fs.existsSync(path.join(target, "room", `${legacyId}.jsonl`))).toBe(true);
   // The config travels with the log, so the room id survives the move.
   expect(fs.existsSync(path.join(target, "room", "config.json"))).toBe(true);
+  // The history travelled with it, byte for byte.
+  expect(fs.readFileSync(path.join(target, "room", `${legacyId}.jsonl`), "utf-8")).toBe(
+    '{"seq":1}\n',
+  );
+  expect(fs.readFileSync(path.join(target, "room", "config.json"), "utf-8")).toBe(
+    `${JSON.stringify({ roomId: legacyId })}\n`,
+  );
+});
+
+test("a successful migration is a MOVE: the legacy room is gone from the project", () => {
+  const legacy = tempRoot();
+  const target = tempRoot();
+  const legacyRoomDir = path.join(legacy, "room");
+  fs.mkdirSync(legacyRoomDir, { recursive: true });
+  const legacyId = roomIdFor(legacy);
+  fs.writeFileSync(path.join(legacyRoomDir, `${legacyId}.jsonl`), '{"seq":1}\n');
+  fs.writeFileSync(
+    path.join(legacyRoomDir, "config.json"),
+    `${JSON.stringify({ roomId: legacyId })}\n`,
+  );
+
+  expect(migrateLegacyRoom(legacy, target)).toBe(true);
+  // The whole legacy room is gone — the room dir AND the root that held it.
+  expect(fs.existsSync(legacyRoomDir)).toBe(false);
+  expect(fs.existsSync(legacy)).toBe(false);
+  // The global room holds the history, the config and the same room id.
+  expect(fs.existsSync(path.join(target, "room", `${legacyId}.jsonl`))).toBe(true);
+  expect(fs.existsSync(path.join(target, "room", "config.json"))).toBe(true);
+  expect(resolveRoomId(target)).toBe(legacyId);
+});
+
+test("a successful migration moves the tree cache along with the log", () => {
+  const legacy = tempRoot();
+  const target = tempRoot();
+  const legacyRoomDir = path.join(legacy, "room");
+  fs.mkdirSync(path.join(legacyRoomDir, "tree"), { recursive: true });
+  const legacyId = roomIdFor(legacy);
+  fs.writeFileSync(path.join(legacyRoomDir, `${legacyId}.jsonl`), '{"seq":1}\n');
+  fs.writeFileSync(path.join(legacyRoomDir, "tree", "64"), "tree-cache-bytes");
+
+  expect(migrateLegacyRoom(legacy, target)).toBe(true);
+  // The cache travelled, and the legacy one is gone with the room.
+  expect(fs.readFileSync(path.join(target, "room", "tree", "64"), "utf-8")).toBe("tree-cache-bytes");
+  expect(fs.existsSync(path.join(legacy, "room", "tree"))).toBe(false);
+  expect(fs.existsSync(legacy)).toBe(false);
 });
 
 test("migration never clobbers a room that already has a log", () => {
@@ -77,10 +151,14 @@ test("migration never clobbers a room that already has a log", () => {
   fs.writeFileSync(path.join(legacy, "room", `${legacyId}.jsonl`), '{"seq":1}\n');
   fs.mkdirSync(path.join(target, "room"), { recursive: true });
   fs.writeFileSync(path.join(target, "room", "r-existing.jsonl"), '{"seq":99}\n');
+  const before = snapshotTree(legacy);
 
   expect(migrateLegacyRoom(legacy, target)).toBe(false);
   expect(fs.existsSync(path.join(target, "room", "r-existing.jsonl"))).toBe(true);
   expect(fs.existsSync(path.join(target, "room", `${legacyId}.jsonl`))).toBe(false);
+  // A SKIPPED migration removes NOTHING: the legacy room is still there, byte for byte.
+  expect(snapshotTree(legacy)).toEqual(before);
+  expect(fs.existsSync(legacy)).toBe(true);
 });
 
 test("migration of a legacy room without a config names the log after the target's id", () => {
@@ -124,6 +202,56 @@ test("migration skips a legacy room that a LIVE process still holds (F5)", () =>
   expect(fs.existsSync(path.join(legacy, "room", `${legacyId}.jsonl`))).toBe(true);
   // ...and nothing was copied into the target.
   expect(fs.existsSync(path.join(target, "room"))).toBe(false);
+});
+
+test("a legacy room held by a LIVE process is left completely untouched, and nothing is copied", () => {
+  const legacy = tempRoot();
+  const target = tempRoot();
+  const legacyRoomDir = path.join(legacy, "room");
+  fs.mkdirSync(path.join(legacyRoomDir, "tree"), { recursive: true });
+  const legacyId = roomIdFor(legacy);
+  fs.writeFileSync(path.join(legacyRoomDir, `${legacyId}.jsonl`), '{"seq":1}\n');
+  fs.writeFileSync(
+    path.join(legacyRoomDir, "config.json"),
+    `${JSON.stringify({ roomId: legacyId })}\n`,
+  );
+  fs.writeFileSync(path.join(legacyRoomDir, "tree", "64"), "tree-cache-bytes");
+  // The lock file holds the owner pid; this process is alive, so the room belongs to a live
+  // writer and must be left alone.
+  fs.writeFileSync(lockPathFor(legacy), String(process.pid));
+  const before = snapshotTree(legacy);
+
+  expect(migrateLegacyRoom(legacy, target)).toBe(false);
+  // BYTE FOR BYTE: the directory, its log, its config and its tree cache are all as they were —
+  // the live owner is still writing here.
+  expect(snapshotTree(legacy)).toEqual(before);
+  expect(fs.existsSync(legacy)).toBe(true);
+  expect(fs.existsSync(path.join(legacy, "room", `${legacyId}.jsonl`))).toBe(true);
+  expect(fs.existsSync(path.join(legacy, "room", "config.json"))).toBe(true);
+  expect(fs.existsSync(path.join(legacy, "room", "tree", "64"))).toBe(true);
+  // And NOTHING was copied into the target.
+  expect(fs.existsSync(path.join(target, "room"))).toBe(false);
+});
+
+test("the removal never follows a symlink out of the tree", () => {
+  const legacy = tempRoot();
+  const target = tempRoot();
+  const legacyRoomDir = path.join(legacy, "room");
+  fs.mkdirSync(legacyRoomDir, { recursive: true });
+  const legacyId = roomIdFor(legacy);
+  fs.writeFileSync(path.join(legacyRoomDir, `${legacyId}.jsonl`), '{"seq":1}\n');
+  // A directory OUTSIDE the legacy tree, linked INTO it: a removal that followed the link
+  // would delete the target's contents.
+  const outside = tempRoot();
+  fs.writeFileSync(path.join(outside, "precious.txt"), "precious");
+  fs.symlinkSync(outside, path.join(legacyRoomDir, "link-to-outside"));
+
+  expect(migrateLegacyRoom(legacy, target)).toBe(true);
+  // The link was unlinked as a link; the directory it pointed at is untouched.
+  expect(fs.existsSync(path.join(outside, "precious.txt"))).toBe(true);
+  expect(fs.readFileSync(path.join(outside, "precious.txt"), "utf-8")).toBe("precious");
+  expect(fs.existsSync(legacyRoomDir)).toBe(false);
+  expect(fs.existsSync(legacy)).toBe(false);
 });
 
 test("migration does not copy into a target that a LIVE process holds (F5)", () => {
@@ -201,11 +329,13 @@ test("migration never adopts an arbitrary log when the pinned id matches none", 
   );
 
   // Two logs, neither of them the log the legacy room opens: picking one would be arbitrary.
+  const before = snapshotTree(legacy);
   expect(migrateLegacyRoom(legacy, target)).toBe(false);
   // The target got NO log at all — not one of the two renamed to the pinned id, and not the
   // other one copied under its own name (it would sit there, never opened).
   expect(fs.existsSync(path.join(target, "room"))).toBe(false);
   // The legacy room is left exactly as it was.
+  expect(snapshotTree(legacy)).toEqual(before);
   expect(fs.readdirSync(path.join(legacy, "room")).sort()).toEqual([
     "config.json",
     "r-one.jsonl",
@@ -231,6 +361,7 @@ test("an interrupted copy leaves the target with NO log, so the next attempt ret
   fs.mkdirSync(migrationTempPath(path.join(target, "room", `${legacyId}.jsonl`)), {
     recursive: true,
   });
+  const before = snapshotTree(legacy);
 
   expect(migrateLegacyRoom(legacy, target)).toBe(false);
   // NO log at all — not a truncated one. The "never clobbers" guard only looks for ".jsonl",
@@ -238,11 +369,15 @@ test("an interrupted copy leaves the target with NO log, so the next attempt ret
   const names = fs.readdirSync(path.join(target, "room"));
   expect(names.filter((name) => name.endsWith(".jsonl"))).toEqual([]);
   expect(fs.existsSync(path.join(target, "room", `${legacyId}.jsonl`))).toBe(false);
+  // A FAILED copy removes NOTHING either: the legacy room is still there, byte for byte.
+  expect(snapshotTree(legacy)).toEqual(before);
 
   // The next attempt retries: the blocker is gone and the room migrates for real.
   fs.rmSync(path.join(target, "room"), { recursive: true, force: true });
   expect(migrateLegacyRoom(legacy, target)).toBe(true);
   expect(fs.existsSync(path.join(target, "room", `${legacyId}.jsonl`))).toBe(true);
+  // …and this time it is a MOVE: the legacy room is gone.
+  expect(fs.existsSync(legacy)).toBe(false);
 });
 
 // --- the lock hand-off: no window between the migration and the open -------------

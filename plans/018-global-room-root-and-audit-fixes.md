@@ -176,7 +176,9 @@ the migration copies the log and the config and keeps the pinned room id; the mi
 clobbers an existing log; a legacy room without a config is renamed to the target's id; the
 migration is a no-op without a legacy room and for an identical source and target; the migration
 skips a legacy room a live process still holds; it does not copy into a target a live process
-holds; it leaves no lock behind; and it names the copied log after the id the target resolves.
+holds; it leaves no lock behind; it names the copied log after the id the target resolves; and it
+REMOVES the legacy room once the copy is verified — while a skipped migration removes nothing and
+leaves the legacy room byte-for-byte intact.
 
 **End-to-end**: `plugin/tests/room-root-e2e.test.ts` (new) — see the test plan for what it proves
 and why it needs a child process.
@@ -265,15 +267,17 @@ then a live pty run of the panel) found more. All of it is fixed.
   directory is there, and its project cwd must be **outside `os.tmpdir()`**, because the plugin
   deliberately keeps temp-dir projects project-local. The child proves that the room lands under
   `<XDG>/omp/sessions/rooms/<16 hex>/` and **not** in the project, and that a legacy project-local
-  room is copied into the global room with the **same** room id. Its two tests share **one** child
-  run, because importing the store pulls in the whole host module tree (~10 s of transpiling).
+  room is copied into the global room with the **same** room id and then removed from the project
+  tree. Its two tests share **one** child run, because importing the store pulls in the whole host
+  module tree (~10 s of transpiling).
 
 ## Done criteria
 
 - [x] `HOST_VERSION_PIN`, `package.json` (peer + dev) and `bun.lock` all name 18.12.3, and
       `@oh-my-pi/pi-utils` is declared in both dependency blocks.
 - [x] The room root resolves to the global session store, with the temp-dir exception and the
-      one-time legacy migration.
+      one-time legacy migration (copied into the global store, verified, then removed from the
+      project tree).
 - [x] Every audit fix above is in the tree, and the ones with a test are named by it.
 - [x] The P0 delivery deadlock is fixed: every send is bounded (250 ms), the per-recipient
       deliveries run concurrently, and the cursor floor applies to every cursor bump.

@@ -241,11 +241,13 @@ export function roomStoreFor(ctx: ExtensionContext): RoomStore {
   const live = SESSIONS.get(root);
   // One ref per session: a repeat call from the same agent must not bump the refcount again.
   if (live?.has(agentId) && STORES.has(root)) return STORES.get(root)!;
-  // The FIRST open of this root also moves the legacy project-local room into the global store
+  // The FIRST open of this root also MOVES the legacy project-local room into the global store
   // (the store is cached per root afterwards, and the migration is a no-op once the global room
-  // holds a log). The room's lock is held ACROSS the migration and the open: releasing it in
-  // between would let a second omp process on the same project take it, and our open would then
-  // fail — a hard loss of the room for that session.
+  // holds a log). The move REMOVES the legacy directory, so nothing is left in the project's
+  // working tree; a skipped or failed migration removes nothing and leaves the legacy room as
+  // it was. The room's lock is held ACROSS the migration and the open: releasing it in between
+  // would let a second omp process on the same project take it, and our open would then fail —
+  // a hard loss of the room for that session.
   const store = STORES.has(root)
     ? storeFor(root, resolveRoomId(root))
     : openMigratedRoom(legacyRoomRoot(ctx.cwd), root, () => storeFor(root, resolveRoomId(root)));

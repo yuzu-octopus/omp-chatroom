@@ -6,7 +6,7 @@ import { roomDirNameFor, roomIdFor } from "../src/ids";
 
 /**
  * E2E: the room root really lands in the global omp session store, and a legacy project-local
- * room is migrated into it.
+ * room is MOVED into it — the legacy directory is gone from the project afterwards.
  *
  * `getSessionsDir()` resolves its XDG base ONCE, at module load (pi-utils keeps a module-level
  * DirResolver singleton), so a test process cannot point the global store at a temp directory by
@@ -238,7 +238,6 @@ interface Run {
   legacyId: string;
   legacyLog: string;
   legacyRecord: string;
-  fixture: string[];
   fresh: ChildPayload;
   legacy: ChildPayload;
 }
@@ -274,7 +273,6 @@ function ensureRun(): Run {
     `${JSON.stringify({ roomId: legacyId })}\n`,
     "utf-8",
   );
-  const fixture = listTree(legacyProjectDir);
 
   const payload = runChild({ fresh: projectDir, legacy: legacyProjectDir }, xdgDir);
   run = {
@@ -286,7 +284,6 @@ function ensureRun(): Run {
     legacyId,
     legacyLog,
     legacyRecord,
-    fixture,
     fresh: payload.fresh,
     legacy: payload.legacy,
   };
@@ -328,7 +325,7 @@ test(
 );
 
 test(
-  "a legacy project-local room is copied into the global room on the first open",
+  "a legacy project-local room is moved into the global room on the first open",
   () => {
     const r = ensureRun();
     const payload = r.legacy;
@@ -339,25 +336,23 @@ test(
     expect(payload.root).toBe(expectedRoot);
     expect(payload.roomDir).toBe(path.join(expectedRoot, "room"));
 
-    // (c) the legacy room was copied in, keeping its id: the config pins it and travels with the log
+    // (c) the legacy room was moved in, keeping its id: the config pins it and travels with the log
     expect(payload.roomId).toBe(r.legacyId);
     expect(payload.configRoomId).toBe(r.legacyId);
     expect(payload.files).toContain(r.legacyLog);
     expect(payload.files).toContain("config.json");
     expect(fs.existsSync(path.join(payload.roomDir, r.legacyLog))).toBe(true);
     expect(fs.existsSync(path.join(payload.roomDir, "config.json"))).toBe(true);
-    // the CONTENT travelled too, not just the file name
+    // the CONTENT travelled too, not just the file name: the exact record, byte for byte
+    expect(payload.logText).toContain(r.legacyRecord);
     expect(payload.logText).toContain("hello from the legacy room");
 
-    // the legacy directory still exists afterwards: the move is a copy, not a move
-    expect(fs.existsSync(r.legacyRoot)).toBe(true);
-    expect(fs.existsSync(path.join(r.legacyRoomDir, r.legacyLog))).toBe(true);
-    expect(fs.readFileSync(path.join(r.legacyRoomDir, r.legacyLog), "utf-8")).toBe(
-      `${r.legacyRecord}\n`,
-    );
+    // the legacy directory is GONE afterwards: the migration is a MOVE, not a copy
+    expect(fs.existsSync(r.legacyRoot)).toBe(false);
+    expect(fs.existsSync(r.legacyRoomDir)).toBe(false);
 
-    // and the plugin added nothing to the project tree: it is exactly the fixture
-    expect(listTree(r.legacyProjectDir)).toEqual(r.fixture);
+    // and the project tree holds nothing at all: no `.omp-room` is left behind
+    expect(listTree(r.legacyProjectDir)).toEqual([]);
 
     // the user's real store was not used
     for (const candidate of realStoreRooms(leaf)) {
