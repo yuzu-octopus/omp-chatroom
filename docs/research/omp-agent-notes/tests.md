@@ -1,7 +1,7 @@
 # Testing conventions & coverage — `plugin/tests/**`
 
 Scope: the 15 test files under `plugin/tests/`. The last full-suite run (orchestrator-verified) was
-**274 pass / 0 fail, 3398 assertions, 15 files**; the current tree declares **281** tests — the
+**362 pass / 0 fail, 4993 assertions, 18 files**; the current tree declares **362** tests — the
 suite is being edited concurrently, so treat 274 as the last *measured* run, not a current
 invariant, and re-run `bun test tests/` for the live number. Purpose: how to add a test here
 correctly, and what is still unverified. Every claim carries a `file:line`.
@@ -21,7 +21,7 @@ re-verified against the current tree).
 ## 1. Framework and how tests are written
 
 - **Runner:** `bun:test` (imported in every file, e.g. `store.test.ts:1`). Run with
-  `cd plugin && bun test tests/` → 274 pass / 0 fail, 3398 assertions, 15 files.
+  `cd plugin && bun test tests/` → 362 pass / 0 fail, 4993 assertions, 18 files.
 - **No module mocking.** `tree.test.ts:78-83` states the rule: `mock.module` leaks across files in
   one `bun test` process, so the fake LLM seam is `registerCustomApi` instead
   (`tree.test.ts:6`, `tree.test.ts:120`).

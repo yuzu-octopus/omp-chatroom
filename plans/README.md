@@ -28,6 +28,8 @@ conditions, and update your row when done.
 | 017 | Spike — replace the single-writer assumption with a cross-process story | P3 | S | — | DONE (recommendation (b): document + loud lockfile error; collision confirmed 10 dup seqs/40) |
 | 018 | Re-pin the host to 18.12.2, move the room root into the global session store, land the audit fixes | P1 | M | — | DONE (260 tests / 14 files green; the global room root has no live run yet) |
 | 019 | The human-facing card names its topic; escape the room-authored strings the header rendered raw; the scratch ledger and the verification policy | P2 | S | — | DONE (302 tests / 15 files green; the card header needs the human's live check) |
+| 020 | The effectiveness round: five capabilities and four record kinds from the large-swarm research | P1 | L | — | DONE (331 tests / 15 files green; the room's effectiveness is the human's live check) |
+| 021 | The plugin's glyphs follow the host's symbol set (unicode/nerd/ascii), and the degraded theme is the host's own | P2 | M | — | DONE (`c9ebcd2`; 362 tests / 18 files green — the production topology is a live check) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJECTED (with one-line rationale — finding fixed independently or approach abandoned)
 

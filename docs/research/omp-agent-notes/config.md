@@ -8,7 +8,7 @@ Slice: `plugin/package.json`, `plugin/tsconfig.json`, `plugin/biome.json`, `plug
 > filesystem (`cd /home/yuzu/projects/omp-chatroom` → *No such file or directory*). Every claim
 > below was therefore derived by **reading the files**. This refresh re-checked every version,
 > path, flag and count against the current tree with a local shell. The current gate numbers are
-> **274 pass / 0 fail, 15 files** (`bun test tests/`), **0 tsc errors**
+> **362 pass / 0 fail, 18 files** (`bun test tests/`), **0 tsc errors**
 > (`bunx --bun tsc --noEmit -p tsconfig.json`) and a clean Biome pass over **51 files**
 > (`bunx --bun @biomejs/biome check src tests`) — orchestrator-verified, not re-run here. The
 > *script bodies* are quoted verbatim from `plugin/package.json:6-11`.
@@ -51,7 +51,7 @@ Verbatim from `plugin/package.json:6-11`:
 
 | Command | What it runs | Notes |
 |---|---|---|
-| `cd plugin && bun test tests/` | `bun test` over the 15 files in `plugin/tests/` | Framework is `bun:test` (`plugin/tests/drift.test.ts:1`). Orchestrator-verified: **274 pass / 0 fail, 3398 assertions, 15 files**. |
+| `cd plugin && bun test tests/` | `bun test` over the 18 files in `plugin/tests/` | Framework is `bun:test` (`plugin/tests/drift.test.ts:1`). Orchestrator-verified: **362 pass / 0 fail, 4993 assertions, 18 files**. |
 | `cd plugin && bun run typecheck` | `bunx --bun tsc --noEmit -p tsconfig.json` | `--bun` forces the local tsc through Bun. Orchestrator-verified: **0 errors**. |
 | `cd plugin && bun run lint` | `bunx --bun @biomejs/biome check src tests` | Lint + format check + import organisation in one pass. Orchestrator-verified: **clean over 51 files**. |
 | `cd plugin && bun run lint:fix` | same, with `--write` | Applies safe fixes **and** formats. Run before committing. |
@@ -381,7 +381,7 @@ quoted in `docs/research/omp-agent-chatroom/findings/F15-plugin-packaging-devtoo
 # everything, from the repo's only package:
 cd plugin
 
-bun test tests/                                    # 274 pass / 0 fail, 3398 assertions, 15 files (orchestrator-verified)
+bun test tests/                                    # 362 pass / 0 fail, 4993 assertions, 18 files (orchestrator-verified)
 bunx --bun tsc --noEmit -p tsconfig.json           # 0 errors (orchestrator-verified)
 bunx --bun @biomejs/biome check src tests          # lint+format check, clean over 51 files (orchestrator-verified)
 bunx --bun @biomejs/biome check src tests --write  # autofix + format

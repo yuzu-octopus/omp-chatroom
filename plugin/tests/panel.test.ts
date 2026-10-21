@@ -1473,8 +1473,9 @@ test("the fallback resolves its symbols through the host's own lookup, not a pri
     expect(fallbackSymbol(shim, key)).toBe(activeThemeSymbol(symbolKeyOf(key, boxTables)));
   }
   // And it FOLLOWS the host: a different active symbol set changes what the fallback paints.
-  // (The tables are LIVE — a table built at import time froze the pre-theme ascii preset, and a
-  // table built per call froze the set that was active when the shim was built.)
+  // (The tables are a SNAPSHOT, taken when the fallback is built: a map built at import time froze
+  // the pre-theme ascii preset for the whole session, and a LIVE table — resolved per call through
+  // the host's mirror — is a cycle when that mirror points at the fallback.)
   const original = theme;
   try {
     setActiveSymbolTheme({ symbol: (key: SymbolKey) => `«${key}»` } as unknown as Theme);

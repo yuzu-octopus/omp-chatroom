@@ -10,8 +10,8 @@ Slice: everything under `plugin/src/`. Companion: `docs/research/omp-agent-notes
 > **Verification note (refreshed 2026-10-20).** The original investigation had no local shell
 > device (the only bash tool was a remote Composio sandbox that cannot see this filesystem), so
 > every claim came from reading the source. This refresh re-checked every file:line anchor and
-> every count against the current tree. The current gate numbers are **274 pass / 0 fail, 3398
-> assertions, 15 files**, 0 tsc errors and a clean Biome pass over 51 files — orchestrator-verified,
+> every count against the current tree. The current gate numbers are **362 pass / 0 fail, 4993
+> assertions, 18 files**, 0 tsc errors and a clean Biome pass over 54 files — orchestrator-verified,
 > not re-run here. `plugin/src/**` now holds **35** `.ts` files.
 
 ---
