@@ -44,6 +44,8 @@ export function bodyLines(
         )}`,
     );
   if (all.length <= cap) return all;
+  // The counter's "…" is TEXT — the same ellipsis character the host's own truncation paints
+  // (`Ellipsis.Unicode` is a numeric strategy enum in the host, not a string).
   return [
     ...all.slice(0, cap),
     `${opts.indent}${quote} ${theme.fg("dim", `… +${all.length - cap} more lines`)}`,

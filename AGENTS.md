@@ -194,11 +194,24 @@ Detailed conventions and the not-covered list: `docs/research/omp-agent-notes/te
 - **Bun only** — `bun` 1.4.3. Package manager, runner, and runtime. No `node`, `npm`, or `npx`.
 - **Host: omp 18.12.3.** The plugin pins it exactly in both `peerDependencies` and
   `devDependencies` — `@oh-my-pi/pi-coding-agent`, `@oh-my-pi/pi-tui`, `@oh-my-pi/pi-ai` and
-  `@oh-my-pi/pi-utils` — because the nine deep subpath imports (`DEEP_SPECIFIERS`) are
-  wildcard-only, not public API. `@oh-my-pi/pi-utils` was imported by eight source files while
+  `@oh-my-pi/pi-utils` — because the ten deep subpath imports (`DEEP_SPECIFIERS`) are
+  wildcard-only, not public API. The ten are
+  `@oh-my-pi/pi-coding-agent/{internal-urls/local-protocol,registry/agent-registry,session/harness-tags,utils/event-bus}`
+  and
+  `@oh-my-pi/pi-tui/{chat/messages,chrome/overlay-box,render/render-utils,render/status-line,theme/active-symbols,tools/renderer}`
+  — `theme/active-symbols` is the tenth (it is the host's own symbol lookup, which the plugin's
+  theme shim resolves through rather than copying; the shim's publish path uses the SAME module to
+  restore the host's mirror, so the count stays at ten). Two of the ten are imported by the TESTS
+  only (`pi-coding-agent/internal-urls/local-protocol` and `pi-coding-agent/utils/event-bus`): no
+  source file imports them, but they are still subpaths the plugin resolves, so they belong in the
+  list a host bump is audited against.
+  `@oh-my-pi/pi-utils` was imported by eight source files while
   undeclared; it is now declared in both dependency blocks.
   `tests/drift.test.ts` asserts the installed host — and the global install, when one exists —
-  equals `HOST_VERSION_PIN`, and ESM-imports every deep specifier. A load-time check in
+  equals `HOST_VERSION_PIN`, and ESM-imports the store-critical four of them;
+  `tests/host-contract.test.ts` resolves every subpath the plugin imports (including
+  `theme/active-symbols`) and asserts its named export, so a host bump that moves one fails
+  there, naming the specifier, instead of at first use inside a panel. A load-time check in
   `src/index.ts` compares the host's own `VERSION` against the pin and **warns**; it never
   throws, because a room that still works beats a plugin that refuses to load.
   Whoever bumps the global omp must re-pin (`package.json` + `bun.lock` + `HOST_VERSION_PIN`) —
@@ -267,8 +280,8 @@ chat|board · 1 running`, `no claims` in the board pane).
 | `/room` panel in a real terminal | **renders** — `tmux` is not installed on this machine, so a raw pty was used (python `pty.fork()` + `TIOCSWINSZ` 120x40, writing `/room` to the master fd). The panel showed the live room: the posted message in the chat pane, the held claim in the board pane, and the room id in the title matched the id in the global store file. The plugin's own panel trace shows `boxRound=object` (the field that used to crash it with `theme.boxRound` undefined) and `RoomPanel ctor: theme=object fg=function`, with no `FAILED` line and no `Room panel unavailable` notification |
 | Noise | the plugin produced **no** errors, warnings or stack traces across all runs (the plugin's own stderr was empty; the only stderr was host-level noise — slow-startup notices and MCP server timeouts — and no matching entries in `~/.omp/logs/`) |
 | Unprompted discovery | **measured over 16 trials**: the model claimed before mutating in 12 (85.7 % of scored trials, 75.0 % counting the two harness-error trials as misses). All three probe inputs (digest, routing rule, tool description) reached the model in 16/16; the control with the room plugin not loaded produced zero room calls. Every miss had the same shape: the model inspected the file and never consulted the room — and in a solo room the digest reads `1 live · 0 record(s)`, so the model correctly concluded there was nobody to coordinate with |
-| Coordination under real models | claim arbitration (a second claim refused, naming the holder, one shared durable log), mention delivery (a subagent's `post` with `mention:[parent]` arrived as a real `[T0] room ⟵ …` steer), release freeing the resource, and `wait_for_message` / `wait_for_claim` returning `outcome: "event"` without hanging |
-| The inline cards | **render in a real transcript** — `✉ room ⟵ Poster just now` + a quote-bordered body, and `▦ Room: join` / `▦ Room: post …` for the tool cards. The poster sees no message card for its own message (delivery suppresses self-authored records). `omp render` shows the RAW custom message instead: the render CLI builds its session without an `extensionRunner`, so the plugin's renderer never runs there — it is not a valid oracle |
+| Coordination under real models | claim arbitration (a second claim refused, naming the holder, one shared durable log), mention delivery (a subagent's `post` with `mention:[parent]` arrived as a real `[T0] room ⟵ …` steer — the `⟵` is the model-facing prose arrow, TEXT in the model's input, not a painted glyph), release freeing the resource, and `wait_for_message` / `wait_for_claim` returning `outcome: "event"` without hanging |
+| The inline cards | **render in a real transcript** — `✉ room ⟵ Poster just now` + a quote-bordered body, and `▦ Room: join` / `▦ Room: post …` for the tool cards. That recording PREDATES the symbol-set change: the run painted the plugin's OWN hardcoded glyph (`▦`), not the host's — the current build paints the HOST's `status.info`/`status.pending` for the user's active symbol set instead, so the `▦` in the transcript is the OLD build, not the current one. The plugin paints no DECORATIVE glyph of its own **in the panel and the cards** — the envelope is the host's `tool.irc`, the tool cards' icons are `status.info`/`status.pending`, and every one of them follows the user's active symbol set; the literals that remain are text punctuation and delimiters (the `…` ellipsis, the panel title's `|`) and the **model-facing** prose arrows (`⟵` in the attention deliveries and the tool descriptions, `→` in the wait tools — the `⟵` in the transcript quote above is one of them), which are TEXT in the model's input, not painted glyphs, and are deliberately out of the symbol set's scope. The poster sees no message card for its own message (delivery suppresses self-authored records). `omp render` shows the RAW custom message instead: the render CLI builds its session without an `extensionRunner`, so the plugin's renderer never runs there — it is not a valid oracle |
 | The process boundary | **cross-process coordination is COLD only**: the log, the board and the digest are shared (a later process replays the log), but LIVE coordination is in-process (delivery resolves targets through the local `AgentRegistry`), and a second live writer on one project directory is refused loudly (`room file locked by another session`). The coordination domain is one omp process with many agents |
 
 **The check is not vacuous.** The same harness was run against a deliberately broken extension,

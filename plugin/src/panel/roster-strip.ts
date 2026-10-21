@@ -55,6 +55,11 @@ type GroupStatus = (typeof GROUP_ORDER)[number];
  * So the strip DROPS WHOLE GROUPS instead of being cut mid-word, and reports what it dropped with
  * the host's own "+N more" convention (`pi-tui/src/overlays/usage-dashboard.ts:851`). A count that
  * does not fit is worth less than a count that is honest about what it left out.
+ *
+ * The budget is MEASURED, not assumed: every candidate strip is measured with `visibleWidth`
+ * before it is returned. That matters because the status glyph's cell width belongs to the user's
+ * active symbol set — the ascii set paints "[!!]" (four cells) where the unicode set paints one —
+ * so a wider glyph costs a group, never a half-painted one.
  */
 export function renderRosterStrip(
   refs: readonly AgentRef[],

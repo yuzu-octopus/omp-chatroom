@@ -88,6 +88,40 @@ Four tools, all with `loadMode: "essential"` so they stay top-level:
 
 Plus a `/room` panel and inline transcript cards.
 
+The cards' and the panel's glyphs come from the host's **active symbol set** (unicode / nerd /
+ascii, whichever the user configured): the tool cards' icons are symbol keys (`status.info` for
+`room`, `status.pending` for the wait tools), the message card's envelope is the host's `tool.irc`
+symbol, the claim card's flag is `status.pending`, the release marker is `status.error` and the
+board-delta grid is `status.info`.
+
+**The plugin paints no decorative glyph of its own in the panel and the cards.** The literals it
+still writes are, and only:
+
+- **text punctuation** — the `…` that marks a cut (`cards/body-lines.ts`,
+  `cards/message-cards.ts`, `panel/panel.ts`) and the `—` in a notification
+  (`panel/panel.ts`);
+- **a text delimiter** — the `|` between the pane names in the panel title (`panel/panel.ts`): a
+  literal ASCII pipe inside a bracketed label, not a glyph (the theme's `sep.pipe` carries flanking
+  spaces and would change the label's shape and the title's cell budget);
+- **the model-facing prose arrows** — `⟵` in the attention deliveries and the tool descriptions and
+  `→` in the wait tools' texts (`attention/delivery.ts`, `attention/governor.ts`, `tools/room.ts`,
+  `tools/wait-for-claim.ts`, `tools/wait-for-agent.ts`, `tools/wait-for-message.ts`). Those are
+  TEXT in the model's input, not painted glyphs, and the model's contract is deliberately out of
+  the symbol set's scope: changing them would change what the model is told.
+
+The fallback theme it uses when the host hands it an unusable one answers from a **snapshot** of
+the host's active glyphs, captured when the fallback is built: the table members and `symbol()`
+read that one map, so they can never disagree with each other, and the fallback never asks the
+host's symbol mirror for a glyph — so a mirror pointing at the fallback can never recurse. The
+preset it reports is the one that snapshot was taken under, not the host's current one.
+
+It is also **complete**: the fallback is published into the host's own theme singleton (the
+panel's frame is drawn by the host's chrome helpers, which read that singleton), and in
+production the plugin and the host share one `pi-tui` instance — so a published fallback is the
+host's theme, and the host reads its own members off it. Every public member of the host's
+`Theme` class is therefore answered, colourlessly, and the test derives that member list from
+the host's class itself: a member the host adds later fails the test, not the host's next frame.
+
 ## The `room` tool
 
 One tool, dispatched on `op`. Every op returns `content: [{type:"text", text}]` (always present — the

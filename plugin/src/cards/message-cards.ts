@@ -81,6 +81,9 @@ function topicOf(record: RoomRecord | undefined): string | undefined {
   const topic = record.topic;
   if (!topic) return undefined;
   const safe = safeRoomText(topic);
+  // The cut marker is TEXT: a literal "…", the same character the host's own truncation paints
+  // (`Ellipsis.Unicode` is a numeric STRATEGY enum in the host, not a string, so it cannot be
+  // interpolated here).
   return safe.length > TOPIC_MAX ? `${safe.slice(0, TOPIC_MAX - 1)}…` : safe;
 }
 
@@ -120,7 +123,7 @@ function frameComponent(
   );
 }
 
-/** `✉ room ⟵ author · topic · [reply] · 2m ago` + the quote-bordered body (§7.3/§7.4). */
+/** `✉ room ⟵ author · topic · [reply] · 2m ago` + the quote-bordered body (§7.3/§7.4). The icon is the theme's own `tool.irc`. */
 export function renderMessageCard(
   message: CustomMessage,
   options: MessageRenderOptions,
@@ -165,7 +168,9 @@ export function renderMentionCard(
   return frameComponent(message, options, theme, (_width, expanded, record, body) => {
     const from = record && "from" in record ? record.from : "?";
     const meta = [
-      "➤ me",
+      // The addressing marker is the host's own "selected" glyph (the theme's active symbol set:
+      // unicode / nerd / ascii), not a hardcoded one.
+      `${theme.nav.selected} me`,
       topicOf(record),
       performativeOf(record),
       record?.kind === "msg" && record.replyTo ? "reply" : undefined,
@@ -192,7 +197,7 @@ export function renderMentionCard(
   });
 }
 
-/** `⚑ room claim: author → resource · 4m left`; expanded lists the lease detail (§7.3). */
+/** `⚑ room claim: author → resource · 4m left`; expanded lists the lease detail (§7.3). The flag is the theme's own `status.pending`. */
 export function renderClaimCard(
   message: CustomMessage,
   options: MessageRenderOptions,
@@ -202,7 +207,14 @@ export function renderClaimCard(
     const from = record && "from" in record ? record.from : "?";
     const lines = [
       renderStatusLine(
-        { iconOverride: "⚑", title: `room claim ${from}`, meta: [ageOf(message.timestamp)] },
+        {
+          // The card's flag. The host has no "claim" symbol, so the card borrows the theme's
+          // PENDING glyph — a lease in flight — and drops the hardcoded "⚑" that ignored the
+          // user's symbol set (ascii, nerd or unicode).
+          iconOverride: theme.symbol("status.pending"),
+          title: `room claim ${from}`,
+          meta: [ageOf(message.timestamp)],
+        },
         theme,
       ),
     ];
@@ -210,25 +222,33 @@ export function renderClaimCard(
     if (record.kind === "claim") {
       // The resource is "<topic>/<key>" — both free-form room text, and the status line does not
       // escape, so it is escaped here rather than rendered raw.
-      lines.push(`  ${theme.fg("toolOutput", `→ ${safeRoomText(record.resource)}`)}`);
+      // The pointer is the theme's own `nav.selected` (the host has no forward-arrow key; this is
+      // its pointer glyph) rather than a hardcoded "→".
+      lines.push(
+        `  ${theme.fg("toolOutput", `${theme.nav.selected} ${safeRoomText(record.resource)}`)}`,
+      );
       if (expanded) {
         lines.push(
-          `  ${theme.fg("dim", `ttl ${Math.round(record.ttlMs / 1000)}s · seq ${record.seq}`)}`,
+          `  ${theme.fg("dim", `ttl ${Math.round(record.ttlMs / 1000)}s${theme.sep.dot}seq ${record.seq}`)}`,
         );
       }
       return lines;
     }
+    // The release marker is the theme's ERROR glyph (the host's "✘") — a lease that ended — and the
+    // dash joining the two clauses is the theme's own `format.dash`.
     lines.push(
-      `  ${theme.fg("toolOutput", `✕ ${safeRoomText(record.resource)} — ${safeRoomText(record.reason)}`)}`,
+      `  ${theme.fg("toolOutput", `${theme.symbol("status.error")} ${safeRoomText(record.resource)} ${theme.format.dash} ${safeRoomText(record.reason)}`)}`,
     );
     if (expanded) {
-      lines.push(`  ${theme.fg("dim", `prev holder ${record.prevHolder} · seq ${record.seq}`)}`);
+      lines.push(
+        `  ${theme.fg("dim", `prev holder ${record.prevHolder}${theme.sep.dot}seq ${record.seq}`)}`,
+      );
     }
     return lines;
   });
 }
 
-/** `▦ room board: +N claimed, −N released`; expanded lists each delta row (§7.3). */
+/** `▦ room board: +N claimed, −N released`; expanded lists each delta row (§7.3). The grid is the theme's own `status.info`. */
 export function renderBoardDeltaCard(
   message: CustomMessage,
   options: MessageRenderOptions,
@@ -244,10 +264,13 @@ export function renderBoardDeltaCard(
             ? `room board: ${record.from} lost ${record.resource} to ${record.holder}`
             : "room board";
     const lines = [
-      renderStatusLine({ iconOverride: "▦", title, meta: [ageOf(message.timestamp)] }, theme),
+      renderStatusLine(
+        { iconOverride: theme.symbol("status.info"), title, meta: [ageOf(message.timestamp)] },
+        theme,
+      ),
     ];
     if (expanded && record) {
-      lines.push(`  ${theme.fg("dim", `seq ${record.seq} · ${record.kind}`)}`);
+      lines.push(`  ${theme.fg("dim", `seq ${record.seq}${theme.sep.dot}${record.kind}`)}`);
       if (record.kind === "gap")
         lines.push(`  ${theme.fg("toolOutput", `reason: ${record.reason}`)}`);
     }

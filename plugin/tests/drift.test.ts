@@ -58,6 +58,9 @@ test("DEEP_SPECIFIERS lists the Option A four plus the Option B surface", () => 
   expect(DEEP_SPECIFIERS.length).toBeGreaterThanOrEqual(4);
   expect(DEEP_SPECIFIERS).toContain("@oh-my-pi/pi-coding-agent/session/harness-tags");
   expect(DEEP_SPECIFIERS).toContain("@oh-my-pi/pi-coding-agent/internal-urls/local-protocol");
+  // The host's symbol lookup: a barrel-less subpath the plugin's theme shim resolves every
+  // painted glyph through, so a host bump that moves it must fail here, not inside a panel.
+  expect(DEEP_SPECIFIERS).toContain("@oh-my-pi/pi-tui/theme/active-symbols");
 });
 
 test("each Option A deep specifier exports something, with no undefined members", () => {

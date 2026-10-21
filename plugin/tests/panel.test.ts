@@ -7,14 +7,22 @@ import { resolveLocalRoot } from "@oh-my-pi/pi-coding-agent/internal-urls/local-
 import {
   type Component,
   ensureThemeSync,
+  type SymbolKey,
+  setThemeInstance,
   type Theme,
   type TUI,
   theme,
   visibleWidth,
 } from "@oh-my-pi/pi-tui";
+import { activeThemeSymbol, setActiveSymbolTheme } from "@oh-my-pi/pi-tui/theme/active-symbols";
 import { registerRoomCommand } from "../src/commands/room-command";
 import { roomIdFor } from "../src/ids";
-import { type BoardRow, createBoardPane, projectClaims } from "../src/panel/board-pane";
+import {
+  type BoardRow,
+  boardColumns,
+  createBoardPane,
+  projectClaims,
+} from "../src/panel/board-pane";
 import {
   type ChatRow,
   createChatPane,
@@ -22,7 +30,7 @@ import {
   renderChatRows,
 } from "../src/panel/chat-pane";
 import { frameBottomRow, frameDividerRow, frameHintRow, frameTopRow } from "../src/panel/chrome";
-import { uncolouredTheme } from "../src/panel/host-theme";
+import { adoptHostTheme, uncolouredTheme } from "../src/panel/host-theme";
 import { actionFor, PANEL_KEY_MAP, type PanelAction } from "../src/panel/keys";
 import {
   openRoomPanel,
@@ -40,6 +48,41 @@ import type { RoomRecord } from "../src/store/schema";
 const TMP: string[] = [];
 // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI needs ESC
 const ANSI = /\x1b\[[0-9;]*m/g;
+
+/**
+ * A regex-safe literal for a theme glyph.
+ *
+ * The assertions below are built from the THEME's own values, because the glyph is the user's
+ * active symbol set: "[!!]" is a character class, "->" is a quantifier, and a private-use glyph is
+ * neither. Escaping keeps the expectation about the VALUE, not about the regex dialect.
+ */
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * A theme whose "selected" glyph is `glyph` — the ascii symbol set's TWO-cell cursor ("->").
+ *
+ * The glyph's WIDTH is part of the contract: a cell that is one cell wide truncates a two-cell
+ * marker, and the host paints its own ellipsis where the marker was.
+ */
+function themeWithSelectedGlyph(glyph: string): Theme {
+  return new Proxy(theme, {
+    get(target, prop) {
+      if (prop === "nav") {
+        const nav = Reflect.get(target, "nav", target) as Record<string, string>;
+        return new Proxy(nav, {
+          get(navTarget, navProp) {
+            if (navProp === "selected") return glyph;
+            return Reflect.get(navTarget, navProp, navTarget);
+          },
+        });
+      }
+      const value = Reflect.get(target, prop, target) as unknown;
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }) as unknown as Theme;
+}
 
 beforeAll(() => {
   ensureThemeSync();
@@ -663,7 +706,12 @@ test("the fallback theme satisfies every member src/ reads (D5, and the boxRound
   // test, because the frame rows read the host singleton and never see the fallback in-process.
   expect((t.bold as (text: string) => string)("AgentA")).toBe("AgentA");
   expect((t.fg as (tone: string, text: string) => string)("accent", "AgentA")).toBe("AgentA");
-  expect((t.styledSymbol as (key: string, tone: string) => string)("tool.irc", "accent")).toBe("✉");
+  // The envelope glyph is the HOST's own — the user's active symbol set decides what it is
+  // ("✉" in unicode, a private-use glyph in nerd, "#" in ascii), so the fallback is asserted
+  // against the host's live lookup, never against a literal.
+  expect((t.styledSymbol as (key: string, tone: string) => string)("tool.irc", "accent")).toBe(
+    activeThemeSymbol("tool.irc"),
+  );
   // Getter-shaped members must stay strings, or consumers interpolate them literally.
   for (const bucket of [t.sep, t.nav, t.tree, t.status, t.md]) {
     for (const value of Object.values(bucket as Record<string, string>))
@@ -734,14 +782,21 @@ test("chat row: one-cell tier glyph, single-spaced separator", () => {
     expect(row.replace(ANSI, "")).not.toContain("T1");
     expect(row.replace(ANSI, "")).not.toContain("T2");
   }
-  // D1: no triple space around the separator. `sep.dot` is already " · " (symbols.ts:455), so the
-  // old `${topic} ${sep.dot} ${body}` produced "topic  ·  body".
-  for (const row of out) expect(row.replace(ANSI, "")).not.toContain("  ·  ");
-  // D2: the unread cursor no longer abuts the badge. It reads "❯✘ <time>" — cursor, glyph, space.
-  // The row starts with the selection-marker cell (a space when the row is not selected), so the
-  // columns of every row stay aligned.
-  expect(out[0]!.replace(ANSI, "")).toMatch(/^.?❯✘ \d\d:\d\d:\d\d /);
+  // D1: no triple space around the separator. `sep.dot` already carries its own flanks (" · " in
+  // unicode, " - " in ascii), so the old `${topic} ${sep.dot} ${body}` produced "topic  ·  body".
+  // The expectation is built from the THEME's separator: a literal only describes one symbol set.
+  for (const row of out) expect(row.replace(ANSI, "")).not.toContain(`${theme.sep.dot} `);
+  // D2: the unread cursor no longer abuts the badge. It reads "<cursor><glyph> <time>" — cursor,
+  // glyph, space. Both glyphs are the theme's own (`nav.cursor`, `status.error`): the ascii set
+  // paints ">" and "[!!]", the nerd set private-use shapes, so a literal fails for every user but
+  // the unicode one. The row starts with the selection-marker cell (a space when the row is not
+  // selected), so the columns of every row stay aligned.
+  const cursor = escapeRegExp(theme.nav.cursor);
+  const badge = escapeRegExp(theme.status.error);
+  const head = new RegExp(`^.?${cursor}${badge} \\d\\d:\\d\\d:\\d\\d `);
+  expect(out[0]!.replace(ANSI, "")).toMatch(head);
   // D7: the author/topic separator is the theme's nav.selected, not a hardcoded "›".
+  expect(out[0]!.replace(ANSI, "")).toContain(theme.nav.selected);
   expect(out[0]!.replace(ANSI, "")).not.toContain("›");
   // Every row is padded/trimmed to exactly `width` VISIBLE cells (ANSI codes are invisible).
   for (const row of out) expect(visibleWidth(row)).toBe(100);
@@ -981,10 +1036,18 @@ test("the chat row budgets its width: the ledger survives, the body yields", () 
   const line = out[0]!;
   const plain = line.replace(ANSI, "");
   expect(visibleWidth(line)).toBe(70);
-  // The ledger reads in full — "publish it" is the last word on the line.
-  expect(plain).toContain("looping · next AgentB · publish it");
-  // The body still shows what fits.
-  expect(plain).toContain("hello");
+  // The ledger reads in full — "publish it" is the last word on the line. The separator is the
+  // THEME's `sep.dot` (" · " in unicode and nerd, " - " in ascii), so the expectation is built
+  // from the theme rather than from one symbol set's literal.
+  expect(plain).toContain(`looping${theme.sep.dot}next AgentB${theme.sep.dot}publish it`);
+  // The body still shows what fits: the START of it (the rest is cut, and the cut is marked).
+  // How much survives depends on the symbol set's glyph widths (the ascii tier badge is four cells
+  // wide, the unicode one a single cell), so the assertion is on the prefix, not on a count.
+  const bodyAt = plain.indexOf("hel");
+  expect(bodyAt, "the body still shows its start").toBeGreaterThan(0);
+  const survivor = plain.slice(bodyAt).split(/…|\s/)[0] ?? "";
+  expect(survivor.length).toBeGreaterThan(0);
+  expect("hello world".startsWith(survivor)).toBe(true);
   // The topic survives too.
   expect(plain).toContain("build");
 });
@@ -1003,7 +1066,7 @@ test("the chat ledger's parts keep their own tone (no nested fg)", () => {
     line.indexOf(theme.fg("muted", "next AgentB")),
   );
   // `sep.dot` already carries its flanks: no double spaces around the separator.
-  expect(line.replace(ANSI, "")).not.toContain("  ·  ");
+  expect(line.replace(ANSI, "")).not.toContain(`${theme.sep.dot} `);
 });
 
 test("the board pane windows around the selection, so the cursor cannot scroll away", () => {
@@ -1036,6 +1099,37 @@ test("the board pane windows around the selection, so the cursor cannot scroll a
   expect(marked.length).toBe(1);
   expect(marked[0]).toContain("build/r15");
   for (const line of out) expect(visibleWidth(line)).toBe(60);
+});
+
+test("the board's cursor column is as wide as the theme's cursor glyph (never an ellipsis)", () => {
+  // The cursor glyph is the theme's own `nav.selected`, and the user's symbol set decides how wide
+  // it is: the ascii set paints "->" (TWO cells), the nerd set a private-use glyph. The cursor
+  // column was a fixed ONE cell, so the host truncated the ascii marker to its own ellipsis
+  // ("…") — indistinguishable from a chopped cell, and the row lost its cursor entirely.
+  const asciiCursor = themeWithSelectedGlyph("->");
+  const now = Date.now();
+  const rows: BoardRow[] = [
+    {
+      resource: "build/step",
+      holder: "AgentA",
+      ttlMs: 60_000,
+      expiresAt: now + 12_000,
+      acquiredAt: now,
+      waiting: [],
+      dependsOn: [],
+      state: "held",
+    },
+  ];
+  const line = projectClaims(rows, 60, asciiCursor, now, 0)[0]!;
+  const plain = line.replace(ANSI, "");
+  // The two-cell marker is painted in full.
+  expect(plain).toContain("->");
+  // And it is not the host's truncation marker.
+  expect(plain).not.toContain("…");
+  expect(visibleWidth(line)).toBe(60);
+  // The theme's own cursor column is sized from the SAME glyph, so the host never truncates it.
+  expect(boardColumns(asciiCursor)[0]!.width).toBe(visibleWidth("->"));
+  expect(boardColumns(asciiCursor)[0]!.minWidth).toBe(visibleWidth("->"));
 });
 
 test("the board row reads in a real pane: the dependency, the waiters and the state survive", () => {
@@ -1101,8 +1195,11 @@ test("the roster strip drops whole groups when the title is narrow, and says wha
   expect(visibleWidth(renderRosterStrip(refs, theme, 32))).toBeLessThanOrEqual(32);
   expect(plain).toContain("2 running");
   expect(plain).toContain("1 idle");
-  // The dropped groups are counted, not silently lost.
-  expect(plain).toContain("+2 more");
+  // The dropped groups are counted, not silently lost. The strip's own rule is that the tail
+  // loses its WORD before the strip loses a group ("+3 more" is the host's shape, "+3" is what
+  // fits when it does not) — and in the ascii set the status glyphs are wider, so the 32-cell
+  // budget runs out earlier. Both forms count the drop.
+  expect(plain).toMatch(/\+2(?: more)?/);
   expect(plain).not.toContain("parked");
   // With room, every group is there.
   const full = renderRosterStrip(refs, theme).replace(ANSI, "");
@@ -1162,4 +1259,311 @@ test("the chat row's clock is local time, like the host's transcript", () => {
   };
   const plain = renderChatRows([row], 100, theme)[0]!.replace(ANSI, "");
   expect(plain).toContain("03:04:05");
+});
+
+// --- the fallback theme follows the host's symbol set ----------------------
+
+/**
+ * Every symbol key the panel and the cards read — DERIVED from the source, not hand-listed.
+ *
+ * A hand-written list goes stale the moment a new `theme.status.foo` is read: the test keeps
+ * passing while the fallback paints "undefined" for the key nobody listed. So the list is scanned
+ * out of `src/`, and the hand-written one below is only the FALLBACK's own contract.
+ */
+function scanReadSymbolKeys(): SymbolKey[] {
+  const root = path.join(import.meta.dir, "..", "src");
+  const found = new Set<string>();
+  const boxTables = scanBoxTables();
+  const visit = (dir: string): void => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        visit(full);
+        continue;
+      }
+      if (!entry.name.endsWith(".ts")) continue;
+      const text = fs.readFileSync(full, "utf-8");
+      // `theme.status.running`, `theme.nav.selected`, … — the table getters.
+      for (const m of text.matchAll(/theme\.(status|nav|tree|sep|md|format|tool)\.([a-zA-Z]+)/g)) {
+        found.add(`${m[1]}.${m[2]}`);
+      }
+      // `theme.boxRound` / `theme.boxSharp` — the WHOLE table is read, so every member of it has
+      // to resolve. The member lists are parsed out of the shim's own key maps (see
+      // `scanBoxTables`), so they grow with the source instead of being hand-listed here.
+      for (const m of text.matchAll(/theme\.(boxRound|boxSharp)\b/g)) {
+        for (const member of Object.keys(boxTables[m[1]!] ?? {})) {
+          found.add(`${m[1]}.${member}`);
+        }
+      }
+      // `theme.symbol("status.info")` — the keyed lookup.
+      for (const m of text.matchAll(/symbol\("([a-zA-Z]+\.[a-zA-Z]+)"/g)) {
+        found.add(m[1]!);
+      }
+      // `theme.styledSymbol("tool.irc", "accent")` — the SAME lookup, styled. The old scanner
+      // matched `symbol("…")` only, so the envelope on EVERY message card (`tool.irc`) was
+      // invisible to it, and the fallback had no `tool` table at all.
+      for (const m of text.matchAll(/styledSymbol\("([a-zA-Z]+\.[a-zA-Z]+)"/g)) {
+        found.add(m[1]!);
+      }
+      // The dynamic table reads: `theme.status[STATUS_KEY[status]]`. The KEY MAP the read names
+      // is the contract: its VALUES are keys of THAT table, so the map's values are resolved
+      // against the bucket the read indexes.
+      //
+      // A map's VALUES say what it is, and the two kinds are read differently:
+      //  - BARE names ("error") are members of a TABLE, read as `theme.status[MAP.member]`;
+      //  - DOTTED names ("status.info") are SYMBOL KEYS, read as `theme.symbol(MAP.member)`.
+      const maps = new Map<string, { table: string[]; symbol: string[] }>();
+      // The declaration may carry a TYPE ANNOTATION between the identifier and the `=` — e.g.
+      // `const TIER_GLYPH: Record<Tier, "error" | "warning" | "info"> = {` — so the annotation is
+      // part of the pattern. Without it the whole of `chat-pane.ts` was invisible to the scan and
+      // `status.warning` was never derived. The body may also be a ONE-LINE map
+      // (`{ room: "status.info", wait: "status.pending" }`), so the body ends at the first brace.
+      for (const m of text.matchAll(/([A-Z][A-Z_]*)\s*(?::[^=;]*?)?=\s*\{([^}]*)\}/g)) {
+        const body = m[2]!;
+        const table = [...body.matchAll(/"([a-zA-Z]+)"/g)].map((v) => v[1]!);
+        const symbol = [...body.matchAll(/"([a-zA-Z]+\.[a-zA-Z]+)"/g)].map((v) => v[1]!);
+        if (table.length > 0 || symbol.length > 0) maps.set(m[1]!, { table, symbol });
+      }
+      for (const m of text.matchAll(/theme\.(status|nav|tree|sep|md|format)\[([A-Z][A-Z_]*)/g)) {
+        for (const value of maps.get(m[2]!)?.table ?? []) found.add(`${m[1]}.${value}`);
+      }
+      // The dynamic SYMBOL reads: `theme.symbol(SYMBOL_KEY.room)` / `theme.styledSymbol(SYMBOL_KEY.wait)`.
+      // The map holds SYMBOL KEYS, so its values are the keys themselves — no bucket to prefix.
+      for (const m of text.matchAll(/theme\.(?:styledSymbol|symbol)\(\s*([A-Z][A-Z_]*)\./g)) {
+        for (const value of maps.get(m[1]!)?.symbol ?? []) found.add(value);
+      }
+    }
+  };
+  visit(root);
+  // The scan can never silently find NOTHING: a scanner that matches no source at all leaves
+  // every "the fallback paints no undefined" assertion vacuously true.
+  if (found.size === 0) {
+    throw new Error("scanReadSymbolKeys found no symbol keys in src/ — the scan is broken");
+  }
+  // And it must find the KNOWN keys: `status.error` comes from the tier map's BARE values, so
+  // this also fails if the type annotation between the identifier and `=` is not matched again.
+  if (!found.has("status.error")) {
+    throw new Error("scanReadSymbolKeys did not derive status.error — the scan is broken");
+  }
+  return [...found] as SymbolKey[];
+}
+
+/**
+ * The shim's box tables, parsed out of `host-theme.ts`: the member names and the SYMBOL KEY each
+ * member resolves to.
+ *
+ * The rounded box borrows its JUNCTIONS from the sharp set — the host's own `get boxRound()` does
+ * the same, because a rounded box has no rounded junction glyph — so a table member and its
+ * symbol key are not always the same key. The tests need the real mapping, not a guess.
+ */
+function scanBoxTables(): Record<string, Record<string, string>> {
+  const source = fs.readFileSync(
+    path.join(import.meta.dir, "..", "src", "panel", "host-theme.ts"),
+    "utf-8",
+  );
+  const tables: Record<string, Record<string, string>> = {};
+  for (const [constName, bucket] of [
+    ["BOX_ROUND_KEYS", "boxRound"],
+    ["BOX_SHARP_KEYS", "boxSharp"],
+  ] as const) {
+    const block = source.match(new RegExp(`const ${constName} = \\{([\\s\\S]*?)\\n\\}`));
+    if (block === null) continue;
+    const members: Record<string, string> = {};
+    for (const m of block[1]!.matchAll(/(\w+):\s*"([a-zA-Z]+\.[a-zA-Z]+)"/g)) {
+      members[m[1]!] = m[2]!;
+    }
+    tables[bucket] = members;
+  }
+  return tables;
+}
+
+/** The SYMBOL KEY a table member resolves to — the rounded box's junctions borrow the sharp set. */
+function symbolKeyOf(key: string, boxTables: Record<string, Record<string, string>>): SymbolKey {
+  const [bucket, name] = key.split(".");
+  return (boxTables[bucket ?? ""]?.[name ?? ""] ?? key) as SymbolKey;
+}
+
+/** The fallback theme's own contract: every key it MUST define, by the host's key names. */
+const FALLBACK_CONTRACT_KEYS: readonly SymbolKey[] = [
+  "status.success",
+  "status.error",
+  "status.warning",
+  "status.info",
+  "status.pending",
+  "status.disabled",
+  "status.enabled",
+  "status.running",
+  "status.shadowed",
+  "status.aborted",
+  "status.done",
+  "nav.cursor",
+  "nav.selected",
+  "nav.expand",
+  "nav.collapse",
+  "nav.back",
+  "tree.branch",
+  "tree.last",
+  "tree.vertical",
+  "tree.horizontal",
+  "tree.hook",
+  "sep.block",
+  "sep.space",
+  "sep.dot",
+  "sep.slash",
+  "sep.pipe",
+  "md.quoteBorder",
+  "md.hrChar",
+  "md.bullet",
+  "md.colorSwatch",
+  "format.bullet",
+  "format.dash",
+  "format.bracketLeft",
+  "format.bracketRight",
+];
+
+/** Resolve a dotted symbol key through the fallback theme's own tables. */
+function fallbackSymbol(shim: Record<string, unknown>, key: string): string | undefined {
+  const [bucket, name] = key.split(".");
+  const table = shim[bucket ?? ""] as Record<string, string> | undefined;
+  return table?.[name ?? ""];
+}
+
+test("the fallback theme paints no 'undefined' for ANY key the panel reads", () => {
+  // The earlier shim defined only five of the host's eleven status symbols, and the roster strip
+  // reads four of the missing ones (`running`, `enabled`, `shadowed`, `aborted`): under the
+  // fallback the presence strip painted the literal "undefined" into the frame title. Every key
+  // the panel and the cards read must resolve to a real glyph.
+  const shim = uncolouredTheme() as unknown as Record<string, unknown>;
+  // The keys the SOURCE reads, scanned out of `src/` — a key nobody listed cannot slip past.
+  const read = scanReadSymbolKeys();
+  const boxTables = scanBoxTables();
+  expect(read.length).toBeGreaterThan(0);
+  for (const key of read) {
+    const value = fallbackSymbol(shim, key);
+    expect(value, `the fallback must define ${key}`).toBeDefined();
+    expect(value).not.toBe("undefined");
+    // "?" is the fallback's marker for a key the HOST has no symbol for — never a painted glyph.
+    expect(value).not.toBe("?");
+    expect(value!.length).toBeGreaterThan(0);
+  }
+  // The keyed lookups the cards use resolve as well — a fallback without `symbol()` made
+  // `theme.symbol(...)` throw "theme.symbol is not a function".
+  const symbol = shim.symbol as (key: string) => string;
+  const styled = shim.styledSymbol as (key: string, tone: string) => string;
+  for (const key of read) {
+    // The rounded box's junctions resolve through the SHARP set (the host's own `get boxRound()`
+    // does the same), so the member's symbol key is not always the member's own name.
+    const member = symbolKeyOf(key, boxTables);
+    expect(symbol(member)).not.toBe("undefined");
+    expect(symbol(member)).not.toBe("?");
+    expect(styled(member, "accent")).not.toBe("undefined");
+    expect(styled(member, "accent")).not.toBe("?");
+  }
+});
+
+test("the fallback resolves its symbols through the host's own lookup, not a private copy", () => {
+  const shim = uncolouredTheme() as unknown as Record<string, unknown>;
+  const boxTables = scanBoxTables();
+  // Equal to the host's own lookup, key by key: a private copy of the tables would drift.
+  for (const key of FALLBACK_CONTRACT_KEYS) {
+    expect(fallbackSymbol(shim, key)).toBe(activeThemeSymbol(key));
+  }
+  // And the SOURCE's keys resolve to the host's own glyphs too.
+  for (const key of scanReadSymbolKeys()) {
+    expect(fallbackSymbol(shim, key)).toBe(activeThemeSymbol(symbolKeyOf(key, boxTables)));
+  }
+  // And it FOLLOWS the host: a different active symbol set changes what the fallback paints.
+  // (The tables are LIVE — a table built at import time froze the pre-theme ascii preset, and a
+  // table built per call froze the set that was active when the shim was built.)
+  const original = theme;
+  try {
+    setActiveSymbolTheme({ symbol: (key: SymbolKey) => `«${key}»` } as unknown as Theme);
+    const changed = uncolouredTheme() as unknown as Record<string, unknown>;
+    expect(fallbackSymbol(changed, "status.running")).toBe("«status.running»");
+    expect(fallbackSymbol(changed, "nav.selected")).toBe("«nav.selected»");
+    expect((changed.symbol as (key: string) => string)("status.info")).toBe("«status.info»");
+  } finally {
+    setActiveSymbolTheme(original);
+  }
+  // The restore is real: the fallback is back on the host's own glyphs.
+  const restored = uncolouredTheme() as unknown as Record<string, unknown>;
+  expect(fallbackSymbol(restored, "status.running")).toBe(activeThemeSymbol("status.running"));
+});
+
+// --- the fallback theme and the host's symbol mirror ------------------------
+//
+// The host's publish path (`setThemeInstance`) MIRRORS the published theme into
+// `theme/active-symbols`, and the fallback resolves its own symbols THROUGH that mirror. A mirror
+// pointing at the fallback is therefore a cycle: the fallback asks the mirror, the mirror asks the
+// fallback, and the stack overflows — `Maximum call stack size exceeded`, in the plugin's cards AND
+// in the host's own `formatKeyHint`, which poisons the host's key hints for the rest of the session.
+
+test("the fallback's symbol lookup survives a mirror that points at the fallback", () => {
+  const original = theme;
+  const shim = uncolouredTheme() as unknown as Record<string, unknown>;
+  const symbol = shim.symbol as (key: string) => string;
+  try {
+    setActiveSymbolTheme(shim as unknown as Theme);
+    let value: string | undefined;
+    expect(() => {
+      value = symbol("status.info");
+    }).not.toThrow();
+    expect(value).toBeDefined();
+    expect(value).not.toBe("undefined");
+    expect(value).not.toBe("");
+  } finally {
+    // The mirror is the host's own state: put it back, or the rest of this file reads glyphs
+    // through a poisoned lookup.
+    setActiveSymbolTheme(original);
+  }
+});
+
+test("publishing the fallback leaves the host's own symbol lookup usable", () => {
+  // The PRODUCTION path: `resolveTheme` publishes the fallback through `adoptHostTheme`, and the
+  // host's publish path mirrors it into `theme/active-symbols`. A mirror left pointing at the
+  // fallback breaks the host's own UI — `formatKeyHint` and `src/tools/lsp.ts` read the same
+  // lookup — so the publish has to restore it.
+  const original = theme;
+  const shim = uncolouredTheme() as unknown as Record<string, unknown>;
+  try {
+    // A degraded host: the singleton has no `fg`, so `adoptHostTheme` publishes.
+    setThemeInstance({} as unknown as Theme);
+    adoptHostTheme(shim);
+    expect(() => activeThemeSymbol("status.info")).not.toThrow();
+    // A REAL symbol, not the fallback's "?" marker — which is exactly what a mirror pointing at
+    // the fallback returns.
+    expect(activeThemeSymbol("status.info")).not.toBe("?");
+    expect(activeThemeSymbol("status.info").length).toBeGreaterThan(0);
+  } finally {
+    // `setThemeInstance` mutates the host's theme singleton AND its mirror; restore both.
+    setThemeInstance(original);
+    setActiveSymbolTheme(original);
+  }
+});
+
+test("the fallback's tables and its symbol() never disagree", () => {
+  // The regression: the tables and the keyed lookup resolved through DIFFERENT sources, so the
+  // panel painted `theme.status.error` from one and the cards painted `theme.symbol("status.error")`
+  // from the other — two glyphs for one key, in the same pane.
+  //
+  // The fallback answers from ONE snapshot of the host's active glyphs, captured when it is
+  // built, so the table member and `symbol(key)` are the same glyph by construction — and the
+  // snapshot is what the HOST was painting at that moment, so the fallback mirrors the host
+  // instead of inventing glyphs of its own.
+  const original = theme;
+  const boxTables = scanBoxTables();
+  try {
+    setActiveSymbolTheme({ symbol: (key: SymbolKey) => `«${key}»` } as unknown as Theme);
+    const shim = uncolouredTheme() as unknown as Record<string, unknown>;
+    const symbol = shim.symbol as (key: string) => string;
+    for (const key of scanReadSymbolKeys()) {
+      const member = symbolKeyOf(key, boxTables);
+      // The table and the lookup answer the same.
+      expect(fallbackSymbol(shim, key), `table ${key}`).toBe(symbol(member));
+      // And the fallback mirrors the host's own glyph for that key.
+      expect(fallbackSymbol(shim, key), `host ${key}`).toBe(`«${member}»`);
+    }
+  } finally {
+    setActiveSymbolTheme(original);
+  }
 });

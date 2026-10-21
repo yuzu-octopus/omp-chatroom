@@ -199,6 +199,32 @@ Gotchas (each one is a pinned regression):
    second writer is refused; the lock's *stale-pid reaping* and the "two real omp processes"
    scenario are not exercised by a test.
 
+10. **The PRODUCTION module topology.** In production the plugin and the host share ONE
+    `@oh-my-pi/pi-tui` module instance: omp's extension loader rewrites every `@oh-my-pi/pi-*`
+    specifier an extension imports onto the host's in-process modules
+    (`@oh-my-pi/pi-coding-agent/src/extensibility/plugins/legacy-pi-compat.ts` — the
+    `LEGACY_PI_SPECIFIER_FILTER`, and the comment at ~:811 explaining that `@oh-my-pi` is included
+    so a direct canonical import does not pull a duplicate copy out of the plugin's
+    `node_modules`). So the plugin's `theme` IS the host's `theme`, the plugin's symbol mirror IS
+    the host's mirror, and `setThemeInstance` IS the host's publish path.
+    **`bun test tests/` does NOT reproduce that.** The suite resolves the plugin's OWN copy
+    (`plugin/node_modules/@oh-my-pi/pi-tui`, pinned to 18.12.3 but a SEPARATE physical path), so
+    the tests run against a second, independent theme singleton with no host theme-change
+    listener, no host status line and no host chrome helpers. Consequences, stated so nobody
+    over-reads a green suite:
+    - A test that publishes a theme proves the publish does not throw **in the plugin's copy**. The
+      production failure mode (the host's own `onThemeChange` listener reading
+      `theme.getSymbolPreset()`) can only be simulated, which is what the theme-fallback test does.
+    - A test that the host's key hints still work proves it for the plugin's copy.
+    - The MIRROR-restore argument is about the plugin's copy's mirror; in production it is the
+      host's mirror, and the plugin's publish lands in the host's singleton — so the members the
+      host reads off a published theme (`getColorHex`, `getFgAnsi`, `hasColor`, `getColorMode`,
+      `isLight`, `bg`, `bgFill`, `fgOnBg`, the italic/underline/strikethrough/inverse trio,
+      `spinnerFrames`, the luminance getters, …) must all be answerable by whatever is published.
+    The honest summary: the symbol-set work is verified against the plugin's own copy, and the
+    production topology is a LIVE check — it needs the real host, which the suite cannot stand in
+    for.
+
 ## 7. Known-bad patterns (present, and how to read them)
 
 **Tests that assert wording** — all intentional pins of the model-facing contract (K1) or the

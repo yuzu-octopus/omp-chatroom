@@ -28,8 +28,10 @@ const TIER_TONE: Record<Tier, "error" | "warning" | "muted"> = {
   T2: "muted",
 };
 
-// The 1-cell status glyph per tier. `status.muted` does not exist in the theme's SymbolKey union, so
-// T2 borrows `info` and keeps the muted tone above.
+// The status glyph per tier. `status.muted` does not exist in the theme's SymbolKey union, so
+// T2 borrows `info` and keeps the muted tone above. The glyph's CELL WIDTH is the user's choice,
+// not ours: the unicode set paints a one-cell glyph, the ascii set paints "[!!]" (four cells), and
+// the row's budget is measured, so a wider glyph costs the body cells rather than the row.
 const TIER_GLYPH: Record<Tier, "error" | "warning" | "info"> = {
   T0: "error",
   T1: "warning",
@@ -116,9 +118,11 @@ export function renderChatRows(
 ): string[] {
   return rows.map((row, index) => {
     const unread = row.unread ? theme.fg("accent", theme.nav.cursor) : " ";
-    // D3: the theme owns a 1-cell status glyph per severity (theme-class.ts:485-503). Painting the
+    // D3: the theme owns the status glyph per severity (theme-class.ts:485-503). Painting the
     // ASCII "T0"/"T1"/"T2" made the badge 2 cells and the only row element not theme-sourced.
-    // There is no `status.muted` key, so T2 uses glyph `status.info` with the muted tone.
+    // There is no `status.muted` key, so T2 uses glyph `status.info` with the muted tone. The
+    // glyph's cell width is the USER's active set (the ascii set paints "[!!]", four cells), so the
+    // head is measured with `visibleWidth` below — a wider glyph costs the body, never the row.
     const badge = theme.fg(TIER_TONE[row.tier], theme.status[TIER_GLYPH[row.tier]]);
     const time = theme.fg("dim", clockOf(row.ts));
     const author = row.mention

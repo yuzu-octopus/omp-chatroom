@@ -25,8 +25,10 @@ import { ensureThemeSync, theme } from "@oh-my-pi/pi-tui";
 import roomExtension from "../src/index";
 
 test("the installed host carries the deep specifiers the plugin imports, with exports", async () => {
-  // These nine are wildcard-only subpath imports (not public API); the plugin's runtime dependency
-  // on them is the reason a pin exists at all. Each must resolve AND provide its named member.
+  // These are wildcard-only subpath imports (not public API); the plugin's runtime dependency on
+  // them is the reason a pin exists at all. Each must resolve AND provide its named member. The
+  // list here is the gate: a host bump that moves one of these subpaths fails HERE, naming the
+  // specifier, rather than at first use inside a panel.
   const specs: ReadonlyArray<readonly [spec: string, member: string | null]> = [
     ["@oh-my-pi/pi-coding-agent/internal-urls/local-protocol", "resolveLocalRoot"],
     ["@oh-my-pi/pi-coding-agent/registry/agent-registry", "AgentRegistry"],
@@ -39,6 +41,7 @@ test("the installed host carries the deep specifiers the plugin imports, with ex
     ["@oh-my-pi/pi-tui/chrome/overlay-box", "topBorder"],
     ["@oh-my-pi/pi-tui/render/render-utils", "createCachedComponent"],
     ["@oh-my-pi/pi-tui/render/status-line", "renderStatusLine"],
+    ["@oh-my-pi/pi-tui/theme/active-symbols", "activeThemeSymbol"],
     ["@oh-my-pi/pi-utils", "formatAge"],
     ["@oh-my-pi/pi-utils", "sanitizeText"],
   ];

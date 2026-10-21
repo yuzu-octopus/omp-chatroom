@@ -5,6 +5,7 @@ import {
   type TableCell,
   type TableColumn,
   type Theme,
+  visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { ClaimRow } from "../store/schema";
@@ -13,7 +14,58 @@ import { fitWidth } from "./chrome";
 export type BoardRow = ClaimRow & { state: "held" | "expired" | "released" }; // [invented] — §6.4 dimming
 
 /**
- * §6.4 — `cursor · resource · holder · TTL · state`.
+ * The resource cell's natural width, measured for a ONE-cell arrow: "build/parser ⟵ build/schema"
+ * is 27 cells, 30 with the "+N" count of the dependencies that did not fit.
+ *
+ * The arrow is the theme's own `nav.back`, so the cell's real width follows the user's symbol set
+ * (the ascii set paints "<-", two cells) — see `boardColumns`.
+ */
+const RESOURCE_WIDTH = 30;
+
+/**
+ * The holder cell's natural width: "AgentA +2 waiting" is 17 cells.
+ */
+const HOLDER_WIDTH = 17;
+
+/**
+ * The holder cell's FLOOR: ten cells — the shortest holder plus its waiter count AND the host's
+ * ellipsis ("AgentA +2…"). The count is the part a reader acts on, and it sits at the END of the
+ * cell, so the floor is what keeps it from being cut away with the word "waiting".
+ */
+const HOLDER_FLOOR = 10;
+
+/**
+ * The countdown cell's FLOOR: FOUR cells — "300s" is four, and 300 s is the DEFAULT lease
+ * (`store/config.ts`: `claimTtlMs: 300_000`).
+ *
+ * The floor is not a nicety: the board pane is 40–55 cells wide in practice (the panel gives the
+ * board 48 % of an 88–120 column terminal), while the table's natural width is ~65 — so the table
+ * is ALWAYS narrower than the pane, the host's `fitWidths` ALWAYS shrinks the countdown, and the
+ * countdown therefore ALWAYS sits at its floor. A floor of three renders the default lease as
+ * "30…" — the host's own ellipsis — which reads about ten times too small: the user sees a 300 s
+ * lease as 30 s and a claim about to expire as one with plenty of time left.
+ *
+ * The urgency is ALSO in the tone (warning under 25 % remaining, error once expired), so the tone
+ * is not the number: the tone says "hurry", the number says how long is left, and a lease that
+ * reads "30…" says the wrong thing about both.
+ *
+ * Where the ascii set's extra cells come from: the cursor column is two cells wide under ascii
+ * ("->" against "➤") and the resource arrow is two cells wide too ("<-" against "⟵"). The arrow's
+ * extra cell is already paid for — the resource column's natural width scales with it
+ * (`RESOURCE_WIDTH + max(0, visibleWidth(theme.nav.back) - 1)`) — and the cursor's extra cell is
+ * paid for by the RESOURCE column, which is the last content column to shrink (priority 3) and is
+ * already being cut at these widths: at 55 cells the ascii board gives the dependency 27 of the 28
+ * it needs ("build/parser <- build/schema"), the unicode board 28 of 27. So the ascii board is
+ * ONE cell tighter in the resource cell than the unicode one, and the countdown keeps the digit
+ * that says how long the lease has left. The holder's floor (10) is not available: it is what
+ * keeps the waiter COUNT ("AgentA +2…") on screen. The state's floor (8) is not available either:
+ * "released" is eight cells.
+ */
+const COUNTDOWN_FLOOR = 4;
+
+/**
+ * §6.4 — `cursor · resource · holder · TTL · state`, for a THEME: the widths follow the GLYPHS the
+ * theme paints.
  *
  * The host's table model (`pi-tui/src/components/table.ts`, `fitWidths`) treats a declared `width`
  * as the column's DESIRED width and shrinks columns in `priority` order — lowest priority number
@@ -25,27 +77,48 @@ export type BoardRow = ClaimRow & { state: "held" | "expired" | "released" }; //
  * The widths below are the CONTENT's natural widths, the way the host's own process table computes
  * them (`pi-tui/src/apps/ps-top.ts`, `#renderTable`: a column is as wide as its widest cell). The
  * priorities then say what is sacrificed first when the pane is narrower than the content.
+ *
+ * The selection cursor gets its OWN column. The host's `alignCell` styles a whole cell (and pads
+ * it), so a marker inside the resource cell would share the resource's tone — a dimmed marker on
+ * a released row — and would silently eat one cell of the resource's declared width.
+ *
+ * Its WIDTH cannot be a constant: the cursor glyph is the theme's own `nav.selected`, and the
+ * user's symbol set decides how wide that is (unicode "▸" is one cell, ascii "->" is two). A
+ * fixed one-cell column made the host truncate the ascii marker to its own ellipsis ("…"), so the
+ * cursor became indistinguishable from a chopped cell. The column is therefore as wide as the
+ * glyph, measured in cells with the host's own `visibleWidth`.
+ *
+ * The RESOURCE column follows the theme's arrow for the same reason: the dependency is written
+ * with the theme's `nav.back`, and in the ascii set that arrow is a cell wider, so a fixed width
+ * cut the "+N" count of the extra dependencies off the end.
  */
-export const BOARD_COLUMNS: readonly TableColumn[] = [
-  // The selection cursor gets its OWN one-cell column. The host's `alignCell` styles a whole cell
-  // (and pads it), so a marker inside the resource cell would share the resource's tone — a dimmed
-  // marker on a released row — and would silently eat one cell of the resource's declared width.
-  { width: 1, minWidth: 1, align: "left", overflow: "truncate", priority: 4 },
-  // The resource cell carries the resource AND what it waits on (R9): "build/parser ⟵ build/schema"
-  // is 27 cells, 30 with the "+N" count of the dependencies that did not fit. It shrinks LAST
-  // (priority 3): the dependency is the first thing a reader looks for, and it is the newest
-  // thing on the board.
-  { width: 30, minWidth: 12, align: "left", overflow: "truncate", priority: 3 },
-  // The holder cell carries the holder AND the waiters: "AgentA +2 waiting" is 17 cells. Its floor
-  // is 10, so the COUNT survives ("AgentA +2…") even when the word does not — the waiters are the
-  // other half of the board's new state.
-  { width: 17, minWidth: 10, align: "left", overflow: "truncate", priority: 1 },
-  // The countdown goes first (priority 0): it is also encoded in the tone (warning under 25%
-  // remaining, error once expired), so a narrow pane loses the number, never the urgency.
-  { width: 5, minWidth: 4, align: "right", overflow: "truncate", priority: 0 },
-  // The state word is never chopped: "expired" is 7 cells, "released" is 8.
-  { width: 8, minWidth: 8, align: "left", overflow: "truncate", priority: 2 },
-];
+export function boardColumns(theme: Theme): readonly TableColumn[] {
+  const cursorWidth = Math.max(1, visibleWidth(theme.nav.selected));
+  // The arrow's extra cells are the resource cell's extra cells: the content grew by exactly that
+  // much, and a narrower resource column would push the "+N" count off the end.
+  const resourceWidth = RESOURCE_WIDTH + Math.max(0, visibleWidth(theme.nav.back) - 1);
+  return [
+    { width: cursorWidth, minWidth: cursorWidth, align: "left", overflow: "truncate", priority: 4 },
+    // The resource cell carries the resource AND what it waits on (R9). It shrinks LAST of the
+    // content columns (priority 3): the dependency is the first thing a reader looks for, and it
+    // is the newest thing on the board.
+    { width: resourceWidth, minWidth: 12, align: "left", overflow: "truncate", priority: 3 },
+    // The holder cell carries the holder AND the waiters. Its floor keeps the COUNT.
+    {
+      width: HOLDER_WIDTH,
+      minWidth: HOLDER_FLOOR,
+      align: "left",
+      overflow: "truncate",
+      priority: 1,
+    },
+    // The countdown goes first (priority 0) — but it stops at four cells, which is where "300s"
+    // still fits. Below that the TONE carries the urgency (warning under 25% remaining, error
+    // once expired), and the number would be a lie rather than a loss.
+    { width: 5, minWidth: COUNTDOWN_FLOOR, align: "right", overflow: "truncate", priority: 0 },
+    // The state word is never chopped: "expired" is 7 cells, "released" is 8.
+    { width: 8, minWidth: 8, align: "left", overflow: "truncate", priority: 2 },
+  ];
+}
 
 /** §6.4 — "expired/released rows move to the bottom dimmed rather than vanishing mid-frame". */
 const STATE_RANK: Record<BoardRow["state"], number> = { held: 0, expired: 1, released: 2 };
@@ -59,13 +132,16 @@ const STATE_TONE: Record<BoardRow["state"], "success" | "warning" | "muted"> = {
 function ttlCell(
   row: BoardRow,
   now: number,
+  theme: Theme,
 ): { text: string; tone: "muted" | "warning" | "error" } {
+  // The "no countdown" placeholder is the theme's own dash (`format.dash`), not a hardcoded em
+  // dash: on an ASCII terminal the em dash is a glyph the user's symbol set does not carry.
   // An ended claim has no countdown. The STATE column already says "expired"/"released", and
   // repeating the word here spent seven cells of the narrowest column on a second copy — which
   // the row then truncated to "expi…".
-  if (row.state !== "held") return { text: "—", tone: "muted" };
+  if (row.state !== "held") return { text: theme.format.dash, tone: "muted" };
   const leftMs = row.expiresAt - now;
-  if (leftMs <= 0) return { text: "—", tone: "error" };
+  if (leftMs <= 0) return { text: theme.format.dash, tone: "error" };
   const remaining = leftMs / Math.max(1, row.ttlMs);
   return {
     text: `${Math.max(1, Math.round(leftMs / 1000))}s`,
@@ -117,10 +193,13 @@ export function projectClaims(
 ): string[] {
   if (rows.length === 0) return [fitWidth(theme.fg("dim", "no claims"), width)];
   const ordered = sortBoardRows(rows);
+  // The columns are computed ONCE per projection: the cursor column's width depends on the
+  // theme's glyph, and rebuilding the array per row would cost an allocation per claim per frame.
+  const columns = boardColumns(theme);
   const out: string[] = [];
   for (const [index, row] of ordered.entries()) {
     const dim = row.state !== "held";
-    const ttl = ttlCell(row, now);
+    const ttl = ttlCell(row, now, theme);
     const marked = index === selected;
     const cells: TableCell[] = [
       {
@@ -143,7 +222,7 @@ export function projectClaims(
       { text: ttl.text, style: (text) => theme.fg(ttl.tone, text) },
       { text: row.state, style: (text) => theme.fg(STATE_TONE[row.state], text) },
     ];
-    out.push(fitWidth(renderTableRow(cells, BOARD_COLUMNS, width), width));
+    out.push(fitWidth(renderTableRow(cells, columns, width), width));
   }
   return out;
 }

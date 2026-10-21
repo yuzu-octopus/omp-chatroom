@@ -3,6 +3,7 @@ import {
   type Component,
   compact,
   Ellipsis,
+  type SymbolKey,
   span,
   type Theme,
   text,
@@ -25,7 +26,18 @@ import type { WaitForMessageDetails } from "../tools/wait-for-message";
  * through `plainText`/`safe` before it is styled or described.
  */
 
-const GLYPH = { room: "▦", wait: "◷" } as const;
+/**
+ * The card icons, as SYMBOL KEYS — not as glyphs.
+ *
+ * The host ships three symbol sets (`pi-tui/src/theme/symbols.ts`: `unicode`, `nerd`, `ascii`) and
+ * the active theme publishes the one the user chose; `theme.symbol(key)` resolves it. A hardcoded
+ * glyph here ignored that choice: the card drew a nerd-font shape on an ASCII terminal, or a box
+ * character where the user's set says `[i]`.
+ */
+const SYMBOL_KEY = { room: "status.info", wait: "status.pending" } as const satisfies Record<
+  string,
+  SymbolKey
+>;
 
 /** One-line, ANSI-free summary of the arguments — shared by both backends. */
 function roomCallSummary(args: RoomParams): string {
@@ -136,7 +148,11 @@ export function renderRoomCall(
 ): Component {
   return card([
     renderStatusLine(
-      { iconOverride: GLYPH.room, title: "Room", description: roomCallSummary(args) },
+      {
+        iconOverride: theme.symbol(SYMBOL_KEY.room),
+        title: "Room",
+        description: roomCallSummary(args),
+      },
       theme,
     ),
   ]);
@@ -151,7 +167,7 @@ export function renderRoomResult(
   const { meta, error } = roomResultSummary(result);
   const head = renderStatusLine(
     {
-      iconOverride: GLYPH.room,
+      iconOverride: theme.symbol(SYMBOL_KEY.room),
       title: "Room",
       description: args ? roomCallSummary(args) : undefined,
       ...(error ? { badge: { label: error, color: "error" as const } } : { meta }),
@@ -196,7 +212,11 @@ export function renderWaitCall(
 ): Component {
   return card([
     renderStatusLine(
-      { iconOverride: GLYPH.wait, title: "Wait", description: waitCallSummary(args) },
+      {
+        iconOverride: theme.symbol(SYMBOL_KEY.wait),
+        title: "Wait",
+        description: waitCallSummary(args),
+      },
       theme,
     ),
   ]);
@@ -211,7 +231,7 @@ export function renderWaitResult(
   const { meta, error } = waitResultSummary(result.details);
   const head = renderStatusLine(
     {
-      iconOverride: GLYPH.wait,
+      iconOverride: theme.symbol(SYMBOL_KEY.wait),
       title: "Wait",
       description: args ? waitCallSummary(args) : undefined,
       ...(error ? { badge: { label: error, color: "error" as const } } : { meta }),

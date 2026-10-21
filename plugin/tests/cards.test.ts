@@ -1,6 +1,10 @@
 import { expect, test } from "bun:test";
-import type { ExtensionAPI, MessageRenderer } from "@oh-my-pi/pi-coding-agent";
-import { type Component, ensureThemeSync, theme, visibleWidth } from "@oh-my-pi/pi-tui";
+import type {
+  ExtensionAPI,
+  MessageRenderer,
+  ToolRenderResultOptions,
+} from "@oh-my-pi/pi-coding-agent";
+import { type Component, ensureThemeSync, type Theme, theme, visibleWidth } from "@oh-my-pi/pi-tui";
 import type { CustomMessage } from "@oh-my-pi/pi-tui/chat/messages";
 import {
   BODY_LINE_CHARS,
@@ -18,13 +22,26 @@ import {
   renderMentionCard,
   renderMessageCard,
 } from "../src/cards/message-cards";
+import { renderRoomCall, renderWaitCall } from "../src/cards/tool-cards";
 import type { RoomRecord } from "../src/store/schema";
 
 ensureThemeSync();
 
 // --- fixtures -------------------------------------------------------------
 
-const QUOTE = "▏"; // theme.md.quoteBorder — the quote-bordered body marker
+/**
+ * The quote-bordered body marker: the THEME's own `md.quoteBorder`.
+ *
+ * It used to be the literal "▏" — the unicode preset's value. But the symbol set is the user's
+ * choice, and the host loads a different set depending on what ran before in the same process
+ * (`ensureThemeSync` is a no-op once a theme is loaded). A hardcoded glyph then made this file
+ * fail depending on the test ORDER: the host-contract file loads the real host theme, whose
+ * `md.quoteBorder` is "│", and every assertion that counted the body rows saw zero.
+ *
+ * Reading it from the theme is both the order-independent fix and the rule this change is about:
+ * the plugin paints no decorative glyph of its own.
+ */
+const QUOTE = theme.md.quoteBorder;
 
 const MSG: RoomRecord = {
   v: 1,
@@ -430,4 +447,108 @@ test("bodyLines: the width cap counts CELLS, like the host's IRC card", () => {
     collapsedLines: 3,
   })[0]!;
   expect(visibleWidth(ascii)).toBe(BODY_LINE_CHARS + 4);
+});
+
+// --- the theme's symbol set, not hardcoded glyphs -------------------------
+
+/**
+ * A theme whose SYMBOL lookups return a distinctive marker per key, so a card that paints a
+ * hardcoded glyph instead of the theme's fails the assertion.
+ *
+ * Every other member is forwarded to the real theme. The receiver has to stay the real instance:
+ * the host Theme's getters read private fields, so a getter invoked with a proxy as `this` throws.
+ */
+function markedSymbolTheme(mark: (key: string) => string): Theme {
+  return new Proxy(theme, {
+    get(target, prop) {
+      if (prop === "symbol") return (key: string) => mark(key);
+      if (prop === "styledSymbol") return (key: string, _tone: string) => mark(key);
+      const value = Reflect.get(target, prop, target) as unknown;
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }) as unknown as Theme;
+}
+
+/** The same, for the theme's NAV table (the "me" marker and the resource pointer). */
+function markedNavTheme(mark: (key: string) => string): Theme {
+  return new Proxy(theme, {
+    get(target, prop) {
+      if (prop === "nav") {
+        const nav = Reflect.get(target, "nav", target) as Record<string, string>;
+        return new Proxy(nav, {
+          get(navTarget, navProp) {
+            const value = Reflect.get(navTarget, navProp, navTarget) as unknown;
+            return typeof navProp === "string" ? mark(`nav.${navProp}`) : value;
+          },
+        });
+      }
+      const value = Reflect.get(target, prop, target) as unknown;
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }) as unknown as Theme;
+}
+
+test("the cards' icons come from the theme's symbol set, not from hardcoded glyphs", () => {
+  const marked = markedSymbolTheme((key) => `<${key}>`);
+
+  // The message card's envelope is the theme's own `tool.irc` symbol.
+  const message = render(
+    renderMessageCard(msgMessage("hi"), { expanded: false }, marked),
+    120,
+  ).join("\n");
+  expect(message).toContain("<tool.irc>");
+  expect(message).not.toContain("✉");
+
+  // The claim card's flag is `status.pending` (the host has no "claim" symbol).
+  const claim = render(
+    renderClaimCard(cardMessage("room:claim", CLAIM), { expanded: false }, marked),
+    120,
+  ).join("\n");
+  expect(claim).toContain("<status.pending>");
+  // The glyph the change removed is the hardcoded CLAIM FLAG ("⚑"), not the unicode
+  // `status.pending` ("⏳"): the flag is now the theme's own pending glyph.
+  expect(claim).not.toContain("⚑");
+
+  // The release marker is the theme's error glyph.
+  const release = render(
+    renderClaimCard(cardMessage("room:claim", RELEASE), { expanded: false }, marked),
+    120,
+  ).join("\n");
+  expect(release).toContain("<status.error>");
+  expect(release).not.toContain("✕");
+
+  // The board-delta grid is `status.info`.
+  const board = render(
+    renderBoardDeltaCard(cardMessage("room:board-delta", MEMBER), { expanded: false }, marked),
+    120,
+  ).join("\n");
+  expect(board).toContain("<status.info>");
+});
+
+test("the mention card's addressing marker and the claim card's pointer come from the theme's nav table", () => {
+  const marked = markedNavTheme((key) => `<${key}>`);
+
+  const mention = render(
+    renderMentionCard(cardMessage("room:mention", MENTION, "hi"), { expanded: false }, marked),
+    120,
+  ).join("\n");
+  expect(mention).toContain("<nav.selected> me");
+
+  const claim = render(
+    renderClaimCard(cardMessage("room:claim", CLAIM), { expanded: false }, marked),
+    120,
+  ).join("\n");
+  // The pointer in front of the resource is the theme's own pointer glyph.
+  expect(claim).toContain("<nav.selected> build/step");
+});
+
+test("the tool cards' icons come from the theme's symbol set", () => {
+  const marked = markedSymbolTheme((key) => `<${key}>`);
+  const options = {} as ToolRenderResultOptions;
+
+  const room = render(renderRoomCall({ op: "join" }, options, marked), 120).join("\n");
+  expect(room).toContain("<status.info>");
+
+  const wait = render(renderWaitCall({ timeout: 1000 }, options, marked), 120).join("\n");
+  expect(wait).toContain("<status.pending>");
 });

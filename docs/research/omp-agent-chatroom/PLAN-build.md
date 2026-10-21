@@ -68,9 +68,13 @@ against 18.7.0 with a consistent +5..+10 drift, so the evidence holds and only t
 >
 > - **§6.4's column model is the host's.** The declared widths are the CONTENT's natural widths,
 >   and the host's `fitWidths` treats them as desired widths that shrink in `priority` order and
->   never grow. The cursor has its own one-cell column; the countdown shrinks first (its urgency is
->   also in the tone); the state word is never chopped. The window is the host's `getMenuWindow`, so
->   the selection cannot scroll out of view.
+>   never grow. The cursor has its own column, as wide as the theme's cursor glyph (the ascii
+>   set's "->" is two cells, so a one-cell column truncated it to the host's ellipsis); the
+>   countdown shrinks first but stops at FOUR cells, because the board pane is 40–55 cells wide
+>   while the table's natural width is ~65 — the countdown therefore ALWAYS sits at its floor, and
+>   a floor of three rendered the default 300 s lease as "30…", ten times too small. The state word
+>   is never chopped. The window is the host's `getMenuWindow`, so the selection cannot scroll out
+>   of view.
 > - **The chat row (§6.3) budgets its width** — the head is measured and the body takes what is
 >   left, the way the host's `fitLayoutLine`/`select-list` do — instead of reserving a guessed 32
 >   cells. The row's clock is local time, like the host's transcript.
@@ -85,6 +89,123 @@ against 18.7.0 with a consistent +5..+10 drift, so the evidence holds and only t
 >
 > The split ratio (§6.2) is **0.52**, not 0.62: the board's row wants ~55 cells and the panel was
 > giving it 31–43, so every column was shrunk on every frame.
+
+> **Addendum 2026-10-21 — the plugin's glyphs follow the host's active symbol set.** The host
+> ships three symbol sets (`pi-tui/src/theme/symbols.ts`: `unicode`, `nerd`, `ascii`) and publishes
+> the one the user chose. The plugin painted its own hardcoded glyphs, so a card drew a nerd-font
+> shape on an ASCII terminal, or a box character where the user's set says `[i]`. Every decorative
+> glyph the plugin paints now resolves from the theme:
+>
+> - The tool cards' icons are symbol KEYS (`status.info` for `room`, `status.pending` for the wait
+>   tools), resolved with `theme.symbol(key)` — not as glyphs.
+> - The message card's envelope is the host's `tool.irc` symbol; the claim card's flag is
+>   `status.pending` (the host has no "claim" symbol, and a lease in flight is what it means);
+>   the release marker is `status.error`; the board-delta grid is `status.info`.
+> - The mention card's "me" marker and the claim card's resource pointer are the theme's
+>   `nav.selected`; the cards' separators are `sep.dot`; the release dash and the board's "no
+>   countdown" placeholder are `format.dash`.
+> - The panel's roster strip, chat rows and board rows already read the theme. The frame's box
+>   characters are structural, and the host draws them from its own `boxRound` — which the
+>   fallback theme now also sources from the host's symbol set.
+>
+> The FALLBACK theme carries no copy of the host's symbol tables. It resolves each key through the
+> host's own lookup (`@oh-my-pi/pi-tui/theme/active-symbols`) — the tenth deep specifier — and
+> answers from ONE snapshot taken when the panel opens, so a table member and `symbol()` can never
+> disagree: a map built at import time froze the pre-theme ascii preset for the whole session, and
+> a table live per call disagreed with `symbol()` the moment the user switched symbol set. It
+> also defines `symbol()` — the cards call it — and every status symbol the roster strip reads, so
+> it cannot paint the literal `undefined` again. The preset the fallback REPORTS is the one that
+> snapshot was taken under: a live lookup made it name a set its own glyphs did not come from.
+
+> **Addendum 2026-10-21 (later the same day) — the degraded theme: the HOST's theme, not a fake.**
+> The plugin's fallback existed because the host could hand the extension a theme with no `fg`
+> (the real 18.8.7 failure). A hand-rolled imitation of the host's `Theme` is a poor substitute:
+> the host's publish path (`setThemeInstance` → `assignTheme` → `notifyThemeChange`) runs the
+> host's theme-change listener SYNCHRONOUSLY, and that listener reads `theme.getSymbolPreset()`,
+> `theme.getBashModeBorderColor()` and `theme.getPythonModeBorderColor()`. An imitation missing
+> them made the publish THROW inside the panel's factory — the panel died with "Room panel
+> unavailable" — and, because the throw skipped the cleanup, left the host's symbol mirror
+> pointing at the imitation, so the host's own key hints read the plugin's glyphs for the rest of
+> the session. Two changes fix it:
+>
+> - **The ladder.** `resolveTheme` now takes the FIRST usable theme of three: the injected one;
+>   then the HOST's own theme, obtained with `hostRealTheme()` (`host-theme.ts`) and re-read from
+>   the live binding; and only then the hand-rolled fallback. A real host `Theme` has every member
+>   the host reads, so the degraded path is now the host's own theme, not an imitation of it.
+>   `hostRealTheme()` leaves a healthy singleton alone and otherwise calls the host's own
+>   `initThemeSync(preset, colorBlindMode, name, name)` — the user's SYMBOL-PRESET OVERRIDE and
+>   colour-blind mode, and the user's theme NAME, because the host's `configureTheme` would
+>   otherwise reset all three (`currentSymbolPresetOverride = undefined`,
+>   `currentColorBlindMode = false`, `currentThemeName = "dark"`). The old `ensureThemeSync()`
+>   wiped the override, so a user who had chosen the ascii set silently got the default unicode
+>   set back — the degraded path undid the user's choice. `initThemeSync` and
+>   `getSymbolPresetOverride` are barrel exports of `@oh-my-pi/pi-tui`, so no new pinned subpath.
+> - **The last-resort branch is REACHABLE.** The host's `initThemeSync` has its
+>   `loadThemeSync("dark", …)` fallback OUTSIDE its own try/catch (`pi-tui/src/theme/theme.ts`),
+>   so a loader broken enough for both loads to fail THROWS out of it. The host-theme acquisition
+>   is wrapped in a try/catch: unguarded, that throw left `resolveTheme` — and with it the whole
+>   panel — dead, and the fallback was never reached. The fallback's own path is exception-safe
+>   too: a snapshot that cannot be read degrades the GLYPHS (the "?" marker), never the members.
+> - **The fallback is PUBLISHED, and that is a contract.** The panel's frame rows are drawn by the
+>   host's own chrome helpers (`pi-tui/src/chrome/overlay-box.ts`: `topBorderSplit`, `divider`,
+>   `bottomBorder`), which read the HOST's `theme` singleton — so the fallback has to reach it.
+>   And in production the plugin and the host share ONE `pi-tui` instance (omp's extension loader
+>   rewrites every `@oh-my-pi/pi-*` specifier an extension imports onto the host's in-process
+>   modules, `pi-coding-agent/src/extensibility/plugins/legacy-pi-compat.ts`), so a published
+>   fallback IS the host's theme: the host then reads `getColorHex`, `getBgHex`, `getFgAnsi`,
+>   `getBgAnsi`, `hasColor`, `getColorMode`, `isLight`, `bg`, `bgFill`, `fgOnBg`, `italic`,
+>   `underline`, `strikethrough`, `inverse`, `getAccentColorHex`, `getAllThemeColorHexes`,
+>   `getMajorThemeColorHexes`, `getThinkingBorderColor`, `spinnerFrames`, `statusLineLuminance`,
+>   `accentSurfaceLuminance` and `fgResolved` off it, and a member that does not exist is a
+>   host-wide crash on the next frame. The fallback therefore answers EVERY public member of the
+>   host's `Theme` class, colourlessly: the text unchanged where a colour would be applied, the
+>   host's own value for an unset token where a hex is unavoidable (`#e5e5e7`, `#000000`), and the
+>   host's own ascii spinner frames where frames are needed (an empty array is not safe: the host
+>   indexes `frames[i % frames.length]`, and `% 0` is `NaN`). The host's own tables — `icon`,
+>   `cmd`, `thinking`, `checkbox`, `radio`, `progress`, `boxDotted` — are carried too, for the
+>   same reason. `tests/theme-fallback.test.ts` derives the member list from the host's class
+>   itself, so a member the host adds later fails the TEST, not the host.
+> - **The fallback's glyphs and the preset it reports are ONE snapshot.** The fallback answers
+>   `symbol()` and every table from ONE map, taken when the fallback is built, and it reports the
+>   preset THAT snapshot was taken under — not the host's current one, which would name a set the
+>   fallback's own glyphs did not come from. It asks the host's mirror for nothing, so the mirror
+>   can point at it without a cycle, and `adoptHostTheme` restores the mirror in a `finally`, and
+>   only when a FALLBACK was published: a real publish leaves the mirror on the real theme. The
+>   last-ditch box constant stays live for the same reason a hardcoded glyph there was wrong: it
+>   painted a rounded `│` while the host's frame painted the user's ascii `|`.
+
+> **Addendum 2026-10-21 (the audit round) — four defects in the symbol-set change, and the
+> mechanism as it stands now.** A hostile audit of the symbol-set change found four defects. They
+> are fixed, and this is what the code does NOW:
+>
+> 1. **The countdown floor is FOUR, not three.** The board pane is 40–55 cells wide and the
+>    table's natural width is ~65, so the countdown ALWAYS sits at its floor; a floor of three
+>    rendered the default 300 s lease ("300s") as the host's own ellipsis — "30…" — so the default
+>    lease read about ten times too small. The floor is a CONSTANT, so the unicode and nerd sets
+>    paid for the ascii set's extra cells exactly as the ascii set did. The ascii set's extra
+>    demand (the cursor is two cells, the arrow is two) is now paid for where it is honest: the
+>    arrow's extra cell is already inside the resource column's natural width, and the cursor's
+>    extra cell comes out of the RESOURCE column, the last content column to shrink — which is
+>    already being cut at these widths (at 55 cells the ascii board gives the dependency 27 of the
+>    28 it needs, the unicode board 28 of 27). The holder's floor (10) keeps the waiter COUNT and
+>    the state's floor (8) keeps the word "released", so neither is spent on the countdown.
+>    `tests/board-columns.test.ts` pins it: a 300 s lease reads "300s" at widths 40/45/50/55,
+>    under the ascii set and the unicode one.
+> 2. **The fallback is a COMPLETE theme, because it is published into the host's live singleton.**
+>    The frame helpers read that singleton, so the fallback has to be there; and the plugin and the
+>    host share ONE `pi-tui` instance, so "there" is the host's own theme. The fallback now answers
+>    every public member of the host's `Theme` class, colourlessly, and the test derives the
+>    member list from that class — so a member the host adds later fails the test rather than the
+>    host's next frame.
+> 3. **The degraded path keeps the user's symbol preset.** `ensureThemeSync()` reset the
+>    symbol-preset override (the host's `configureTheme` sets `currentSymbolPresetOverride =
+>    undefined`), so a user who had chosen the ascii set was silently switched back to unicode.
+>    The degraded path now calls the host's own `initThemeSync` WITH the override, the
+>    colour-blind mode and the theme name.
+> 4. **The last-resort branch is reachable.** The host's `initThemeSync` has its
+>    `loadThemeSync("dark", …)` fallback outside its own try/catch, so a broken loader threw out
+>    of it and took the panel with it. The host-theme acquisition is wrapped in a try/catch, and
+>    the fallback's own path is exception-safe too.
 
 > **Addendum 2026-10-21 — the effectiveness round: five capabilities and four record kinds.**
 > The build above is a historical record. This round (driven by the research in

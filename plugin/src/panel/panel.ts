@@ -20,7 +20,14 @@ import { appendedSince, notifyRecipients } from "../tools/room";
 import { type BoardRow, createBoardPane, sortBoardRows } from "./board-pane";
 import { type ChatRow, createChatPane, projectChatRows } from "./chat-pane";
 import { fitBlock, frameRows } from "./chrome";
-import { adoptHostTheme, BOX_ROUND, uncolouredTheme } from "./host-theme";
+import {
+  adoptHostTheme,
+  BOX_ROUND,
+  type HostThemeInit,
+  hostRealTheme,
+  isUsableTheme,
+  uncolouredTheme,
+} from "./host-theme";
 import { actionFor } from "./keys";
 import { renderRosterStrip } from "./roster-strip";
 
@@ -415,6 +422,11 @@ export class RoomPanel implements Component {
   #titleFor(narrow: boolean, width: number, chatWidth: number): string {
     // The focused pane is marked: `1`/`2` used to change nothing on screen, so the key looked
     // broken. In the narrow layout only one pane is visible, so the mark names the visible one.
+    //
+    // The "|" between the two pane names is TEXT, not a glyph: it is a literal ASCII pipe inside a
+    // bracketed label, and the theme's own pipe separator (`sep.pipe`) carries flanking spaces
+    // (" │ "), which would change the label's shape and the title's cell budget. Everything else
+    // in the title — the dots, the roster's status glyphs, the "…" — comes from the theme.
     const pane = narrow
       ? this.#narrowOpen
         ? "[board]"
@@ -427,6 +439,7 @@ export class RoomPanel implements Component {
     // pane's columns), the narrow layout in the whole rule.
     const budget = narrow ? Math.max(0, width - 6) : Math.max(0, chatWidth - 3);
     const id = sanitizeText(this.#options.roomId);
+    // The short id's "…" is TEXT, the same character the host's own truncation paints.
     const shortId = id.length > 9 ? `${id.slice(0, 8)}…` : id;
     for (const candidate of [id, shortId]) {
       const head = `Room #${candidate}${theme.sep.dot}${pane}`;
@@ -448,39 +461,68 @@ export class RoomPanel implements Component {
 const ACTIVE_PANEL = new WeakMap<ExtensionAPI, () => void>();
 
 /**
+ * The theme the panel paints with, resolved ONCE (17 call sites read it).
+ *
  * The host injects its `Theme` as the factory's 2nd arg, but on 18.8.7 that object arrives WITHOUT
  * `fg` (and possibly the rest), so every `theme.fg(...)` throws "undefined is not an object
- * (evaluating 'theme.fg')" and the panel dies before it renders. `ensureThemeSync()` populates the
- * pi-tui module singleton, which is the same object the host passes — so either the host now hands a
- * partially-built theme, or it hands one whose `fg` is a lazy getter that has not resolved.
+ * (evaluating 'theme.fg')" and the panel dies before it renders.
  *
- * 17 call sites, resolve the theme ONCE here: prefer the injected one, fall back to
- * the pi-tui singleton after ensuring it, and last-ditch to a minimal shim so the panel renders
- * uncoloured rather than not at all.
+ * THREE steps, in this order:
+ *
+ * 1. The INJECTED theme, when it is usable. It is the host's own theme, so the panel keeps the
+ *    user's colours and glyphs. It is published to the host's module singleton only when that
+ *    singleton holds nothing usable — the panel's frame rows come from
+ *    `pi-tui/chrome/overlay-box`, whose `topBorderSplit`/`divider`/`bottomBorder` read the host
+ *    `theme` singleton rather than the theme the factory handed us, and under the plugin that
+ *    singleton is uninitialised, so every one of them throws "undefined is not an object
+ *    (evaluating 'theme.boxRound')" and takes the panel with it. (The roster strip paints from the
+ *    handed theme; see host-theme.ts.)
+ *
+ * 2. The host's REAL theme, with the USER's settings. `hostRealTheme()` (host-theme.ts) is the
+ *    host's own way to fill the module singleton with a COMPLETE host `Theme`: it leaves a healthy
+ *    singleton alone, and when the singleton is empty or half-built it calls the host's own
+ *    `initThemeSync(preset, colorBlind)` — which PRESERVES the user's symbol-preset override and
+ *    the user's colour-blind mode, where the old `ensureThemeSync()` wiped both and built the
+ *    theme with the default "unicode" set. The host's theme loader is called inside a try/catch:
+ *    its own `loadThemeSync("dark", …)` fallback sits OUTSIDE its try/catch, so a broken loader
+ *    throws out of it — unguarded, that throw killed the panel and the last-resort branch below
+ *    was never reached.
+ *
+ * 3. The hand-rolled fallback (`uncolouredTheme`) — the LAST resort, for a host whose theme
+ *    machinery is broken beyond the singleton. The fallback is a shim, not a host theme, and it is
+ *    published to the singleton ONLY because the host's chrome helpers read that singleton and
+ *    would otherwise die on a half-built one. Publishing it is a contract: the fallback answers
+ *    EVERY public member of the host's `Theme` class, because in production the plugin and the
+ *    host share ONE `pi-tui` instance and the host reads its own members off the published theme
+ *    (see host-theme.ts). The publish is exception-safe, and the host's symbol mirror is restored
+ *    in a `finally`, so the host's own UI never reads a fallback.
+ *
+ * `init` is the host's own theme initialiser (`initThemeSync`), and it is a parameter only so the
+ * guard around it — the try/catch that keeps the last-resort branch reachable — can be exercised
+ * by making the host's initialiser fail. Everything else on the path is the real one.
  */
-
-/** A theme with a working `fg` — the only member any panel code actually calls. */
-type UsableTheme = Theme & { fg: (tone: string, text: string) => string };
-function resolveTheme(injected: Theme | undefined): Theme {
-  const usable = (t: Theme | undefined): t is UsableTheme =>
-    t !== undefined && t !== null && typeof t === "object" && typeof t.fg === "function";
-  if (usable(injected)) {
-    // ALWAYS publish whatever usable theme we are given to the host modules, even when the injected
-    // theme is fine. The panel's frame rows come from `pi-tui/chrome/overlay-box`, whose
-    // `topBorderSplit`/`divider`/`bottomBorder` read the host `theme` singleton rather than the
-    // theme the factory handed us — under the plugin that singleton is uninitialised, so every one
-    // of them throws `undefined is not an object (evaluating 'theme.boxRound')` and takes the panel
-    // with it. (The roster strip paints from the handed theme; see host-theme.ts.)
+export function resolveTheme(injected: Theme | undefined, init?: HostThemeInit): Theme {
+  // The kind of `fg` the injected theme carries, read BEFORE the narrowing below: a half-built
+  // theme is the whole reason this ladder exists, and the breadcrumb has to say which half.
+  const injectedFg = injected === undefined ? "n/a" : typeof injected.fg;
+  if (isUsableTheme(injected)) {
     adoptHostTheme(injected);
     return injected;
   }
-  trace(
-    `resolveTheme: injected theme unusable (fg=${typeof (injected as { fg?: unknown } | undefined)?.fg})`,
-  );
-  // One object for both readers. The panel and the host's chrome helpers are two different readers of
-  // the same theme, so the fallback is published to the singleton AND returned — a theme that only
-  // satisfies the panel is the second half of the boxRound bug, not the fix for it.
-  trace("resolveTheme: publishing an uncoloured theme to the host and the panel");
+  trace(`resolveTheme: injected theme unusable (fg=${injectedFg})`);
+  // The host's own theme, built with the user's own settings. The binding is live, so the re-read
+  // inside `hostRealTheme` sees what it just published.
+  const real = hostRealTheme(init);
+  if (real !== undefined) {
+    trace("resolveTheme: using the host's own theme from the pi-tui singleton");
+    // The singleton IS the host's theme, so there is nothing to publish: `adoptHostTheme` leaves a
+    // healthy singleton alone.
+    adoptHostTheme(real);
+    return real;
+  }
+  trace("resolveTheme: no usable host theme — falling back to the uncoloured shim");
+  // The fallback's own path is exception-safe: a snapshot that cannot be read degrades the
+  // GLYPHS, never the members, and the publish swallows a listener that throws.
   const shim = uncolouredTheme();
   adoptHostTheme(shim);
   return shim as unknown as Theme;
