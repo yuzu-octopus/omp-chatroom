@@ -61,6 +61,31 @@ against 18.7.0 with a consistent +5..+10 drift, so the evidence holds and only t
 > :958 — are body prose describing the build as it happened and were left untouched under the
 > historical-record rule.
 
+> **Addendum 2026-10-21 — the panel, brought in line with the host's own TUI conventions.** §6.4
+> and §6.5 above describe the board pane as `resource · holder · TTL/expiry · state` with a
+> hand-rolled window. A review of the panel against the host's own TUI source (`pi-tui/src`) found
+> ten deviations, and the panel now follows the host's mechanisms:
+>
+> - **§6.4's column model is the host's.** The declared widths are the CONTENT's natural widths,
+>   and the host's `fitWidths` treats them as desired widths that shrink in `priority` order and
+>   never grow. The cursor has its own one-cell column; the countdown shrinks first (its urgency is
+>   also in the tone); the state word is never chopped. The window is the host's `getMenuWindow`, so
+>   the selection cannot scroll out of view.
+> - **The chat row (§6.3) budgets its width** — the head is measured and the body takes what is
+>   left, the way the host's `fitLayoutLine`/`select-list` do — instead of reserving a guessed 32
+>   cells. The row's clock is local time, like the host's transcript.
+> - **§6.5's roster strip is budgeted and group-aware.** It lives in the frame title, and the host
+>   truncates a title to its border segment, so the strip now drops WHOLE groups and reports what
+>   it dropped (`+N more`) instead of being cut mid-group — the `aborted` count used to vanish.
+> - **The fallback theme defines every symbol the panel reads.** It was missing four status
+>   symbols the roster strip uses, so under the fallback the strip painted the literal `undefined`
+>   into the frame title.
+> - Every frame glyph comes from the theme (the split's rule was a hardcoded `│`), and the card's
+>   body lines are capped in CELLS, not characters (a CJK line was twice the promised width).
+>
+> The split ratio (§6.2) is **0.52**, not 0.62: the board's row wants ~55 cells and the panel was
+> giving it 31–43, so every column was shrunk on every frame.
+
 > **Addendum 2026-10-21 — the effectiveness round: five capabilities and four record kinds.**
 > The build above is a historical record. This round (driven by the research in
 > `docs/research/large-swarm-coordination/REPORT.md`) changed the log format and the claim

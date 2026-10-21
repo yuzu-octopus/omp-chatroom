@@ -142,6 +142,10 @@ costs one live model turn per trial. They are listed here so they are not lost.
   agent without the claim is refused, and that `is_in_loop: "yes"` interrupts the topic's followers.
 - **The cycle refusal** (R4): have two agents wait for each other's claims; the second must be
   refused with the cycle named in `details.cycle`.
+- **The panel** (the host-convention pass): open `/room` and look at the board — the dependency and
+  the waiter count must survive in a real pane, the state word must not be chopped, `j` must keep
+  the cursor visible, and the presence strip in the frame title must not lose its `aborted` count.
+  The chat row's clock must match the host transcript's time for the same message.
 - **R8's always-on trim**: re-measure the unprompted discovery rate against the 75–86 % baseline.
   The harness is in the repo — `plugin/scripts/discovery-probe.sh` (exit 0 = the model claimed
   before touching the shared file, 1 = it edited without claiming, 2 = harness error). Run it 16
