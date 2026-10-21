@@ -14,7 +14,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { registerRoomCommand } from "../src/commands/room-command";
 import { roomIdFor } from "../src/ids";
-import { type BoardRow, projectClaims } from "../src/panel/board-pane";
+import { type BoardRow, createBoardPane, projectClaims } from "../src/panel/board-pane";
 import {
   type ChatRow,
   createChatPane,
@@ -945,4 +945,221 @@ test("`r` on a claim that already ended releases nothing", () => {
     panel.dispose();
     store.reset();
   }
+});
+
+// --- the host-convention fixes (panel rendering) ---------------------------
+
+/** A chat row carrying the topic's status ledger, as R6 records it. */
+function ledgerRow(seq: number, ts: number, body: string): ChatRow {
+  return {
+    seq,
+    ts,
+    tier: "T1",
+    author: "AgentA",
+    topic: "build",
+    body,
+    mention: false,
+    unread: false,
+    threadDepth: 0,
+    status: {
+      is_request_satisfied: { reason: "the parser is green", answer: "no" },
+      is_in_loop: { reason: "the same edit, again", answer: "yes" },
+      is_progress_being_made: { reason: "the last commit changed the parser", answer: "yes" },
+      next_speaker: { reason: "the parser needs the schema", answer: "AgentB" },
+      instruction_or_question: { reason: "AgentB must publish the schema", answer: "publish it" },
+    },
+  };
+}
+
+test("the chat row budgets its width: the ledger survives, the body yields", () => {
+  // The row used to reserve a GUESSED 32 cells for the head and append the ledger AFTER the
+  // body, so a row wider than the guess pushed the ledger off the end of the line — the one part
+  // of the row a human acts on. The head is now measured and the ledger is reserved before the
+  // body gets anything.
+  const row = ledgerRow(1, Date.now(), "hello world");
+  const out = renderChatRows([row], 70, theme);
+  const line = out[0]!;
+  const plain = line.replace(ANSI, "");
+  expect(visibleWidth(line)).toBe(70);
+  // The ledger reads in full — "publish it" is the last word on the line.
+  expect(plain).toContain("looping · next AgentB · publish it");
+  // The body still shows what fits.
+  expect(plain).toContain("hello");
+  // The topic survives too.
+  expect(plain).toContain("build");
+});
+
+test("the chat ledger's parts keep their own tone (no nested fg)", () => {
+  // `theme.fg` ends every string with `\x1b[39m` (theme-class.ts:350), so wrapping the styled
+  // parts in one outer `fg` reset the outer tone for everything after the first part. Each part
+  // is styled on its own now, the way the host's `renderStatusLine` styles its fragments.
+  const row = ledgerRow(1, Date.now(), "body");
+  const line = renderChatRows([row], 120, theme)[0]!;
+  expect(line).toContain(theme.fg("error", "looping"));
+  expect(line).toContain(theme.fg("muted", "next AgentB"));
+  expect(line).toContain(theme.fg("muted", "publish it"));
+  // "looping" comes first, and the muted parts AFTER it are still muted.
+  expect(line.indexOf(theme.fg("error", "looping"))).toBeLessThan(
+    line.indexOf(theme.fg("muted", "next AgentB")),
+  );
+  // `sep.dot` already carries its flanks: no double spaces around the separator.
+  expect(line.replace(ANSI, "")).not.toContain("  ·  ");
+});
+
+test("the board pane windows around the selection, so the cursor cannot scroll away", () => {
+  // The board used to render EVERY claim and cut the slice from the top, so `j` could move the
+  // cursor below the fold and the marker vanished. The window is the host's own (`getMenuWindow`,
+  // pi-tui/src/components/menu-selection.ts): it always contains the selected item.
+  const now = Date.now();
+  const rows: BoardRow[] = Array.from({ length: 20 }, (_, index) => ({
+    resource: `build/r${index}`,
+    holder: "AgentA",
+    ttlMs: 60_000,
+    expiresAt: now + 60_000,
+    acquiredAt: now,
+    waiting: [],
+    dependsOn: [],
+    state: "held",
+  }));
+  const pane = createBoardPane(
+    () => rows,
+    5,
+    theme,
+    () => 15,
+  );
+  const out = pane(60, 5);
+  expect(out.length).toBe(5);
+  const text = out.join("\n");
+  expect(text).toContain("build/r15");
+  // The marker is on the selected row, and only there.
+  const marked = out.filter((line) => line.includes(theme.nav.selected));
+  expect(marked.length).toBe(1);
+  expect(marked[0]).toContain("build/r15");
+  for (const line of out) expect(visibleWidth(line)).toBe(60);
+});
+
+test("the board row reads in a real pane: the dependency, the waiters and the state survive", () => {
+  // The board pane is 55 cells at 120 columns. The old columns declared a 70-cell table, so every
+  // column was shrunk on every frame: the holder lost the waiter count and the state word was
+  // chopped to "expi…".
+  const now = Date.now();
+  const rows: BoardRow[] = [
+    {
+      resource: "build/parser",
+      holder: "AgentA",
+      ttlMs: 60_000,
+      expiresAt: now - 1_000,
+      acquiredAt: now - 61_000,
+      waiting: ["AgentB", "AgentC"],
+      dependsOn: ["build/schema"],
+      state: "expired",
+    },
+  ];
+  const lines = projectClaims(rows, 55, theme);
+  const text = lines.join("\n");
+  // The dependency reads in full — the arrow is the theme's own `nav.back`.
+  expect(text).toContain(`build/parser ${theme.nav.back} build/schema`);
+  // The waiters survive (the holder cell's floor is 8 cells: "AgentA +2").
+  expect(text).toContain("+2");
+  // The state word is never chopped.
+  expect(text).toContain("expired");
+  for (const line of lines) expect(visibleWidth(line)).toBe(55);
+});
+
+test("the roster strip under the FALLBACK theme paints no 'undefined' glyph", () => {
+  // The fallback theme defined only five of the host's eleven status symbols, and the roster
+  // strip reads four of the missing ones (`running`, `enabled`, `shadowed`, `aborted`). Under the
+  // fallback the presence strip painted the literal "undefined" in the frame title.
+  const shim = uncolouredTheme() as unknown as Theme;
+  const refs = [
+    { id: "A", status: "running" },
+    { id: "B", status: "running" },
+    { id: "C", status: "idle" },
+    { id: "D", status: "parked" },
+    { id: "E", status: "aborted" },
+  ] as unknown as AgentRef[];
+  const plain = renderRosterStrip(refs, shim);
+  expect(plain).not.toContain("undefined");
+  expect(plain).toContain("2 running");
+  expect(plain).toContain("1 idle");
+  expect(plain).toContain("1 parked");
+  expect(plain).toContain("1 aborted");
+});
+
+test("the roster strip drops whole groups when the title is narrow, and says what it dropped", () => {
+  // The strip lives in the frame title, and the host truncates a border title to its segment
+  // (pi-tui/src/chrome/overlay-box.ts, `topBorderSplit`). A strip cut mid-group reads as a
+  // partial count; a strip that drops whole groups and reports the rest is honest.
+  const refs = [
+    { id: "A", status: "running" },
+    { id: "B", status: "running" },
+    { id: "C", status: "idle" },
+    { id: "D", status: "parked" },
+    { id: "E", status: "aborted" },
+  ] as unknown as AgentRef[];
+  const plain = renderRosterStrip(refs, theme, 32).replace(ANSI, "");
+  expect(visibleWidth(renderRosterStrip(refs, theme, 32))).toBeLessThanOrEqual(32);
+  expect(plain).toContain("2 running");
+  expect(plain).toContain("1 idle");
+  // The dropped groups are counted, not silently lost.
+  expect(plain).toContain("+2 more");
+  expect(plain).not.toContain("parked");
+  // With room, every group is there.
+  const full = renderRosterStrip(refs, theme).replace(ANSI, "");
+  expect(full).toContain("1 parked");
+  expect(full).toContain("1 aborted");
+  expect(full).not.toContain("more");
+});
+
+test("the panel's frame glyph and title separator come from the theme", () => {
+  // The split's border was a hardcoded "│" and the title a hardcoded " · ". Both are theme
+  // symbols (`boxRound.vertical`, `sep.dot`), and the panel is the one surface that must follow
+  // the user's theme.
+  const shim = uncolouredTheme() as Record<string, unknown>;
+  const custom = {
+    ...shim,
+    sep: { dot: " | ", space: " " },
+    boxRound: { ...(shim.boxRound as Record<string, string>), vertical: "|" },
+  };
+  const store = fixtureStore();
+  const panel = makePanel(store, 30, { theme: custom as unknown as Theme });
+  try {
+    const rows = panel.render(100);
+    const text = rows.join("\n");
+    // The title's separator is the theme's `sep.dot`.
+    expect(text).toContain(" | [chat]|board");
+    // The roster strip joins its groups with the theme's `sep.dot` too.
+    const refs = [
+      { id: "A", status: "running" },
+      { id: "B", status: "idle" },
+    ] as unknown as AgentRef[];
+    expect(renderRosterStrip(refs, custom as unknown as Theme)).toContain(" | ");
+    // The split's frame is the theme's `boxRound.vertical`.
+    const chatLine = rows.find((row) => row.includes("hello-chat"));
+    expect(chatLine?.startsWith("|")).toBe(true);
+    for (const row of rows) expect(visibleWidth(row)).toBe(100);
+  } finally {
+    panel.dispose();
+    store.reset();
+  }
+});
+
+test("the chat row's clock is local time, like the host's transcript", () => {
+  // The row sliced `toISOString()`, which is UTC, while the host renders its own timestamps in
+  // local time (pi-tui/src/chat/user-message.ts uses `toLocaleTimeString`;
+  // pi-tui/src/chrome/local-date.ts uses `getHours()`).
+  const ts = new Date(2026, 0, 2, 3, 4, 5).getTime();
+  const row: ChatRow = {
+    seq: 1,
+    ts,
+    tier: "T2",
+    author: "AgentA",
+    topic: "build",
+    body: "hello",
+    mention: false,
+    unread: false,
+    threadDepth: 0,
+  };
+  const plain = renderChatRows([row], 100, theme)[0]!.replace(ANSI, "");
+  expect(plain).toContain("03:04:05");
 });

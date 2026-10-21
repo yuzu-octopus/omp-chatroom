@@ -408,3 +408,26 @@ test("a message whose details are absent falls back to its content body (resume 
   expect(out.join("\n")).toContain("plain body");
   for (const row of out) expect(visibleWidth(row)).toBe(60);
 });
+
+// --- the host's cell-aware body cap ---------------------------------------
+
+test("bodyLines: the width cap counts CELLS, like the host's IRC card", () => {
+  // The copy sliced the first 100 CHARACTERS. A CJK line is two cells per character, so the row
+  // was twice the width the cap promised and the card's own frame cut it back — a wide-glyph body
+  // lost half its preview. The host truncates to cells with an ellipsis
+  // (pi-tui/src/tools/wait.ts:581), and so does the room now.
+  const cjk = "漢".repeat(BODY_LINE_CHARS + 40);
+  const out = bodyLines(cjk, false, theme, { indent: "  ", collapsedLines: 3 });
+  expect(out).toHaveLength(1);
+  const row = out[0]!;
+  // The quote border, the indent and the space are 4 cells on top of the 100-cell cap.
+  expect(visibleWidth(row)).toBeLessThanOrEqual(BODY_LINE_CHARS + 4);
+  // The host's ellipsis marks the cut.
+  expect(row).toContain("…");
+  // ASCII is unchanged: the cap is still 100 cells.
+  const ascii = bodyLines("x".repeat(BODY_LINE_CHARS + 40), false, theme, {
+    indent: "  ",
+    collapsedLines: 3,
+  })[0]!;
+  expect(visibleWidth(ascii)).toBe(BODY_LINE_CHARS + 4);
+});

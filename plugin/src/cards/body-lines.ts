@@ -1,4 +1,4 @@
-import { replaceTabs, type Theme } from "@oh-my-pi/pi-tui";
+import { Ellipsis, replaceTabs, type Theme, truncateToWidth } from "@oh-my-pi/pi-tui";
 import { safeRoomText } from "../onboarding/escape";
 
 export interface BodyLinesOptions {
@@ -13,8 +13,16 @@ export interface BodyLinesOptions {
  *
  * Every line is room-authored text, so it goes through `safeRoomText` (harness tags + the
  * `<room-authored>` region marker) before it is styled: a body can neither forge a harness block
- * nor close the region it is rendered inside. `replaceTabs` runs first so the width cap counts
- * display cells, not a tab's single UTF-16 unit.
+ * nor close the region it is rendered inside.
+ *
+ * The width cap is the host's: `truncateToWidth(line, BODY_LINE_CHARS, Ellipsis.Unicode)` —
+ * CELLS, not characters. The copy sliced the first 100 CHARACTERS, which is 200 cells for a CJK
+ * line and 50 for a line of emoji: the row was then twice the width the cap promised, and the
+ * card's own frame cut it back, so a wide-glyph body lost half its preview. The truncation also
+ * runs BEFORE the escaping, so the cap can no longer cut a harness escape in half.
+ *
+ * One deliberate difference from the host: the host trims the line (`line.trim()`), the room does
+ * not, because a room body is often a code block whose indentation is the content.
  */
 export function bodyLines(
   body: string,
@@ -30,7 +38,10 @@ export function bodyLines(
     .filter((line) => line.trim().length > 0) // native drops blank lines before counting
     .map(
       (line) =>
-        `${opts.indent}${quote} ${theme.fg("toolOutput", safeRoomText(replaceTabs(line)).slice(0, BODY_LINE_CHARS))}`,
+        `${opts.indent}${quote} ${theme.fg(
+          "toolOutput",
+          safeRoomText(replaceTabs(truncateToWidth(line, BODY_LINE_CHARS, Ellipsis.Unicode))),
+        )}`,
     );
   if (all.length <= cap) return all;
   return [

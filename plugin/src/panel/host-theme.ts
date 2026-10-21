@@ -42,7 +42,7 @@ export function adoptHostTheme(theme: unknown): void {
 }
 
 /** The box characters the host's `topBorderSplit`/`divider`/`bottomBorder` read from `boxRound`. */
-const BOX_ROUND = {
+export const BOX_ROUND = {
   topLeft: "╭",
   topRight: "╮",
   bottomLeft: "╰",
@@ -54,6 +54,77 @@ const BOX_ROUND = {
   teeUp: "┴",
   teeRight: "├",
   teeLeft: "┤",
+} as const;
+
+/**
+ * The theme's SYMBOL sets, verbatim from the host's own defaults
+ * (`pi-tui/src/theme/symbols.ts:393-587`).
+ *
+ * The fallback must define EVERY key the panel reads, not just the ones a test happened to touch.
+ * The roster strip reads `status.running`, `status.enabled`, `status.shadowed` and
+ * `status.aborted` — the four the old shim left out — so under the fallback the presence strip
+ * painted the literal "undefined" in the frame title: `theme.fg(tone, undefined)` is
+ * `<colour>undefined<reset>`.
+ */
+const STATUS_SYMBOLS = {
+  success: "✔",
+  error: "✘",
+  warning: "⚠",
+  info: "ⓘ",
+  pending: "⏳",
+  disabled: "⦸",
+  enabled: "●",
+  running: "⟳",
+  shadowed: "○",
+  aborted: "⏹",
+  done: "•",
+} as const;
+
+const NAV_SYMBOLS = {
+  cursor: "❯",
+  selected: "➤",
+  expand: "▸",
+  collapse: "▾",
+  back: "⟵",
+} as const;
+
+const TREE_SYMBOLS = {
+  branch: "├─",
+  last: "└─",
+  vertical: "│",
+  horizontal: "─",
+  hook: "└",
+} as const;
+
+const SEP_SYMBOLS = {
+  powerline: "▕",
+  powerlineThin: "┆",
+  powerlineLeft: "▶",
+  powerlineRight: "◀",
+  powerlineThinLeft: ">",
+  powerlineThinRight: "<",
+  powerlineCapLeft: "",
+  block: "▌",
+  space: " ",
+  asciiLeft: ">",
+  asciiRight: "<",
+  dot: " · ",
+  slash: " / ",
+  pipe: " │ ",
+} as const;
+
+const MD_SYMBOLS = {
+  quoteBorder: "▏",
+  hrChar: "─",
+  bullet: "•",
+  colorSwatch: "■",
+} as const;
+
+const FORMAT_SYMBOLS = {
+  bullet: "•",
+  dash: "—",
+  bracketLeft: "⟦",
+  bracketRight: "⟧",
 } as const;
 
 /**
@@ -84,11 +155,12 @@ export function uncolouredTheme(): Record<string, unknown> {
     // Only `tool.irc` is read by the card renderers; anything else falls back to a bullet rather
     // than throwing, so an unknown key degrades instead of killing the transcript.
     styledSymbol: (key: string, _tone: string): string => (key === "tool.irc" ? "✉" : "•"),
-    sep: { dot: " · ", space: " " },
-    nav: { cursor: "❯", selected: "➤", back: "⟵" },
-    tree: { branch: "├─", vertical: "│", last: "└─" },
-    status: { error: "✘", warning: "⚠", info: "ⓘ", success: "✔", pending: "…" },
-    md: { quoteBorder: "▏", hrChar: "─", bullet: "•", colorSwatch: "■" },
+    sep: SEP_SYMBOLS,
+    nav: NAV_SYMBOLS,
+    tree: TREE_SYMBOLS,
+    status: STATUS_SYMBOLS,
+    md: MD_SYMBOLS,
+    format: FORMAT_SYMBOLS,
     boxRound: BOX_ROUND,
     boxSharp: BOX_ROUND,
   };

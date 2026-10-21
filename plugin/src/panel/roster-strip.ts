@@ -1,5 +1,5 @@
 import type { AgentRef } from "@oh-my-pi/pi-coding-agent";
-import type { Theme, ThemeColor } from "@oh-my-pi/pi-tui";
+import { type Theme, type ThemeColor, visibleWidth } from "@oh-my-pi/pi-tui";
 
 export interface StatusCounts {
   running: number;
@@ -40,19 +40,60 @@ const STATUS_KEY = {
   aborted: "aborted",
 } as const satisfies Record<string, keyof Theme["status"]>;
 
-export function renderRosterStrip(refs: readonly AgentRef[], theme: Theme): string {
+/** The strip's group order — the host's own roster order (`agent-hub-renderer.ts`, STATUS_TONE). */
+const GROUP_ORDER = ["running", "idle", "parked", "aborted"] as const;
+type GroupStatus = (typeof GROUP_ORDER)[number];
+
+/**
+ * §6.5 — the one-line presence strip.
+ *
+ * `maxWidth` is the room the strip actually has. The strip lives in the frame TITLE, and the host
+ * truncates a title to the border segment it sits in (`pi-tui/src/chrome/overlay-box.ts`,
+ * `topBorderSplit`: `truncateToWidth(" " + title + " ", leftLen - 1)`), so a strip that is wider
+ * than the title's segment loses its TAIL — the "aborted" count, or worse, half a group.
+ *
+ * So the strip DROPS WHOLE GROUPS instead of being cut mid-word, and reports what it dropped with
+ * the host's own "+N more" convention (`pi-tui/src/overlays/usage-dashboard.ts:851`). A count that
+ * does not fit is worth less than a count that is honest about what it left out.
+ */
+export function renderRosterStrip(
+  refs: readonly AgentRef[],
+  theme: Theme,
+  maxWidth = Number.POSITIVE_INFINITY,
+): string {
   const counts = statusCounts(refs);
-  const parts: string[] = [];
-  for (const status of ["running", "idle", "parked", "aborted"] as const) {
-    const count = counts[status];
-    if (count === 0) continue;
-    // The glyph and the tone both come from `theme`. Nothing from `agent-hub-renderer` is used
-    // here: both of its helpers read the HOST's theme singleton, which is uninitialised under the
-    // plugin, so either one killed the panel with "undefined is not an object (evaluating
-    // 'theme.fg')". Rendering locally is the only version that survives.
-    const symbol = theme.status[STATUS_KEY[status]];
-    const tone = STATUS_TONE[status];
-    parts.push(`${theme.fg(tone, symbol)} ${theme.fg(tone, `${count} ${status}`)}`);
+  const groups = GROUP_ORDER.filter((status) => counts[status] > 0);
+  if (maxWidth <= 0) return "";
+  if (groups.length === 0) {
+    const empty = theme.fg("dim", "no agents");
+    return visibleWidth(empty) <= maxWidth ? empty : "";
   }
-  return parts.length === 0 ? theme.fg("dim", "no agents") : parts.join(theme.sep.dot);
+  // The glyph and the tone both come from `theme`. Nothing from `agent-hub-renderer` is used
+  // here: both of its helpers read the HOST's theme singleton, which is uninitialised under the
+  // plugin, so either one killed the panel with "undefined is not an object (evaluating
+  // 'theme.fg')". Rendering locally is the only version that survives.
+  const render = (kept: readonly GroupStatus[], tail?: string): string => {
+    const parts = kept.map((status) => {
+      const symbol = theme.status[STATUS_KEY[status]];
+      const tone = STATUS_TONE[status];
+      return `${theme.fg(tone, symbol)} ${theme.fg(tone, `${counts[status]} ${status}`)}`;
+    });
+    if (tail !== undefined) parts.push(theme.fg("dim", tail));
+    return parts.join(theme.sep.dot);
+  };
+  // Keep as many WHOLE groups as fit. Each candidate is rendered with the tail that reports what
+  // it left out, so the reader is never told a partial count. The tail loses its word before the
+  // strip loses a group: "+3 more" is the host's shape, "+3" is what fits when it does not.
+  for (let keep = groups.length; keep >= 1; keep--) {
+    const candidate = groups.slice(0, keep);
+    const lost = groups.slice(keep).reduce((sum, status) => sum + counts[status], 0);
+    const tails: (string | undefined)[] = lost > 0 ? [`+${lost} more`, `+${lost}`] : [undefined];
+    for (const tail of tails) {
+      const strip = render(candidate, tail);
+      if (visibleWidth(strip) <= maxWidth) return strip;
+    }
+  }
+  // Even one group does not fit: the presence strip is dropped rather than cut mid-group.
+  const single = render(groups.slice(0, 1), undefined);
+  return visibleWidth(single) <= maxWidth ? single : "";
 }

@@ -1,9 +1,16 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import type { AgentRef, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent";
-import { type Component, SplitPane, Stack, type Theme, type TUI } from "@oh-my-pi/pi-tui";
+import {
+  type Component,
+  SplitPane,
+  Stack,
+  type Theme,
+  type TUI,
+  visibleWidth,
+} from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { contended, reclaimIfStale, release } from "../store/claims";
 import { cursorFor } from "../store/cursors";
@@ -13,7 +20,7 @@ import { appendedSince, notifyRecipients } from "../tools/room";
 import { type BoardRow, createBoardPane, sortBoardRows } from "./board-pane";
 import { type ChatRow, createChatPane, projectChatRows } from "./chat-pane";
 import { fitBlock, frameRows } from "./chrome";
-import { adoptHostTheme, uncolouredTheme } from "./host-theme";
+import { adoptHostTheme, BOX_ROUND, uncolouredTheme } from "./host-theme";
 import { actionFor } from "./keys";
 import { renderRosterStrip } from "./roster-strip";
 
@@ -42,7 +49,18 @@ export interface RoomPanelOptions {
 }
 
 export const PANEL_SPLIT_AT = 88; // §6.2
-export const PANEL_LEFT_RATIO = 0.62; // §6.2
+/**
+ * §6.2 — the chat/board split ratio.
+ *
+ * The two panes have different natural widths, and the ratio has to respect them: the chat row's
+ * head is ~30 cells (cursor, unread, badge, clock, author, topic) before its body starts, and the
+ * board's row wants ~55 (cursor + "build/parser ⟵ build/schema" + "AgentA +2 waiting" + the
+ * countdown + the state). At the old 0.62 the board got 38% of the split — 31–43 cells at 88–120
+ * columns — so every one of its columns was shrunk on every frame and the dependency the board
+ * exists to show was cut to a stub. 0.52 gives the board its 55 cells at 120 columns, and still
+ * leaves the chat ~62.
+ */
+export const PANEL_LEFT_RATIO = 0.52; // §6.2
 export const PANEL_RIGHT_MIN_WIDTH = 30; // §6.2
 /** §6.8 — the slow relative-age repaint cadence. */
 export const PANEL_AGE_INTERVAL_MS = 5_000;
@@ -58,10 +76,25 @@ const HINTS = [
   "1/2 pane",
 ];
 
-const BORDER = "│";
-
 /** How many log records the board scans for the claims that just ended. */
 const PANEL_RELEASED_TAIL = 200;
+
+/**
+ * The theme's own box vertical — the glyph the split's frame rules are drawn with.
+ *
+ * The host's chrome helpers read `theme.boxRound` from the host's theme singleton, so the frame
+ * rows already follow the user's box style; the split's own rules were a hardcoded "│", the one
+ * surface in the tree that did not. A theme without the member (the half-built theme of 18.8.7)
+ * falls back to the host's default glyph rather than throwing.
+ */
+function boxVerticalOf(theme: Theme): string {
+  const box: unknown = theme.boxRound;
+  if (typeof box === "object" && box !== null && "vertical" in box) {
+    const vertical: unknown = box.vertical;
+    if (typeof vertical === "string") return vertical;
+  }
+  return BOX_ROUND.vertical;
+}
 
 /**
  * §6.2 Layout A — frame top, `chat | board` split, divider, hint row, frame bottom. Only the visible
@@ -75,7 +108,8 @@ export class RoomPanel implements Component {
   readonly #stack: Stack;
   #rows: ChatRow[] = [];
   #board: BoardRow[] = [];
-  #roster = "";
+  /** The live registry's refs — the presence strip is rendered at DRAW time, when the width is known. */
+  #roster: readonly AgentRef[] = [];
   // One selection PER PANE. A single shared index was the bug the live pty run found: it was
   // clamped by the FOCUSED pane's row count but applied to the BOARD's rows, so `r` in chat focus
   // released an arbitrary claim the user had never selected.
@@ -102,6 +136,8 @@ export class RoomPanel implements Component {
     this.#registry = options.registry ?? AgentRegistry.global();
     const registry = this.#registry;
     const store = options.store;
+    // The split's vertical rule, from the theme's own box glyph.
+    const border = boxVerticalOf(options.theme);
 
     this.#split = new SplitPane({
       left: createChatPane(
@@ -120,9 +156,13 @@ export class RoomPanel implements Component {
       rightMinWidth: PANEL_RIGHT_MIN_WIDTH,
       splitAt: PANEL_SPLIT_AT,
       narrowPane: "left",
-      prefix: BORDER,
-      divider: BORDER,
-      suffix: BORDER,
+      // The split's frame glyph comes from the theme (`boxRound.vertical`), like the frame rows
+      // the host's chrome helpers draw from the same theme member. A hardcoded "│" here made the
+      // panel the one surface in the tree that did not follow the user's box style. A theme
+      // without the member (the half-built theme of 18.8.7) falls back to the host's own glyph.
+      prefix: border,
+      divider: border,
+      suffix: border,
     });
 
     this.#stack = new Stack({
@@ -165,7 +205,7 @@ export class RoomPanel implements Component {
       cursorFor(store, this.#options.selfId),
     );
     this.#board = this.#projectBoard(store);
-    this.#roster = renderRosterStrip(this.#registry.list(), this.#options.theme);
+    this.#roster = this.#registry.list();
     this.#clampSelection();
     this.#options.tui?.requestRender?.();
   }
@@ -180,7 +220,8 @@ export class RoomPanel implements Component {
     const narrow = geometry.mode !== "split";
     this.#split.setNarrowPane(this.#narrowOpen && narrow ? "right" : "left");
     const chatWidth = narrow ? 0 : (geometry.left?.width ?? 0);
-    this.#frame = frameRows(width, this.#titleFor(narrow), chatWidth, HINTS, this.#options.theme);
+    const title = this.#titleFor(narrow, width, chatWidth);
+    this.#frame = frameRows(width, title, chatWidth, HINTS, this.#options.theme);
     const height = Math.max(4, this.#options.tui?.terminal?.rows || 30);
     this.#stack.setHeight(height);
     this.#lastRender = fitBlock(this.#stack.render(width), height, width);
@@ -358,7 +399,20 @@ export class RoomPanel implements Component {
 
   // --- chrome -------------------------------------------------------------
 
-  #titleFor(narrow: boolean): string {
+  /**
+   * The frame title: `Room #id · [chat]|board · <presence>`.
+   *
+   * The title lives in the frame's TOP BORDER, and the host truncates a border title to the
+   * segment it sits in (`pi-tui/src/chrome/overlay-box.ts`, `topBorderSplit` /
+   * `topBorder`: `truncateToWidth(" " + title + " ", inner - 1)`). So the presence strip is given
+   * the title's ACTUAL budget — the left segment's width in the split layout, the whole border in
+   * the narrow one — and drops whole status groups rather than being cut mid-word.
+   *
+   * The room id is a hash: the first eight characters identify it as well as the last, so the id
+   * yields its tail when the presence strip would otherwise have no room at all. The full id is
+   * preferred whenever both fit.
+   */
+  #titleFor(narrow: boolean, width: number, chatWidth: number): string {
     // The focused pane is marked: `1`/`2` used to change nothing on screen, so the key looked
     // broken. In the narrow layout only one pane is visible, so the mark names the visible one.
     const pane = narrow
@@ -368,7 +422,21 @@ export class RoomPanel implements Component {
       : this.#focus === "chat"
         ? "[chat]|board"
         : "chat|[board]";
-    return `Room #${sanitizeText(this.#options.roomId)} · ${pane} · ${this.#roster}`;
+    const theme = this.#options.theme;
+    // The border's title budget: the split layout puts the title in the LEFT segment (the chat
+    // pane's columns), the narrow layout in the whole rule.
+    const budget = narrow ? Math.max(0, width - 6) : Math.max(0, chatWidth - 3);
+    const id = sanitizeText(this.#options.roomId);
+    const shortId = id.length > 9 ? `${id.slice(0, 8)}…` : id;
+    for (const candidate of [id, shortId]) {
+      const head = `Room #${candidate}${theme.sep.dot}${pane}`;
+      const room = Math.max(0, budget - visibleWidth(head) - visibleWidth(theme.sep.dot));
+      const roster = renderRosterStrip(this.#roster, theme, room);
+      if (roster === "") continue;
+      return `${head}${theme.sep.dot}${roster}`;
+    }
+    // No room for the presence strip at any id length: the title is the room and the focus.
+    return `Room #${id}${theme.sep.dot}${pane}`;
   }
 }
 

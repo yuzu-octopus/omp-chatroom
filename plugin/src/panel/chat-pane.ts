@@ -1,14 +1,9 @@
-import {
-  type LayoutRenderer,
-  padding,
-  type Theme,
-  truncateToWidth,
-  visibleWidth,
-} from "@oh-my-pi/pi-tui";
+import { type LayoutRenderer, type Theme, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { classify, type Tier } from "../attention/tiers";
 import type { MemberState } from "../store/room-store";
 import type { RoomRecord, StatusObject } from "../store/schema";
+import { fitWidth } from "./chrome";
 
 export interface ChatRow {
   // [invented]
@@ -42,6 +37,20 @@ const TIER_GLYPH: Record<Tier, "error" | "warning" | "info"> = {
 };
 
 type MsgRecord = Extract<RoomRecord, { kind: "msg" }>;
+
+/**
+ * The row's clock, in LOCAL time.
+ *
+ * The row used to slice `toISOString()`, which is UTC — so the panel's clock disagreed with the
+ * host's own transcript (which renders `toLocaleTimeString`, `pi-tui/src/chat/user-message.ts:246`)
+ * and with the host's local-date helper (`pi-tui/src/chrome/local-date.ts`, `getHours()`). A reader
+ * comparing the panel with the transcript saw two different times for the same message.
+ */
+function clockOf(ts: number): string {
+  const date = new Date(ts);
+  const pad2 = (value: number): string => String(value).padStart(2, "0");
+  return `${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}`;
+}
 
 /** Reply chain depth, bounded at 8 so a cyclic log cannot spin. `byId` is the parent index. */
 function threadDepthOf(record: MsgRecord, byId: ReadonlyMap<string, MsgRecord>): number {
@@ -90,18 +99,14 @@ export function projectChatRows(
   return rows;
 }
 
-/** Pad to exactly `width` or hard-truncate (styling preserved by `truncateToWidth`). */
-function padOrTrim(text: string, width: number): string {
-  const visible = visibleWidth(text);
-  if (visible === width) return text;
-  if (visible < width) return text + padding(width - visible);
-  const cut = truncateToWidth(text, width);
-  return visibleWidth(cut) < width ? cut + padding(width - visibleWidth(cut)) : cut;
-}
-
 /**
  * §6.3 — one styled row per message: `[unread][tier][time] author › topic · body`, body truncated to
  * the pane. Every line is exactly `width` cells (the caller has already sliced the window).
+ *
+ * The width is BUDGETED, not guessed: the head is rendered first and measured, and the body takes
+ * what is left. The old fixed `width - 32` reserve was a guess at the head's length — at a narrow
+ * width the head alone is longer than 32 cells, so the body was cut to nothing and the row was then
+ * truncated, taking the topic and the ledger with it.
  */
 export function renderChatRows(
   rows: readonly ChatRow[],
@@ -115,16 +120,12 @@ export function renderChatRows(
     // ASCII "T0"/"T1"/"T2" made the badge 2 cells and the only row element not theme-sourced.
     // There is no `status.muted` key, so T2 uses glyph `status.info` with the muted tone.
     const badge = theme.fg(TIER_TONE[row.tier], theme.status[TIER_GLYPH[row.tier]]);
-    const time = theme.fg("dim", new Date(row.ts).toISOString().slice(11, 19));
+    const time = theme.fg("dim", clockOf(row.ts));
     const author = row.mention
       ? theme.bold(theme.fg("accent", sanitizeText(row.author)))
       : theme.bold(sanitizeText(row.author));
     const indent =
       row.threadDepth > 0 ? theme.tree.vertical.repeat(row.threadDepth) + theme.tree.branch : "";
-    const body = truncateToWidth(row.body.replace(/[\r\n]+/g, " "), Math.max(1, width - 32));
-    // R6 — the topic's status ledger, as the human sees it: is this topic looping, and who is next.
-    // A ledger the panel cannot show is a ledger nobody reads.
-    const status = row.status === undefined ? "" : statusLine(row.status, theme);
     // The visible cursor: the row the panel's actions address is the row the user can see. The
     // glyph is the THEME's own "selected" symbol (nav.selected) — the house rule is that every
     // row element comes from the theme, and the fallback theme defines nav.selected.
@@ -134,28 +135,45 @@ export function renderChatRows(
     // author and topic is `nav.selected`, a SymbolKey, not a hardcoded "›".
     const head =
       `${marker}${unread}${badge} ${time} ${indent}${author}${theme.sep.dot}` +
-      `${theme.fg("muted", sanitizeText(row.topic))}${theme.nav.selected}${body}${status}`;
-    return padOrTrim(head, width);
+      `${theme.fg("muted", sanitizeText(row.topic))}${theme.nav.selected}`;
+    // R6 — the topic's status ledger, as the human sees it: is this topic looping, and who is next.
+    // A ledger the panel cannot show is a ledger nobody reads.
+    const status = row.status === undefined ? "" : statusLine(row.status, theme);
+    // The body takes what the head and the ledger leave. The ledger is RESERVED before the body:
+    // it is the actionable half of the row, and a body that grows past it would push the ledger
+    // off the end of the line (the row is truncated from the tail).
+    const free = Math.max(0, width - visibleWidth(head));
+    const bodyWidth = Math.max(0, free - visibleWidth(status));
+    const body =
+      bodyWidth === 0 ? "" : truncateToWidth(row.body.replace(/[\r\n]+/g, " "), bodyWidth);
+    return fitWidth(head + body + status, width);
   });
 }
 
 /**
- * R6 — the ledger in one line: `looping · next AgentB · needs: publish the schema`.
+ * R6 — the ledger in one line: `looping · next AgentB · publish it`.
  *
  * Only the parts a human watching the panel needs: the loop flag (the failure it prevents), the next
  * actor, and the instruction. The rest of the ledger is the agent's business.
+ *
+ * Each part is styled on its OWN, the way the host's `renderStatusLine` styles its fragments
+ * (`pi-tui/src/render/status-line.ts`): `theme.fg` ends every string with `\x1b[39m`
+ * (`theme-class.ts:350`), so wrapping already-styled parts in one outer `fg` reset the outer tone
+ * for everything after the first part — the muted ledger text after "looping" came out in the
+ * terminal's default colour. The parts are also joined with `sep.dot` (which already carries its
+ * own flanks) after ONE space, not wrapped in spaces of its own.
  */
 function statusLine(status: StatusObject, theme: Theme): string {
   const parts: string[] = [];
   if (status.is_in_loop.answer.toLowerCase() === "yes") {
     parts.push(theme.fg("error", "looping"));
   }
-  const next = status.next_speaker.answer.trim();
-  if (next !== "") parts.push(`next ${next}`);
-  const instruction = status.instruction_or_question.answer.trim();
-  if (instruction !== "") parts.push(instruction);
+  const next = sanitizeText(status.next_speaker.answer.trim());
+  if (next !== "") parts.push(theme.fg("muted", `next ${next}`));
+  const instruction = sanitizeText(status.instruction_or_question.answer.trim());
+  if (instruction !== "") parts.push(theme.fg("muted", instruction));
   if (parts.length === 0) return "";
-  return ` ${theme.sep.dot} ${theme.fg("muted", sanitizeText(parts.join(" · ")))}`;
+  return ` ${parts.join(theme.sep.dot)}`;
 }
 
 /**
