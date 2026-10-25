@@ -970,7 +970,63 @@ test("panel `o` on a held claim names the holder and points at the agent hub", a
   expect(capture.notified[0]!.message).toContain("agent hub");
   expect(capture.notified[0]!.level).toBe("info");
 });
-
+test("openRoomPanel's timer wiring runs setInterval and clears through clearTimer on dispose", async () => {
+  // Lines 637-639: the REAL factory passes `ctx.setInterval`/`ctx.clearTimer` into the panel, and
+  // dispose() clears the age timer through the passthrough. Driven through the REAL openRoomPanel
+  // (not a direct constructor): the custom stub captures the constructed panel, the fake ctx
+  // observes the SAME token flowing from setInterval to clearTimer, and dispose is idempotent.
+  // (Lines 624-628's rejection arm is intentionally untested: `notifyRecipients` try/catches every
+  // send and the `.then` chain swallows, so the rejection is unreachable — defensive-dead.)
+  ensureThemeSync();
+  const tokens: unknown[] = [];
+  const cleared: unknown[] = [];
+  let panel: Component | undefined;
+  const pi = { on: () => {} } as unknown as ExtensionAPI;
+  const root = tempRoot();
+  const tuiCtx = {
+    hasUI: true,
+    mode: "tui",
+    agent: { id: "Main", kind: "main", name: "main", depth: 0 },
+    cwd: root,
+    localProtocolOptions: { getArtifactsDir: () => root, getSessionId: () => "sess-panel" },
+    setInterval: ((callback: () => void, ms: number) => {
+      void callback;
+      void ms;
+      tokens.push(`age-token-${tokens.length + 1}`);
+      return tokens[tokens.length - 1];
+    }) as never,
+    clearTimer: ((timer: unknown) => {
+      cleared.push(timer);
+    }) as never,
+    ui: {
+      notify: () => {},
+      custom: async (
+        factory: (
+          tui: TUI,
+          hostTheme: Theme,
+          keybindings: unknown,
+          closeOverlay: () => void,
+        ) => Component,
+      ) => {
+        panel = factory(tuiStub(30), theme, {}, () => {});
+        return undefined as never;
+      },
+      onTerminalInput: () => () => {},
+    },
+  } as unknown as ExtensionContext;
+  await openRoomPanel(pi, tuiCtx);
+  // ctx.setInterval is shared (panel age timer + store background jobs), so the panel's token is
+  // the LAST one issued before the factory ran — the one dispose() must clear exactly once.
+  expect(tokens.length).toBeGreaterThanOrEqual(1);
+  const roomPanel = panel as unknown as RoomPanel;
+  expect(() => roomPanel.dispose()).not.toThrow();
+  const panelToken = tokens[tokens.length - 1];
+  expect(cleared).toContain(panelToken);
+  expect(cleared.filter((t) => t === panelToken)).toHaveLength(1);
+  // Dispose is idempotent: the token is cleared exactly once.
+  roomPanel.dispose();
+  expect(cleared.filter((t) => t === panelToken)).toHaveLength(1);
+});
 test("panel `r` delivery failure surfaces as a warning notify (lines 620-628)", async () => {
   // Lines 620-628: the key path is sync but the push is async — a rejection lands in the `.then`
   // rejection arm and surfaces via `notify` as a warning. Forced headless by registering a live
