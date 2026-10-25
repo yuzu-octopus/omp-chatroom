@@ -42,7 +42,7 @@
 | Cache stability | F1 (mechanics, tail rule, crossover [1][2][3][27]) + F5 (injection path [39]) | solid |
 | Group-chat UX for agents | F3 (threads, turn ownership, no-receipt-machinery [19][22]) | medium (2 primaries, contested threading [22], no UX outcome data) |
 | Comparison vs IRC/Slack/Discord | F3 (IRCv3 tags [23], Slack agent design [19], OpenFloor [25]) | thin on Discord (no Discord primary in files) |
-| Justification vs native `agent://` | F4 (redirect/NOT-to-use lines [38][41]) + F5 (board/tiers/sweep [39]) | thin — no findings file covers host `agent://` semantics; head-to-head is unmeasured |
+| Justification vs native `agent://` | F4 (redirect/NOT-to-use lines [38][41]) + F5 (board/tiers/sweep [39]) + host `agent://` semantics (fan-out [42], no peer wait [43], revive-into-queue [44]) | medium (host-verified mechanics, head-to-head unmeasured) |
 
 ### Cache stability: mechanics + where the room stands (F1, F5; reconciliations a, e)
 
@@ -94,12 +94,12 @@
 
 ### README justification narrative (room vs `agent://` 1:1 and vs IRC-style)
 
-- Vs 1:1 DMs: the room is a coordination artifact, not a chat — exclusive ownership with TTL, one durable replayable record a late joiner can read, tiered attention with bounded waits, and a cold-summary tree have no 1:1 equivalent in the findings; the plugin's own rule routes private redirection to `agent://` and shared work to the room [38][41][39]. Head-to-head measurement vs host `agent://` does not exist in these findings — say so in the README, don't overclaim.
+- Vs 1:1 DMs: the room is a coordination artifact, not a chat — exclusive ownership with TTL, one durable replayable record a late joiner can read, tiered attention with bounded waits, and a cold-summary tree have no 1:1 equivalent in the host: `agent://all` is a fan-out of independent 1:1 `bus.send` calls with per-target receipts and no shared record [42]; no native exclusive-ownership-with-TTL primitive exists [44-grep]; native `wait` refuses peer-only waits ("Nothing to wait for") [43]; parked-agent mail revives through the lifecycle into the session IRC queue while the bus mailbox holds only failed live hand-offs (`MAILBOX_CAP = 100`) [44]. The plugin's own rule routes private redirection to `agent://` and shared work to the room [38][41][39]. Head-to-head measurement vs host `agent://` does not exist in these findings — say so in the README, don't overclaim.
 - Vs IRC-style: IRC gives tags/threads without agent identity or ownership [23]; Slack's agent guidance wants streaming, threading, and confirmations, not receipts [19]; A2A/AutoGen want machine-readable routing over prose mentions [20][21]. The room keeps the IRC shape agents already parse (topics, tail, mentions) and adds exactly the three things chat lacks: ownership (claims), staleness (cursor/lag), and steering (T0/T1/T2 + waits) [39].
 
 ## Open questions
 
-- **Host `agent://` semantics.** No findings file covers the host's 1:1 channel (queue, lease, expiry) — the vs-native justification rests on the plugin's own routing rule [41], not host source. Resolve with a host-source read.
+- **Host `agent://` semantics — RESOLVED (host-source read).** `agent://all` = fan-out of independent 1:1 `bus.send` calls, no shared object (`pi-coding-agent/src/irc/messaging.ts:64-74` [42]); no native exclusive-ownership-with-TTL primitive (no `claim|lease|ttl|mutex|exclusive` agent-visible primitive in `src/irc/*`, `tools/wait.ts`, `tools/irc.ts`, `registry/agent-registry.ts` [44-grep]); native `wait` refuses peer-only waits — a peer owes no message, "Nothing to wait for" (`pi-coding-agent/src/tools/wait.ts:83-89,141-153` [43]); parked-agent mail revives through the lifecycle into the session's IRC queue while the bus mailbox holds ONLY failed live hand-offs (`pi-coding-agent/src/irc/bus.ts:153-217` + `session/irc-bridge.ts:191-260`, `MAILBOX_CAP = 100` [44]).
 - **Digest cost at real cadence.** Per-turn byte-change rate by field, prefix-hit rate, truncation frequency — unmeasured; needs own instrumentation (F6 Gaps) [39].
 - **Misroute rate vs agent count.** Would decide typed-intent timing (reconciliation d) and validate the ~5–8-agent boundary [speculative].
 - **Same-task multi-vs-single benchmark.** None found; SWE-bench figures unverified [34] (F6 Gaps).
@@ -107,7 +107,7 @@
 - **Vendor internals.** Devin/Cursor budgets and summarisation thresholds, per-turn sizing optimum (1–2k is observed norm, not A/B optimum), compaction fidelity, shared-context versioning protocol — all unspecified in primaries (F2 Gaps) [10][13][8].
 - **UX evidence.** No outcome data on reactions/receipts/typing for agents, no verbose-vs-structured format cost comparison, human+agent mixing underexplored (F3 Gaps) [19]; Discord-specific guidance missing from files.
 - **Cache-provider unknowns.** Multi-agent hit-rate benchmarks, cross-provider coherence, long-session eviction vs compaction, provider routing internals (F1 Gaps) [1][2].
-- **Schema unknowns.** Host `prompt.render` support for descriptions, whether agents read `describe` vs `description`, no error corpus to reorder fixes (F4 Gaps) [38][40]; exact host cache boundaries for the digest message [39].
+- **Schema unknowns — RESOLVED (both host-verified).** (a) `prompt.render` (Handlebars) works on ANY string, not just `.md` files (`pi-utils/src/prompt.ts:533-548`); `todo.ts:726-727` renders with empty context, `read.ts:1031-1035` with a real context — ROOM_DESCRIPTION through `prompt.render` follows the host pattern. (b) Agents see BOTH tool-level `description` AND per-param `describe` on every normal request (`pi-agent-core/src/agent-loop.ts:1028-1054` `normalizeTools`); prune path `stripSchemaDescriptions` only under opt-in `pruneToolDescriptions` (`pi-ai/src/utils/schema/wire.ts:582-608/645-675`). Still OPEN: no error corpus to reorder fixes (F4 Gaps); exact host cache boundaries for the digest message [39].
 
 ## Sources
 
@@ -165,3 +165,6 @@ Plugin & host source (local paths, primary to implementation):
 39. `plugin/src/onboarding/{hook,digest,escape}.ts`, `routing-rule.md`; `plugin/src/attention/{tiers,delivery}.ts`; `plugin/src/panel/chat-pane.ts` (digest-as-message, static rule, T0/T1/T2, sweep, presence) — 2026-10-26 [primary]
 40. `plugin/node_modules/@oh-my-pi/pi-coding-agent/src/tools/todo.ts`, `src/prompts/tools/todo.md` (9-op monolith, .md prompt-file pattern, repair-oriented errors) — 2026-10-26 [primary]
 41. `plugin/skills/omp-agent-chatroom/SKILL.md` (claim cycle, cheat-sheet, NOT-to-use clause) — 2026-10-26 [primary]
+42. `plugin/node_modules/@oh-my-pi/pi-coding-agent/src/irc/messaging.ts:64-74` (`agent://all` fan-out of independent 1:1 `bus.send` calls, per-target receipts, no shared object) — 2026-10-26 [primary]
+43. `plugin/node_modules/@oh-my-pi/pi-coding-agent/src/tools/wait.ts:83-89,141-153` (peer owes no message; peer-only wait refused, "Nothing to wait for") — 2026-10-26 [primary]
+44. `plugin/node_modules/@oh-my-pi/pi-coding-agent/src/irc/bus.ts:153-217` + `src/session/irc-bridge.ts:191-260` (parked-agent mail revives through lifecycle into session IRC queue; bus mailbox = failed-live-handoff fallback only, `MAILBOX_CAP = 100`); no-lease grep: no `claim|lease|ttl|mutex|exclusive` agent-visible primitive in `src/irc/*`, `tools/wait.ts`, `tools/irc.ts`, `registry/agent-registry.ts` — 2026-10-26 [primary]

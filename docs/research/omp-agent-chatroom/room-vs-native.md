@@ -10,8 +10,8 @@ That is the single most important finding for the build decision.").
 Citations below come in two flavours:
 
 - **Host source** — read from the installed tree on this machine:
-  `~/.bun/install/global/node_modules/@oh-my-pi/pi-coding-agent` (`H`) and
-  `~/.bun/install/global/node_modules/@oh-my-pi/pi-tui` (`T`), version `18.8.7`
+  `plugin/node_modules/@oh-my-pi/pi-coding-agent` (`H`) and
+  `plugin/node_modules/@oh-my-pi/pi-tui` (`T`), version `18.12.6`
   (`H/package.json:3`). The plugin pins `18.8.6` (`plugin/package.json:39-41`); the plan was written
   against 18.7.0 and stores the drift risk as **R34** (`PLAN-build.md:2352`).
 - **Research record** — `REPORT.md` (R1), `REPORT-v2-hybrid.md` (R2), `PLAN-build.md` (the plan).
@@ -21,81 +21,92 @@ Citations below come in two flavours:
 ## 1. What `agent://<id>` / `agent://all` actually do
 
 `agent://` is an internal URL scheme, not a chat server. The write handler takes the URL, the body and
-the write context, and hands it to the IRC messaging layer (`H/src/internal-urls/agent-protocol.ts:172`
+the write context, and hands it to the IRC messaging layer (`H/src/internal-urls/agent-protocol.ts:191`
 → `executeSend`, imported at `H/src/internal-urls/agent-protocol.ts:28`). There is no network, no
 server, and no second process: one `IrcBus` singleton per omp process
-(`H/src/irc/bus.ts:27-30`).
+(`H/src/irc/bus.ts:33-36`).
 
 **Point-to-point.** One recipient, one receipt. Outcomes are exactly four — `injected`, `woken`,
-`revived`, `failed` (`T/src/tools/irc.ts:27-31`).
+`revived`, `failed` (`T/src/tools/irc.ts:34-38`).
 
 **Broadcast is a fan-out, not an event.** `agent://all` resolves to every visible peer and issues N
 independent sends:
 
 ```
 H/src/irc/messaging.ts:64   const targets = isBroadcast ? registry.listVisibleTo(senderId).map(ref => ref.id) : [to];
-H/src/irc/messaging.ts:67   const receipts = await Promise.all(
-H/src/irc/messaging.ts:68     targets.map(target => bus.send({ from: senderId, to: target, body: message }, { suppressRelay })),
+H/src/irc/messaging.ts:67-74 const receipts = await Promise.all(
+                              targets.map(target => bus.send({ from: senderId, to: target, ... }, ...)),
+                              )
 ```
-
-So a "broadcast" is N one-to-one writes, each with its own mailbox, its own session file and its own
-receipt. There is no shared object a late agent can read back. `agent://all` is explicitly write-only
-(`H/src/internal-urls/agent-protocol.ts:209`).
+So a "broadcast" is N one-to-one writes — per-target `bus.send` calls with per-target receipts and
+no shared record (`H/src/irc/messaging.ts:64-74`). Each leg delivers into its target's session,
+reviving a parked recipient through the lifecycle (`H/src/irc/bus.ts:153-217`,
+`H/src/session/irc-bridge.ts:191-260`); only a failed live hand-off is buffered in that agent's
+mailbox (`MAILBOX_CAP = 100`). There is no shared object a late agent can read back. `agent://all`
+is explicitly write-only (`H/src/internal-urls/agent-protocol.ts:209`).
 
 **Delivery is state-aware — and this is the part that must not be rebuilt.** `IrcBridge.deliver()`
-branches on the recipient's state (`H/src/session/irc-bridge.ts:180-243`):
+branches on the recipient's state (`H/src/session/irc-bridge.ts:190-259`):
 
 | State | Behaviour | Line |
 |---|---|---|
-| streaming + message from a parent | `this.#host.agent.steer({... steering: true})` — **hard steer mid-run** | `H/src/session/irc-bridge.ts:220-227` |
-| streaming + non-parent | pushed to `#interrupts`, drained interrupt-before-aside at the next step boundary | `H/src/session/irc-bridge.ts:26,67-71,228` |
-| plan-mode idle | `appendMessage` + `appendCustomMessageEntry` — folds into context, no turn | `H/src/session/irc-bridge.ts:232-240` |
-| idle, non-main | `wakeForIrc([record])` — a real wake turn whose output is relayed to the sender | `H/src/session/irc-bridge.ts:243`, `:189` |
+| streaming + message from a parent | `this.#host.agent.steer({... steering: true})` — **hard steer mid-run** | `H/src/session/irc-bridge.ts:227-236` |
+| streaming + non-parent | pushed to `#interrupts`, drained interrupt-before-aside at the next step boundary | `H/src/session/irc-bridge.ts:24-30,237-238` |
+| plan-mode idle | `appendMessage` + `appendCustomMessageEntry` — folds into context, no turn | `H/src/session/irc-bridge.ts:242-249` |
+| idle, non-main | `wakeForIrc([record])` — a real wake turn whose output is relayed to the sender | `H/src/session/irc-bridge.ts:258-259`, `:20` |
 
 **Presence and identity** come from `AgentRegistry.global()` (`listVisibleTo`, `onChange`); child
 prompts get a live-roster block capped at 32 (`REPORT.md:124`, `:341`). **Revival** keeps the same agent id
 (`REPORT.md:125`).
 
-**The wire format is thin.** `IrcMessage` carries `id`, `from`, `to`, `body`, `ts`, optional `replyTo`
-and `wakeRelay` — and nothing else (`T/src/tools/irc.ts:7-24`). No priority, no topic, no TTL, no
+**The wire format is thin.** `IrcMessage` carries `id`, `from`, `to`, `body`, `ts`, optional `replyTo`,
+`wakeRelay` and `broadcast` — and nothing else (`T/src/tools/irc.ts:9-33`). No priority, no topic, no TTL, no
 lease, no claim, no envelope fields.
 
 **Persistence is per-recipient.** An incoming record is a `custom` entry of type `irc:incoming`
-appended into the *recipient's* session JSONL (`H/src/session/irc-bridge.ts:195-205`,
-`:232-240`). Ten recipients = ten separate files; none of them is the room.
+appended into the *recipient's* session JSONL (`H/src/session/irc-bridge.ts:206-228`,
+`:242-249`). Ten recipients = ten separate files; none of them is the room.
 
-**Backpressure is one undifferentiated drop-oldest queue.**
+**Backpressure is one undifferentiated drop-oldest mailbox — and parked-agent mail never waits in it.**
 
 ```
-H/src/irc/bus.ts:24-25   /** Mailbox cap per agent; oldest messages are dropped beyond it. */
+H/src/irc/bus.ts:30-31   /** Mailbox cap per agent; oldest messages are dropped beyond it. */
                           const MAILBOX_CAP = 100;
-H/src/irc/bus.ts:286-292 if (mailbox.length > MAILBOX_CAP) { const dropped = mailbox.shift(); ... }
+H/src/irc/bus.ts:318-326 if (mailbox.length > MAILBOX_CAP) { const dropped = mailbox.shift(); ... }
 ```
 
-The cap does not know whether the dropped message was a tier-0 interrupt or chatter, and the mailbox
-only ever holds *failed* hand-offs — a delivered message is never buffered, so `unreadCount` is
-mailbox depth and nothing else (`H/src/irc/bus.ts:275-276`, `:64-65`). A grep for
-`priority|backpressure|rateLimit|coalesce|tier` across `H/src/irc/`, `H/src/tools/wait.ts`,
-`irc-bridge.ts` and `agent-registry.ts` returns **zero matches** (verified in this tree 2026-10-10; also `REPORT.md:403`,
-`REPORT-v2-hybrid.md:126-127,460`).
+Parked-agent mail does not wait in that mailbox: a `parked` recipient is revived through the
+lifecycle into the session's IRC queue (`H/src/irc/bus.ts:153-185` →
+`H/src/session/irc-bridge.ts:190-259`). Only a *failed* live hand-off is buffered
+(`H/src/irc/bus.ts:206-217`), so the mailbox is a failed-handoff fallback, not a queue. The cap does
+not know whether the dropped message was a tier-0 interrupt or chatter — a delivered message is never
+buffered, so `unreadCount` is mailbox depth and nothing else (`H/src/irc/bus.ts:307-309`,
+`:62-66`). A grep for `priority|backpressure|rateLimit|coalesce|tier` across `H/src/irc/`,
+`H/src/tools/wait.ts`, `irc-bridge.ts` and `agent-registry.ts` returns **zero matches** (verified in
+this tree 2026-10-26; also `REPORT.md:403`, `REPORT-v2-hybrid.md:126-127,460`).
 
 **`wait` cannot block on a peer alone.** Native `wait` blocks on a *job or service the caller owns*,
-and refuses otherwise:
+or the reply to a message it sent this run — "Other agents' work never sustains a wait: a peer owes
+no message" (`H/src/tools/wait.ts:84-90`):
 
 ```
-H/src/tools/wait.ts:90-94  if (jobs.length === 0 && !serviceRunning) {
-                             throw new ToolError(
-                               "Nothing to wait for: no background job or service you started is running. Other agents' results and messages arrive on their own."
+H/src/tools/wait.ts:84-90  * Blocks on background jobs and services the calling agent started, or on
+                            * the reply to a message it sent this run. Other agents' work never sustains
+                            * a wait: a peer owes no message. [...] A message arriving mid-wait
+                            * ends any wait.
+H/src/tools/wait.ts:141-154 if (jobs.length === 0 && !serviceRunning) { ... "Nothing to wait for: ..." }
 ```
 
-Its bus leg exists but is only reachable once something else is already being awaited
-(`H/src/tools/wait.ts:114-118`), and the cap is `WAIT_MAX_MS = 30 * 60_000` (`H/src/tools/wait.ts:25`).
-There is no wait that says "block until peer X changes state", "block until a message for me arrives",
-or "block until resource R is free".
+The bus leg is reachable only as one leg of a wait that is already sustained by something the caller
+owns (`H/src/tools/wait.ts:177-181`), and the cap is `WAIT_MAX_MS = 30 * 60_000`
+(`H/src/tools/wait.ts:24`). There is no wait that says "block until peer X changes state", "block
+until a message for me arrives", or "block until resource R is free".
 
-**There is no claim/lock/lease primitive anywhere.** `H/src/tools/builtin-names.ts` has no claim,
-lock, reserve or lease entry (verified by grep); a grep for `claim|lease|lock` across
-`H/src/tools/*.ts` returns only unrelated identifiers (`blocks`, `answerImageBlocks`). `todo` is
+**There is no claim/lease/TTL/mutex/exclusive primitive anywhere agent-visible.**
+`H/src/tools/builtin-names.ts` has no claim, lock, reserve or lease entry (verified by grep); a grep
+for `claim|lease|ttl|mutex|exclusive` across `H/src/irc/*`, `H/src/tools/wait.ts`,
+`H/src/registry/agent-registry.ts` and the TUI `irc`/`wait` tools returns only unrelated identifiers
+(`blocks`, `settled`, `releaseHold`). `todo` is
 parent-owned, not a shared reservation (`REPORT.md:353`). Two agents pointed at the same file have no
 way to agree who owns it first — this is the plan's stated, checkable motivation
 (`PLAN-build.md:85-93`).
@@ -166,36 +177,39 @@ The host has exactly three delivery strengths, and both channels reach them diff
 
 Native `agent://` goes through `IrcBus.send` → `IrcBridge.deliver()`, which branches on the
 recipient's state and on whether the sender is a parent
-(`H/src/session/irc-bridge.ts:180-243`):
+(`H/src/session/irc-bridge.ts:190-259`):
 
 - **parent → streaming child**: `agent.steer(..., {steering: true})`, taken up mid-run
-  (`H/src/session/irc-bridge.ts:220-227`) — a hard steer.
+  (`H/src/session/irc-bridge.ts:230-241`) — a hard steer.
 - **non-parent → streaming**: pushed to `#interrupts`, drained interrupt-before-aside at the next
-  step boundary (`H/src/session/irc-bridge.ts:26,67-71,228`).
+  step boundary (`H/src/session/irc-bridge.ts:40-50`, `:237-238`).
 - **→ idle, non-main**: `wakeForIrc([record])`, a real wake turn whose output is relayed back to the
-  sender (`H/src/session/irc-bridge.ts:243`, `:189`).
+  sender (`H/src/session/irc-bridge.ts:258-259`, `:20`).
 
 The room does **not** use the bus at all. Its delivery adapter calls the recipient session's
 `sendCustomMessage` with `deliverAs: "steer"` for T0 and `"aside"` for T1, and bumps only a cursor
 for T2 (`plugin/src/attention/delivery.ts:60`, `:67`, `:35-37`). Per the host's own delivery rule —
 *"Omitted `deliverAs` starts a turn when idle and queues as a steer while streaming. Explicit
 `deliverAs` queues without starting a turn in either state; `aside` at an idle session instead starts
-a turn, since there is no live run to inject into."* (`H/src/session/agent-session.ts:8796-8798`) —
+a turn, since there is no live run to inject into."* (`H/src/session/agent-session.ts:9805-9807`) —
 that gives:
 
 | Recipient state | room T0 (`deliverAs: "steer"`) | room T1 (`deliverAs: "aside"`) | room T2 |
 |---|---|---|---|
-| streaming | hard steer — `agent.steer` (`H/src/session/agent-session.ts:8700`) | step-boundary aside (`:8692`) | nothing |
-| idle | **appended + persisted, no turn** (`:8767-8774`) — no wake | **starts a turn** (`:8752-8753`) | nothing |
+| streaming | hard steer — `agent.steer` (`H/src/session/agent-session.ts:9700`) | step-boundary aside (`:9686-9693`) | nothing |
+| idle | **appended + persisted, no turn** (`:9776-9799`) — no wake | **starts a turn** (`:9761-9764`) | nothing |
 
 So the strength ladder is *not* the one the design docs assume. Two consequences a reader of this
 repo needs:
 
-1. **To wake or revive an idle peer, use native `agent://`.** A room T0 mention to an idle agent is
-   written into its context and stays there until something else runs it — the room has no
-   wake/relay/revival path, because it bypasses `IrcBus` (no mailbox, no receipt, and
-   `sendCustomMessage` returns `false` when the message was queued/appended without a turn — its own
-   doc comment, `H/src/session/agent-session.ts:8591-8605`, and `REPORT.md:224`). R2's tier table
+1. **To wake or revive an idle peer, use native `agent://`.** A parked recipient is revived through
+   the lifecycle into the session's IRC queue (`H/src/irc/bus.ts:153-185` →
+   `H/src/session/irc-bridge.ts:190-259`); only a failed live hand-off ever waits in that agent's
+   mailbox. A room T0 mention to an idle agent is written into its context and stays there until
+   something else runs it — the room has no wake/relay/revival path, because it bypasses `IrcBus`
+   (no mailbox, no receipt, and `sendCustomMessage` returns `false` when the message was
+   queued/appended without a turn — its own doc comment,
+   `H/src/session/agent-session.ts:9600-9605`, and `REPORT.md:224`). R2's tier table
    asserts the opposite for T0 — "yes (idle → wake; streaming → step-boundary interrupt)"
    (`REPORT-v2-hybrid.md:318-320`); the implementation delivers
    a hard steer to a streaming agent and no turn to an idle one. **That divergence is a doc/code gap,
@@ -225,7 +239,8 @@ Practical consequence — and it is why the room does not try to be a drop-in re
 - **Two failure modes, both asymmetric.** A correction sent to the room steers every agent the T0
   class matches, not just the one who was wrong. A broadcast sent as a DM reaches nobody else, and
   nobody can reconstruct it later (§2). And a room mention aimed at an *idle* agent does not wake it
-  at all — the message waits in that session's context.
+  at all — the message sits in that session's context (contrast: a parked recipient of native mail
+  is revived through the lifecycle into the IRC queue, `H/src/irc/bus.ts:153-185`).
 
 Note that the quote's last clause ("it does not hard-steer a streaming one") describes the *design
 intent*; per the table above, the shipped T0 path does steer a streaming agent, and the real limits

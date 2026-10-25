@@ -1,5 +1,6 @@
 import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent";
+import { prompt } from "@oh-my-pi/pi-utils";
 import { deliver, sendBounded } from "../attention/delivery";
 import {
   admitPost,
@@ -621,8 +622,11 @@ export function registerRoomTool(pi: ExtensionAPI): void {
   // §2.1.1
   const z = pi.zod;
   // Every param carries its units, its default, and which ops read it. Once an agent has loaded the
-  // tool these strings are all it sees: a bare `ttl?: number` tells it nothing about milliseconds,
-  // and `lo`/`hi` without a block-range note is opaque. This was the gap — the room tool, the primary
+  // tool these strings are the per-param half of the contract it sees (the tool-level `description`
+  // rides alongside on every normal request — pi-agent-core/src/agent-loop.ts:1028-1054 normalizeTools;
+  // pruned only under opt-in `pruneToolDescriptions` — pi-ai/src/utils/schema/wire.ts:645-675): a bare
+  // `ttl?: number` tells it nothing about milliseconds, and `lo`/`hi` without a block-range note is
+  // opaque. This was the gap — the room tool, the primary
   // one, shipped with no param descriptions at all while all three wait tools had them.
   const params = z.object({
     op: z
@@ -759,7 +763,7 @@ export function registerRoomTool(pi: ExtensionAPI): void {
   pi.registerTool({
     name: ROOM_TOOL_NAME,
     label: "Room",
-    description: ROOM_DESCRIPTION,
+    description: prompt.render(ROOM_DESCRIPTION),
     parameters: params,
     loadMode: ROOM_LOAD_MODE,
     approval: "read",

@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { AgentRegistry, type ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { prompt } from "@oh-my-pi/pi-utils";
 import { DEFAULT_CAPS, resetTurnBudget } from "../src/attention/governor";
 import { classify } from "../src/attention/tiers";
 import { DIGEST_CLAIMS_CAP } from "../src/onboarding/digest";
@@ -1227,6 +1228,21 @@ test("the tool description carries the vocabulary an agent would actually ask fo
   expect(ROOM_DESCRIPTION).toContain("release");
   expect(ROOM_DESCRIPTION).toContain("agent://<id>");
   expect(ROOM_DESCRIPTION).toContain("polling");
+});
+
+test("the registered description is prompt.render(ROOM_DESCRIPTION)", () => {
+  // Guards the wiring, not today's bytes: with an empty context the render is byte-identical,
+  // so this passes either way — it exists so a future {{#if}} in ROOM_DESCRIPTION still flows.
+  const pi = {
+    zod: zodStub,
+    registerTool: (def: Record<string, unknown>) => {
+      captured = def;
+    },
+  };
+  let captured: Record<string, unknown> | undefined;
+  registerRoomTool(pi as unknown as Parameters<typeof registerRoomTool>[0]);
+  if (!captured) throw new Error("registerRoomTool registered no tool");
+  expect(captured.description).toBe(prompt.render(ROOM_DESCRIPTION));
 });
 
 // --- plan 002 — heldTopics liveness ------------------------------------------
