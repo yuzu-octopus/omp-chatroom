@@ -1017,3 +1017,65 @@ test(
   },
   WAIT_TIMEOUT_MS,
 );
+
+test(
+  "wait_for_message with a pre-aborted signal returns aborted and records the wait",
+  async () => {
+    const root = freshRoot();
+    const bus = new EventBus();
+    const registry = new AgentRegistry();
+    const a = await newSession(bus, registry, root, "AgentA");
+    try {
+      const ac = new AbortController();
+      ac.abort();
+      const res = await toolOf(a, "wait_for_message").execute(
+        "c-pre-abort",
+        { timeout: 5_000 },
+        ac.signal,
+      );
+      expect(res.details).toMatchObject({ ok: true, outcome: "aborted" });
+      expect(res.useless).toBe(true);
+      expect(Array.isArray(res.content)).toBe(true);
+      // R5 — the aborted wait is in the ROOM LOG, like every other finished wait.
+      const read = await toolOf(a, "room").execute("c-read-abort", {
+        op: "read",
+        since: 0,
+        limit: 50,
+      });
+      expect(textOf(read)).toContain("wait");
+    } finally {
+      await a.dispose();
+    }
+  },
+  WAIT_TIMEOUT_MS,
+);
+
+test(
+  "wait_for_message on a corrupt room root returns aborted + error, never throws",
+  async () => {
+    const root = freshRoot();
+    const bus = new EventBus();
+    const registry = new AgentRegistry();
+    // A file where the room/ directory must go → mkdir fails (ENOTDIR): the U6
+    // corrupt-room path. Temp roots stay project-local (<cwd>/.omp-room), so the
+    // blocker goes at <root>/.omp-room/room (cf. onboarding.test.ts pattern).
+    // Written BEFORE any session opens the root: the in-memory store is keyed per
+    // root, so corrupting after a session would reuse the cached healthy store.
+    fs.mkdirSync(path.join(root, ".omp-room"), { recursive: true });
+    fs.writeFileSync(path.join(root, ".omp-room", "room"), "not a dir");
+    const b = await newSession(bus, registry, root, "AgentB");
+    try {
+      const res = await toolOf(b, "wait_for_message").execute("c-corrupt", {
+        timeout: 5_000,
+      });
+      expect(res.details).toMatchObject({ ok: false, outcome: "aborted" });
+      expect(res.isError).toBe(true);
+      const details: Record<string, unknown> = res.details ?? {};
+      expect(typeof details.error).toBe("string");
+      expect(Array.isArray(res.content)).toBe(true);
+    } finally {
+      await b.dispose();
+    }
+  },
+  WAIT_TIMEOUT_MS,
+);
