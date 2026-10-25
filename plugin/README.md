@@ -295,7 +295,7 @@ subagents is unaffected — they live in the same process and share one room and
 
 ```sh
 cd plugin
-bun test tests/                                 # 446 tests, 18 files
+bun test tests/                                 # 451 tests, 18 files
 bunx --bun tsc --noEmit -p tsconfig.json        # typecheck only
 bunx --bun @biomejs/biome check src tests       # lint + format check
 bunx --bun @biomejs/biome check src tests --write   # apply fixes
