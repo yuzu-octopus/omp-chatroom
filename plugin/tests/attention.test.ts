@@ -24,6 +24,7 @@ import {
   muteRoom,
   muteTopic,
   noteGap,
+  resetTurnBudget,
   selectT0,
   selectT1,
   T0_COALESCE_CEILING,
@@ -961,6 +962,64 @@ test("selectT1 with explicit caps injects at most maxT1PerTurn records", () => {
 
   const { injected } = selectT1(store, v, pending, { caps: { maxT1PerTurn: 2 } });
   expect(injected.length).toBe(2);
+});
+
+// --- 11b. the spend ledger, limit, and the progress-over-stall rule --------
+
+test("spend:true charges the turn ledger, so a second pull in the same turn sees the remainder", () => {
+  // 12 pending, K=10: the first pull spends 10, the second pull of the same 12 admits nothing
+  // new (all 12 are already accounted for) and reports the whole remainder in the summary line.
+  const pending = Array.from({ length: 12 }, (_, i) => msg(i + 1, { topic: "build" }));
+  const store = miniStore(pending, { A: 0 });
+  const v = viewer({ topics: new Set(["build"]) });
+
+  const first = selectT1(store, v, pending, { spend: true });
+  expect(first.injected.length).toBe(DEFAULT_CAPS.maxT1PerTurn);
+  expect(first.summaryLine).toContain("+2");
+
+  const second = selectT1(store, v, pending, { spend: true });
+  expect(second.injected).toEqual([]);
+  expect(second.summaryLine).toContain("+12");
+});
+
+test("resetTurnBudget refills the ledger: a fresh turn admits K again", () => {
+  const pending = Array.from({ length: 12 }, (_, i) => msg(i + 1, { topic: "build" }));
+  const store = miniStore(pending, { A: 0 });
+  const v = viewer({ topics: new Set(["build"]) });
+
+  const first = selectT1(store, v, pending, { spend: true });
+  expect(first.injected.length).toBe(DEFAULT_CAPS.maxT1PerTurn);
+
+  resetTurnBudget(store, v.agentId);
+  const fresh = selectT1(store, v, pending, { spend: true });
+  expect(fresh.injected.length).toBe(DEFAULT_CAPS.maxT1PerTurn);
+  expect(fresh.summaryLine).toContain("+2");
+});
+
+test("limit narrows the result and the summary line counts the rest", () => {
+  const pending = Array.from({ length: 5 }, (_, i) => msg(i + 1, { topic: "build" }));
+  const store = miniStore(pending, { A: 0 });
+  const v = viewer({ topics: new Set(["build"]) });
+
+  const { injected, summaryLine } = selectT1(store, v, pending, { limit: 2 });
+  expect(injected.length).toBe(2);
+  expect(summaryLine).toContain("+3");
+  expect(summaryLine!).toContain('room{op:"read"');
+});
+
+test("the first record is always admitted even when it alone exceeds the token budget", () => {
+  // One record ~4000 tokens against B=2048: the progress-over-stall rule still injects it.
+  const pending = [
+    msg(1, { topic: "build", body: "y".repeat(16_000) }),
+    msg(2, { topic: "build" }),
+  ];
+  const store = miniStore(pending, { A: 0 });
+  const v = viewer({ topics: new Set(["build"]) });
+
+  const { injected, summaryLine } = selectT1(store, v, pending);
+  expect(injected.length).toBe(1);
+  expect(injected[0].seq).toBe(1);
+  expect(summaryLine).toContain("+1");
 });
 
 test("a failing T0-batch send surfaces as deliveryError, never an unhandled rejection", async () => {
