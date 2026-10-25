@@ -32,7 +32,7 @@ The room's retrieval needs are met without a model:
    append-only log; an index to rebuild when the model changes.
 
 **Revisit trigger:** the log growing past ~10⁵ records, or observed "we discussed this but I cannot
-find it" failures in practice. Until one of those happens, regex + (if needed) BM25 is sufficient.
+find it" failures in practice. Until one of those happens, regex + (if needed) BM25 is sufficient. Count the misses as zero-match `room recall` results carrying `recallMiss:true` in details (miss rate = misses / recalls on a non-empty log).
 
 ## If that trigger fires, here is the answer
 

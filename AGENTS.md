@@ -248,7 +248,7 @@ rather than tested.
 **Do not re-litigate these settled findings** — both are recorded with evidence:
 
 - **Embeddings are deferred, not rejected**, with a stated revisit trigger (log past ~10⁵ records, or
-  observed "cannot find it" failures). `docs/research/embeddings/CONCLUSION.md`.
+  observed "cannot find it" failures). `docs/research/embeddings/CONCLUSION.md`. Count them as zero-match `room recall` results with `recallMiss:true` in details; watch miss rate over recalls on a non-empty log.
 - **The UniiChat merge-age formula change was measured and rejected.** The spec's `first`→`last` fix
   looks authoritative (a reproducible counterexample plus a "481 of 20 001" match rate), but that
   figure describes its greedy most-due-pair loop, not our bisection. Measured on our procedure, the

@@ -147,7 +147,13 @@ export type RoomToolDetails =
       op: "zoom";
       children: Array<{ lo: number; hi: number; size: number; raw: boolean; text: string }>;
     }
-  | { ok: true; op: "recall"; matches: Array<{ seq: number; record: RoomRecord }> }
+  | {
+      ok: true;
+      op: "recall";
+      matches: Array<{ seq: number; record: RoomRecord }>;
+      recallMiss?: true;
+      logSize?: number;
+    }
   | { ok: false; error: string; holder?: string; expiresAt?: number }; // "not holder" carries the expiry
 
 // K1 — the uniform tool result. `content` is ALWAYS present (the host coerces a result without a
@@ -1252,8 +1258,20 @@ export function registerRoomTool(pi: ExtensionAPI): void {
                 if (matches.length >= RECALL_LIMIT_MAX) break;
               }
             }
+            // Miss signal is details-only (no extra write): a zero-match recall on a non-empty
+            // log is exactly the countable "cannot find it" event the embeddings revisit trigger needs.
+            const logSize = store.records.length;
+            const miss = matches.length === 0 && logSize > 0;
             return ok(
-              { ok: true, op: "recall", matches },
+              miss
+                ? {
+                    ok: true as const,
+                    op: "recall" as const,
+                    matches,
+                    recallMiss: true as const,
+                    logSize,
+                  }
+                : { ok: true as const, op: "recall" as const, matches },
               withRows(
                 `room recall → ${matches.length} match(es)`,
                 matches.map((m) => recordLine(m.record)),

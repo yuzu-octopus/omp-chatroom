@@ -956,6 +956,40 @@ test("recall: caps at 100 matches", async () => {
   expect(matches).toHaveLength(100);
 });
 
+test("recall: hit carries no miss signal", async () => {
+  const { store, ctx } = newTestStore();
+  store.append({ kind: "msg", from: "AgentA", topic: "t", body: "hello world" });
+  const result = await invokeRoom(ctx, { op: "recall", pattern: "hello" });
+  expect(result.details).toMatchObject({ ok: true, op: "recall" });
+  expect(result.details?.recallMiss).toBeUndefined();
+  expect(result.details?.logSize).toBeUndefined();
+});
+
+test("recall: zero matches on non-empty log signals a miss", async () => {
+  const { store, ctx } = newTestStore();
+  store.append({ kind: "msg", from: "AgentA", topic: "t", body: "hello world" });
+  const before = store.records.length;
+  const result = await invokeRoom(ctx, { op: "recall", pattern: "zzz-no-such-text" });
+  expect(result.details).toMatchObject({
+    ok: true,
+    op: "recall",
+    recallMiss: true,
+    logSize: before,
+  });
+  const matches = result.details?.matches as Array<unknown>;
+  expect(matches).toHaveLength(0);
+  // read-only signal: the miss must not grow the log it measures
+  expect(store.records.length).toBe(before);
+});
+
+test("recall: zero matches on empty log is not a miss", async () => {
+  const { ctx } = newTestStore();
+  const result = await invokeRoom(ctx, { op: "recall", pattern: "anything" });
+  expect(result.details).toMatchObject({ ok: true, op: "recall" });
+  expect(result.details?.recallMiss).toBeUndefined();
+  expect(result.details?.matches as Array<unknown>).toHaveLength(0);
+});
+
 // --- post tier ---
 
 test("post: returns tier in details", async () => {

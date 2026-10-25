@@ -313,7 +313,7 @@ is in `docs/research/omp-agent-chatroom/`, with `HANDOFF.md` as the current-stat
 - **Embeddings are deliberately deferred, not rejected.** Recall is the raw log and the cold tree;
   there is no vector index. The revisit trigger is the log growing past ~10⁵ records, or observed "we
   discussed this but I cannot find it" failures. See
-  `docs/research/embeddings/CONCLUSION.md`.
+  `docs/research/embeddings/CONCLUSION.md`. Count them as zero-match `room recall` results with `recallMiss:true` in details; watch miss rate over recalls on a non-empty log.
 - **The room is not a token-cost win.** Coordination overhead can exceed per-turn task tokens for
   short-turn work. Its value is correctness — preventing duplicated work on a shared resource — not
   efficiency.
