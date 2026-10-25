@@ -1107,6 +1107,9 @@ test(
       expect(res!.details).toMatchObject({ ok: true, outcome: "event" });
       expect(res!.useless).not.toBe(true);
       expect(Array.isArray(res!.content)).toBe(true);
+      // Unrecorded: the blocker still occupies <root>/.omp-room/room, so the store
+      // never opened — no room/ dir, no log, no wait record was attempted.
+      expect(fs.readdirSync(path.join(root, ".omp-room"))).toEqual(["room"]);
     } finally {
       await a.dispose();
       await peer.dispose();
