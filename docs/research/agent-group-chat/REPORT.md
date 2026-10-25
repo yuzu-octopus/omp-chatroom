@@ -1,4 +1,4 @@
-# Agent group chat: message format, context management, cache stability, group-chat UX
+# How should a multi-agent group chat coordinate effectively with cache-stable, bounded, shared context?
 
 **Answer:** Keep the room's core architecture — static routing rule in the system prompt plus the volatile digest as a tail message, the claim board, and tiered attention — because it already implements the cache-stability tail rule the literature prescribes [1][29][39]. The evidence-backed changes are small and ranked below: per-op preconditions in the tool schema, join-first and when-NOT-to-use lines in the tool description, and shrinking the always-broadcast raw tail in favor of the status ledger. Typed intent/status fields and cross-agent cache sharing are YAGNI at current scale.
 
