@@ -477,10 +477,27 @@ test("zoom descends one level and validateZoomRange rejects a non-block range", 
   expect(tree.putNode(0, 4, "l4")).toBe(true);
 
   expect(validateZoomRange(0, 4, 64)).toEqual({ ok: true });
-  expect(validateZoomRange(1, 5, 64).ok).toBe(false); // not aligned
-  expect(validateZoomRange(0, 3, 64).ok).toBe(false); // not a power of two
-  expect(validateZoomRange(0, 4, 2).ok).toBe(false); // beyond the log
-  expect(validateZoomRange(0, 1, 64).ok).toBe(false); // a singleton has no children
+  // F4 corpus: each rejection mode emits its own string so counts map to mis-call modes.
+  expect(validateZoomRange(1, 5, 64)).toMatchObject({
+    ok: false,
+    error: expect.stringContaining("multiple of"),
+  }); // not aligned
+  expect(validateZoomRange(0, 3, 64)).toMatchObject({
+    ok: false,
+    error: expect.stringContaining("power of two"),
+  }); // not a power of two
+  expect(validateZoomRange(0, 4, 2)).toMatchObject({
+    ok: false,
+    error: expect.stringContaining("0 <="),
+  }); // beyond the log
+  expect(validateZoomRange(0, 1, 64)).toMatchObject({
+    ok: false,
+    error: expect.stringContaining("power of two"),
+  }); // a singleton has no children
+  expect(validateZoomRange(0.5, 4, 64)).toMatchObject({
+    ok: false,
+    error: expect.stringContaining("integers"),
+  });
 
   const children = zoom(tree, 0, 4);
   expect(children).toHaveLength(2);

@@ -46,7 +46,7 @@
 
 ### Cache stability: mechanics + where the room stands (F1, F5; reconciliations a, e)
 
-- Prefix caching is byte-exact: tools+system+messages order fixed; up to 4 breakpoints; default 5-min TTL refreshed free on hit, optional 1h at 2× write cost; reads cost 0.1× base (0.05×/0.025× on some models) [1]. OpenAI mirrors it: prefix reuse, 4 writes max, model/tool/schema changes break prefix [2].
+- Prefix caching is byte-exact: tools+system+messages order fixed; up to 4 breakpoints; default 5-min TTL refreshed free on hit, optional 1h at 2× write cost; reads cost 0.1× base (0.05×/0.025× on some models) [1]. OpenAI mirrors it: prefix reuse with exact rendered-prefix match, up to 4 cache writes per request on GPT-5.6+ explicit mode (earlier models implicit-only); model/tool/schema/parallel_tool_calls/format/reasoning/verbosity/compaction changes break prefix [2].
 - Stability discipline: classify inputs (never-change → per-session → per-turn → per-request), volatile values to the very end, breakpoint at the end of the shared portion — never cache whole-prompt when only a prefix is shared [3]. Tool definitions must stay identical across turns [2][6].
 - Volatile shared state rides the tail: live state moves out of the system prompt into end-of-request messages [29]; A2A/volatile context routes through a runtime-context message, never the system prompt ahead of history [30]; history stays append-only [31].
 - (a) The digest is above the mutation crossover — rebuilt every turn, mutation ≈1.0 vs ~0.67 crossover (1h TTL crossover ~0.21) [single source] [27] — so the digest segment itself should not be expected to hit cache. This does not condemn the design: the crossover decides breakpoint placement, and the digest rides the tail after the cached prefix [3][39]. To decide fully, measure: per-turn digest byte-change rate by field, prefix-hit rate with/without a post-digest breakpoint, and token cost at observed cadence vs 5-min TTL.
@@ -73,7 +73,7 @@
 
 - No clean same-task multi-vs-single token benchmark exists in the files; the SWE-bench dollar figures are unverified secondary [34] (F6 Gaps). Treat all multipliers as directional.
 - Planner/worker economics cut both ways and both are true at different levels: isolating the reader is cheap per-agent while worker exploration raises system totals [7][16]. Cursor's numbers: planner tokens small but ~2/3 of cost on Opus 4.8, workers most tokens at 1/3 cost; hybrid fleets $1,339 vs single-model $10,565 at similar quality [single source] [16]. Harness hygiene (66% sysprompt trim, tool offload, explicit breakpoints, line-nos every 10th) cut user tokens 7% with no quality loss [single source] [17].
-- Cache pricing recap: Anthropic 5-min write 1.25×/read 0.1× (1h write 2×), refresh free on hit [1]; 5-min breaks even after one read, 1h needs two [secondary] [36]; OpenAI up to 90% off reused prefix on recent models, hit not guaranteed [single source] [4]. Default-TTL silently changed 1h→5min in Mar 2026 — cost assumptions must use 5-min [secondary] [37].
+- Cache pricing recap: Anthropic 5-min write 1.25×/read 0.1× (1h write 2×), refresh free on hit [1]; 5-min breaks even after one read, 1h needs two [secondary] [36]; OpenAI reused prefix discounted up to 95%, per-model rate on the pricing page (GPT-4o 50% verified on the 2024 announcement), hit not guaranteed [2][4]. Default-TTL silently changed 1h→5min in Mar 2026 — cost assumptions must use 5-min [secondary] [37].
 
 ### Ranked improvements (concrete; docs/schema unless noted)
 
@@ -103,7 +103,7 @@
 - **Digest cost at real cadence.** Per-turn byte-change rate by field, prefix-hit rate, truncation frequency — unmeasured; needs own instrumentation (F6 Gaps) [39].
 - **Misroute rate vs agent count.** Would decide typed-intent timing (reconciliation d) and validate the ~5–8-agent boundary [speculative].
 - **Same-task multi-vs-single benchmark.** None found; SWE-bench figures unverified [34] (F6 Gaps).
-- **Communication-tax share.** AgentTaxo full-PDF percentage not extracted; OpenAI caching numbers need direct-page verify (F6 Gaps) [33][4].
+- **Communication-tax share.** AgentTaxo full-PDF percentage not extracted [33] (F6 Gaps). OpenAI caching numbers verified direct 2026-10-26 — mechanics + 4-write cap primary/high; per-model % NOT on guide page, cite pricing page [2][4].
 - **Vendor internals.** Devin/Cursor budgets and summarisation thresholds, per-turn sizing optimum (1–2k is observed norm, not A/B optimum), compaction fidelity, shared-context versioning protocol — all unspecified in primaries (F2 Gaps) [10][13][8].
 - **UX evidence.** No outcome data on reactions/receipts/typing for agents, no verbose-vs-structured format cost comparison, human+agent mixing underexplored (F3 Gaps) [19]; Discord-specific guidance missing from files.
 - **Cache-provider unknowns.** Multi-agent hit-rate benchmarks, cross-provider coherence, long-session eviction vs compaction, provider routing internals (F1 Gaps) [1][2].

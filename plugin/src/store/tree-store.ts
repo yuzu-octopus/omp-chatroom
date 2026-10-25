@@ -498,18 +498,31 @@ function coverAt(T: number, alpha: number, minSize = 1): Array<[number, number]>
 /**
  * §4.1 `zoom` validation: `hi - lo` a power of two, `lo` aligned, `0 <= lo < hi <= n`. A singleton
  * has no children, so it is not a valid zoom target either.
+ *
+ * Each rejection mode carries its own string (not one shared "invalid zoom range"): F4's
+ * agent-error corpus counts `fail()` strings to rank mis-call modes, so distinct strings are the
+ * counting key. Keep the `invalid zoom range: ` prefix so old substring matches still hit.
  */
 export function validateZoomRange(
   lo: number,
   hi: number,
   n: number,
 ): { ok: true } | { ok: false; error: string } {
-  const invalid = { ok: false, error: "invalid zoom range" } as const;
-  if (!Number.isInteger(lo) || !Number.isInteger(hi)) return invalid;
-  if (!(lo >= 0 && lo < hi && hi <= n)) return invalid;
+  if (!Number.isInteger(lo) || !Number.isInteger(hi))
+    return { ok: false, error: "invalid zoom range: lo and hi must be integers" };
+  if (!(lo >= 0 && lo < hi && hi <= n))
+    return { ok: false, error: `invalid zoom range: need 0 <= lo < hi <= ${n} (got ${lo}, ${hi})` };
   const size = hi - lo;
-  if (!isPowerOfTwo(size) || size < MIN_LEVEL) return invalid;
-  if (lo % size !== 0) return invalid;
+  if (!isPowerOfTwo(size) || size < MIN_LEVEL)
+    return {
+      ok: false,
+      error: `invalid zoom range: hi-lo must be a power of two >= 2 (got ${size})`,
+    };
+  if (lo % size !== 0)
+    return {
+      ok: false,
+      error: `invalid zoom range: lo must be a multiple of hi-lo (lo=${lo}, size=${size})`,
+    };
   return { ok: true };
 }
 

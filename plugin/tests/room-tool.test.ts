@@ -902,7 +902,10 @@ test("zoom: invalid range returns error", async () => {
   }
   // lo=1 is not aligned for size=8
   const result = await invokeRoom(ctx, { op: "zoom", lo: 1, hi: 9 });
-  expect(result.details).toMatchObject({ ok: false, error: "invalid zoom range" });
+  expect(result.details).toMatchObject({
+    ok: false,
+    error: expect.stringContaining("invalid zoom range: "),
+  });
 });
 
 test("zoom: missing lo/hi returns error", async () => {
