@@ -19,7 +19,7 @@ import type { ClaimRow } from "../store/schema";
 import { appendedSince, notifyRecipients } from "../tools/room";
 import { type BoardRow, createBoardPane, sortBoardRows } from "./board-pane";
 import { type ChatRow, createChatPane, projectChatRows } from "./chat-pane";
-import { fitBlock, frameRows } from "./chrome";
+import { FrameChrome } from "./chrome";
 import {
   adoptHostTheme,
   BOX_ROUND,
@@ -131,7 +131,8 @@ export class RoomPanel implements Component {
   #offRegistry: (() => void) | undefined;
   #ageTimer: unknown;
   #width = 0;
-  #frame: readonly string[] = [];
+  /** The four fixed-height frame rows — host `PanelRows` regions (`hub-frame.ts:146-149`). */
+  #chrome = new FrameChrome();
   #lastRender: readonly string[] = [];
 
   constructor(options: RoomPanelOptions) {
@@ -174,11 +175,11 @@ export class RoomPanel implements Component {
 
     this.#stack = new Stack({
       children: [
-        { content: () => [this.#frame[0] ?? ""], grow: 0 },
+        { content: this.#chrome.top, height: 1 },
         { content: this.#split, grow: 1 },
-        { content: () => [this.#frame[1] ?? ""], grow: 0 },
-        { content: () => [this.#frame[2] ?? ""], grow: 0 },
-        { content: () => [this.#frame[3] ?? ""], grow: 0 },
+        { content: this.#chrome.divider, height: 1 },
+        { content: this.#chrome.hint, height: 1 },
+        { content: this.#chrome.bottom, height: 1 },
       ],
     });
 
@@ -228,10 +229,10 @@ export class RoomPanel implements Component {
     this.#split.setNarrowPane(this.#narrowOpen && narrow ? "right" : "left");
     const chatWidth = narrow ? 0 : (geometry.left?.width ?? 0);
     const title = this.#titleFor(narrow, width, chatWidth);
-    this.#frame = frameRows(width, title, chatWidth, HINTS, this.#options.theme);
+    this.#chrome.update(width, title, chatWidth, HINTS, this.#options.theme);
     const height = Math.max(4, this.#options.tui?.terminal?.rows || 30);
     this.#stack.setHeight(height);
-    this.#lastRender = fitBlock(this.#stack.render(width), height, width);
+    this.#lastRender = this.#stack.render(width);
     return this.#lastRender;
   }
 

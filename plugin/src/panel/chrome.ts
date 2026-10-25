@@ -1,8 +1,9 @@
-import { padding, type Theme, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
+import { Ellipsis, padding, type Theme, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
 import {
   bottomBorder,
   divider,
   dividerSplit,
+  PanelRows,
   row,
   topBorder,
   topBorderSplit,
@@ -23,12 +24,17 @@ export function fitWidth(text: string, width: number): string {
   return cutWidth < width ? cut + padding(width - cutWidth) : cut;
 }
 
-/** Pad/trim a block to exactly `size` rows of exactly `width` cells — the frame stays rectangular. */
-export function fitBlock(lines: readonly string[], size: number, width: number): string[] {
-  const out = lines.slice(0, size).map((line) => fitWidth(line, width));
-  const blank = padding(width);
-  while (out.length < size) out.push(blank);
-  return out;
+/**
+ * Width guard for a frame row. Above 4 cells the row goes through `fitWidth` (pad short rows,
+ * truncate long ones); at 4 or fewer cells the host's own `row()` helper over-fills unconditionally
+ * (`│  │`), so the row is hard-truncated following the host's own idiom in `OverlayPanel.render`
+ * (`overlay-box.ts:336-340`): fixed-width truncation with `Ellipsis.Omit` — there is no room for
+ * an ellipsis.
+ */
+function frameGuard(text: string, width: number): string {
+  if (width <= 0) return "";
+  if (width <= 4) return truncateToWidth(text, width, Ellipsis.Omit);
+  return fitWidth(text, width);
 }
 
 /**
@@ -37,7 +43,7 @@ export function fitBlock(lines: readonly string[], size: number, width: number):
  * means the split is collapsed, so the title takes the whole rule (§6.2 narrow fallback).
  */
 export function frameTopRow(width: number, title: string, chatWidth: number): string {
-  return fitWidth(
+  return frameGuard(
     chatWidth > 2 ? topBorderSplit(width, title, chatWidth - 2) : topBorder(width, title),
     width,
   );
@@ -45,36 +51,56 @@ export function frameTopRow(width: number, title: string, chatWidth: number): st
 
 /** Section rule closing the pane area; split under the divider, full-width when collapsed. */
 export function frameDividerRow(width: number, chatWidth: number): string {
-  return fitWidth(chatWidth > 2 ? dividerSplit(width, chatWidth - 2) : divider(width), width);
+  return frameGuard(chatWidth > 2 ? dividerSplit(width, chatWidth - 2) : divider(width), width);
 }
 
 export function frameBottomRow(width: number): string {
-  return fitWidth(bottomBorder(width), width);
+  return frameGuard(bottomBorder(width), width);
 }
 
 /** One bordered hint row (`│ esc close · j/k move │`) carrying the key map (§6.6). */
 export function frameHintRow(width: number, hints: readonly string[], theme: Theme): string {
-  return fitWidth(
+  return frameGuard(
     row(hints.map((hint) => theme.fg("dim", hint)).join(theme.sep.dot), width),
     width,
   );
 }
 
 /**
- * The four chrome rows in render order. The panel interleaves the pane body between `[0]` and
- * `[1]` (§6.2: top border → split → divider → footer → bottom border).
+ * The four fixed-height frame rows as host `PanelRows` regions — the host's own split-frame
+ * pattern (`hub-frame.ts:146-149`): top border, divider, hint, bottom, each pinned to exactly one
+ * row via `setHeight(1)`. The split chrome the panel emits (`topBorderSplit`/`dividerSplit`) is
+ * kept as the row content — the host's `OverlayPanel` never emits those, which is why full
+ * `OverlayPanel` adoption was rejected.
+ *
+ * The regions render through the panel's `Stack` as `{ content, height: 1 }` children
+ * (`hub-frame.ts:183-191`); the `Stack` re-asserts the pin per frame via `setHeight`, and pads or
+ * clips every row to the exact width, so no hand-rolled `fitBlock` is needed.
  */
-export function frameRows(
-  width: number,
-  title: string,
-  chatWidth: number,
-  hints: readonly string[],
-  theme: Theme,
-): string[] {
-  return [
-    frameTopRow(width, title, chatWidth),
-    frameDividerRow(width, chatWidth),
-    frameHintRow(width, hints, theme),
-    frameBottomRow(width),
-  ];
+export class FrameChrome {
+  readonly top = new PanelRows();
+  readonly divider = new PanelRows();
+  readonly hint = new PanelRows();
+  readonly bottom = new PanelRows();
+
+  constructor() {
+    this.top.setHeight(1);
+    this.divider.setHeight(1);
+    this.hint.setHeight(1);
+    this.bottom.setHeight(1);
+  }
+
+  /** Refresh the four rows — the `setLines` half of the host pattern (`hub-frame.ts:354-357`). */
+  update(
+    width: number,
+    title: string,
+    chatWidth: number,
+    hints: readonly string[],
+    theme: Theme,
+  ): void {
+    this.top.setLines([frameTopRow(width, title, chatWidth)]);
+    this.divider.setLines([frameDividerRow(width, chatWidth)]);
+    this.hint.setLines([frameHintRow(width, hints, theme)]);
+    this.bottom.setLines([frameBottomRow(width)]);
+  }
 }
