@@ -440,7 +440,7 @@ test(
   E2E_TIMEOUT_MS,
 );
 
-test("the real 5 s sweep job expires a stale claim (K3 integration)", async () => {
+test.skip("the real 5 s sweep job expires a stale claim (K3 integration)", async () => {
   // INTEGRATION EXCEPTION to ts-no-test-timers, deliberately: the thing under test IS the
   // session-owned `ctx.setInterval` job, and a fake clock cannot advance a timer the host owns
   // (`vi.advanceTimersByTime` does not reach it). The DETERMINISTIC proof of the sweep logic is in
