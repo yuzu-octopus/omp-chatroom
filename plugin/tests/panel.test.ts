@@ -821,6 +821,24 @@ test("panel `r` releases through the arbiter: reason released + waiter promoted 
   expect(store.claims.get("build/step")?.holder).toBe("W");
 });
 
+test("panel `r` on a stale held row refreshes without throwing or appending a release", async () => {
+  const pi = { on: () => {} } as unknown as ExtensionAPI;
+  const capture = captureTerminalInput();
+  await openRoomPanel(pi, capture.tuiCtx);
+  const store = roomStoreFor(capture.tuiCtx);
+  // Main holds the lease; the board projects it as held.
+  grant(store, "build/step", "Main", 60_000);
+  expect(capture.handler("2")).toEqual({ consume: true });
+  const recordsBefore = store.records.length;
+  // The race: the claim leaves the map without a log append (no listener fires), so the board
+  // cache still shows the row as held when the user presses `r`.
+  store.claims.delete("build/step");
+  expect(capture.handler("r")).toEqual({ consume: true });
+  // No throw, no release record appended by the panel, and the board re-projects cleanly.
+  expect(store.records.length).toBe(recordsBefore);
+  expect(store.records.filter((r) => r.kind === "release").length).toBe(0);
+});
+
 // --- the live-pty findings: the index leak, the focus, the selection --------
 
 test("`r` in CHAT focus releases nothing (the old shared index released an arbitrary claim)", () => {
