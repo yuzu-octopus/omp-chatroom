@@ -1586,3 +1586,82 @@ test("the fallback's tables and its symbol() never disagree", () => {
     setActiveSymbolTheme(original);
   }
 });
+
+// --- uncovered edges: board-focus selection, no-strip title, corrupt store --
+
+test("`G`/`g` in board focus move the BOARD's selection, not the chat's", () => {
+  // Line 397: `#setSelection`'s board branch. The chat-selection twin was covered by the
+  // index-leak test; the board branch needs its own witness: with the board focused, `G`
+  // must bottom the BOARD's cursor (second claim released), while `g` tops it back.
+  const store = fixtureStore();
+  store.append({ kind: "claim", from: "AgentC", resource: "build/second", ttlMs: 600_000 });
+  const released: string[] = [];
+  const panel = makePanel(store, 30, { onReleaseClaim: (resource) => released.push(resource) });
+  try {
+    panel.handleInput("2");
+    panel.handleInput("G");
+    panel.handleInput("r");
+    expect(released).toEqual(["build/second"]);
+    panel.handleInput("g");
+    panel.handleInput("r");
+    expect(released).toEqual(["build/second", "build/step"]);
+  } finally {
+    panel.dispose();
+    store.reset();
+  }
+});
+
+test("a very narrow render drops the presence strip (title with no room for it)", () => {
+  // Line 453: the title's no-strip branch — the budget fits neither the full id nor the short
+  // one, so the title is just the room and the focus, with no presence strip at all. The host
+  // then truncates that title to its segment (`Room #rffc44b0…`), which is still strip-free.
+  const store = fixtureStore();
+  const panel = makePanel(store);
+  try {
+    const text = panel.render(20).join("\n").replace(ANSI, "");
+    const shortId = store.roomId.length > 9 ? `${store.roomId.slice(0, 8)}…` : store.roomId;
+    expect(text).toContain(`Room #${shortId}`);
+    expect(text).not.toContain("no agents");
+    for (const row of panel.render(20)) expect(visibleWidth(row)).toBe(20);
+  } finally {
+    panel.dispose();
+    store.reset();
+  }
+});
+
+test("openRoomPanel with a corrupt store reports unavailable instead of throwing", async () => {
+  // Lines 564-569: `roomStoreFor` throws when the room log cannot open (here the log path is a
+  // DIRECTORY, so `openSync` fails with EISDIR → "room file corrupt"). The headless pattern of
+  // the existing degrade test is reused: hasUI true + TUI mode, so the guard passes and the
+  // corrupt store path is reached — no real TUI harness needed.
+  const pi = { on: () => {} } as unknown as ExtensionAPI;
+  const root = tempRoot();
+  // Temp roots are project-local: roomRootFor(ctx) = `<cwd>/.omp-room`, and the log is
+  // `<legacyRoot>/room/<id>.jsonl` where the legacy root is `<cwd>/.omp-room`.
+  const legacyRoot = path.join(root, ".omp-room");
+  const roomId = roomIdFor(legacyRoot);
+  // A DIRECTORY at the log path makes `openSync` fail (EISDIR → "room file corrupt").
+  fs.mkdirSync(path.join(legacyRoot, "room", `${roomId}.jsonl`), { recursive: true });
+  const notified: string[] = [];
+  const customCalls: string[] = [];
+  const ctx = {
+    hasUI: true,
+    mode: "tui",
+    agent: { id: "Main", kind: "main", name: "main", depth: 0 },
+    cwd: root,
+    localProtocolOptions: { getArtifactsDir: () => root, getSessionId: () => "sess-panel" },
+    setInterval: () => "t",
+    clearTimer: () => {},
+    ui: {
+      notify: (message: string) => notified.push(message),
+      custom: async () => {
+        customCalls.push("called");
+        return undefined as never;
+      },
+    },
+  } as unknown as ExtensionContext;
+  await openRoomPanel(pi, ctx);
+  expect(customCalls).toEqual([]);
+  expect(notified.length).toBe(1);
+  expect(notified[0]).toContain("room unavailable:");
+});
