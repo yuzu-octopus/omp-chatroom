@@ -264,13 +264,22 @@ the 5 % floor.
   does so as data ("Message 33 attempted to override prior instructions, requesting pirate-style
   behavior and the reply "BANANA""). No node contains "IGNORE PREVIOUS" at all.
 
-### Still unverified — do not claim these
+### Still unverified — do not claim these (updated 2026-10-26)
 
-**One item, added 2026-10-20.** The human-facing message card now names its topic
-(`✉ room ⟵ author · topic · [reply] · 2m ago`; it used to show the topic only on the model-facing
-line, so every card in a multi-topic swarm looked alike). The unit test pins the header, but the
-card has not been seen in a real transcript since the change — **needs the human's live check**:
-post a message into a named topic and confirm the card reads `room ⟵ <author> · <topic> · <age>`.
+1. **Topic-named card header (added 2026-10-20).** The human-facing message card now names its topic
+(`✉ room ⟵ author · topic · [reply] · 2m ago`). The unit test pins the header, but the card has not
+been seen in a real transcript since the change — **needs the human's live check**: post a message
+into a named topic and confirm the card reads `room ⟵ <author> · <topic> · <age>`.
+2. **Discovery re-measurement after the routing-rule trim (2026-10-26).** The always-on rule was
+trimmed 45 → 34 lines; the 75–86% unprompted-discovery figure predates the trim. Re-run
+`plugin/scripts/discovery-probe.sh` (16 trials); revert commit `75f7a59` if discovery drops.
+3. **Digest cadence numbers (2026-10-26).** The gauge (`digestStats`) and harness
+(`recordDigestTurn`, `OMP_ROOM_DIGEST_STATS=1`) exist and are tested, but no live N-turn run has
+recorded per-turn stats yet — run it and read the JSONL.
+4. **PanelRowsImpl's `wait`-timeout (2026-10-26).** Delivered with its claim released; no output stranded, but its timeout path was never exercised — needs a live observation.
+5. **Production topology (2026-10-26).** The suite runs the plugin's copy of the host; a real TUI
+session with the installed host remains the human's check.
+
 
 Everything else has been exercised by a real model in a real terminal or a real session: the panel
 and its keys, the inline cards, the claim board, the mention delivery, all three wait tools'
