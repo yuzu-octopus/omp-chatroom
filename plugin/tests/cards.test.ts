@@ -22,7 +22,12 @@ import {
   renderMentionCard,
   renderMessageCard,
 } from "../src/cards/message-cards";
-import { renderRoomCall, renderWaitCall } from "../src/cards/tool-cards";
+import {
+  renderRoomCall,
+  renderWaitCall,
+  renderWaitResult,
+  type WaitDetails,
+} from "../src/cards/tool-cards";
 import type { RoomRecord } from "../src/store/schema";
 
 ensureThemeSync();
@@ -551,4 +556,95 @@ test("the tool cards' icons come from the theme's symbol set", () => {
 
   const wait = render(renderWaitCall({ timeout: 1000 }, options, marked), 120).join("\n");
   expect(wait).toContain("<status.pending>");
+});
+
+// --- the wait RESULT card per mechanism × outcome ---------------------------
+//
+// `waitResultSummary` maps the three wait tools' result `details` to card meta lines
+// (event/acquired/message/timeout/aborted, the ok:false error path, the undefined-details
+// path). Each row below renders the RESULT card for one mechanism × outcome and asserts the
+// meta line shows — the exact strings `waitResultSummary` produces.
+
+function waitResultText(details: WaitDetails | undefined): string {
+  const options = {} as ToolRenderResultOptions;
+  const content = [{ type: "text", text: "wait" }] as {
+    type: "text";
+    text: string;
+  }[];
+  const result = details === undefined ? { content } : { content, details };
+  return render(renderWaitResult(result, options, theme), 120).join("\n");
+}
+
+test("wait result card: wait_for_claim granted shows the acquired resource", () => {
+  const out = waitResultText({
+    ok: true,
+    outcome: "event",
+    acquired: true,
+    claim: {
+      resource: "build/step",
+      holder: "agent-1",
+      ttlMs: 300_000,
+      acquiredAt: Date.now(),
+      seq: 3,
+      gen: 1,
+      dependsOn: [],
+    },
+  });
+  expect(out).toContain("acquired build/step");
+});
+
+test("wait result card: wait_for_claim timeout shows the timeout meta", () => {
+  const out = waitResultText({ ok: true, outcome: "timeout", acquired: false });
+  expect(out).toContain("timeout");
+  expect(out).not.toContain("acquired");
+});
+
+test("wait result card: wait_for_message event with a message shows the message meta", () => {
+  const out = waitResultText({ ok: true, outcome: "event", message: MSG });
+  expect(out).toContain("message");
+});
+
+test("wait result card: wait_for_message timeout shows the timeout meta", () => {
+  const out = waitResultText({ ok: true, outcome: "timeout" });
+  expect(out).toContain("timeout");
+  expect(out).not.toContain("message");
+});
+
+test("wait result card: wait_for_agent event shows the event meta", () => {
+  const out = waitResultText({
+    ok: true,
+    outcome: "event",
+    agents: [{ id: "agent-2", status: "idle" }],
+  });
+  expect(out).toContain("event");
+});
+
+test("wait result card: wait_for_agent aborted shows the aborted meta", () => {
+  const out = waitResultText({
+    ok: true,
+    outcome: "aborted",
+    agents: [{ id: "agent-2", status: "aborted" }],
+  });
+  expect(out).toContain("aborted");
+});
+
+test("wait result card: ok:false shows the error as the badge, not as meta", () => {
+  const out = waitResultText({
+    ok: false,
+    outcome: "timeout",
+    acquired: false,
+    error: "store closed",
+  });
+  expect(out).toContain("store closed");
+  expect(out).not.toContain("timeout");
+});
+
+test("wait result card: undefined details renders the head with no meta body", () => {
+  const out = waitResultText(undefined);
+  expect(out).toContain("Wait");
+  expect(out).not.toContain("event");
+  expect(out).not.toContain("timeout");
+  expect(out).not.toContain("aborted");
+  expect(out).not.toContain("message");
+  expect(out).not.toContain("acquired");
 });
