@@ -14,7 +14,7 @@ A correction for a RUNNING agent goes to `agent://<id>`: a room mention is T0, s
 that agent (at its next step boundary) — but it steers every agent the mention classifies, not just
 the one you meant. The room is for shared context, not private redirection.
 
-An interrupt *intent* is not an interrupt *strength*. A room **mention** is T0: it wakes an idle
+An interrupt _intent_ is not an interrupt _strength_. A room **mention** is T0: it wakes an idle
 agent and steers a streaming one, at its next step boundary. A plain room post (T1) is weaker — a
 non-interrupting aside, so a running agent may keep working on the wrong thing until its next step
 boundary. `agent://<id>` is the precise channel: one addressee, a bounded blast radius, no shared
