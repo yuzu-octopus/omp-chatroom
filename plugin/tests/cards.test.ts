@@ -24,11 +24,13 @@ import {
 } from "../src/cards/message-cards";
 import {
   renderRoomCall,
+  renderRoomResult,
   renderWaitCall,
   renderWaitResult,
   type WaitDetails,
 } from "../src/cards/tool-cards";
 import type { RoomRecord } from "../src/store/schema";
+import type { RoomToolDetails } from "../src/tools/room";
 
 ensureThemeSync();
 
@@ -647,4 +649,149 @@ test("wait result card: undefined details renders the head with no meta body", (
   expect(out).not.toContain("aborted");
   expect(out).not.toContain("message");
   expect(out).not.toContain("acquired");
+});
+
+// --- the room RESULT card per op -------------------------------------------
+//
+// `roomResultSummary` maps each room op's result `details` to card meta lines (joined/cursor,
+// record counts, posted/seq, granted/holder, claim/roster counts, topic/block/child/match counts,
+// the ok:false error path, the missing-error "failed" fallback). Each row below renders the
+// RESULT card for one op and asserts the meta line shows — the exact strings `roomResultSummary`
+// produces.
+
+function roomResultText(details: RoomToolDetails): string {
+  const options = {} as ToolRenderResultOptions;
+  const content = [{ type: "text", text: "room" }] as {
+    type: "text";
+    text: string;
+  }[];
+  return render(renderRoomResult({ content, details }, options, theme), 120).join("\n");
+}
+
+test("room result card: join shows the joined meta and the cursor", () => {
+  const out = roomResultText({ ok: true, op: "join", digest: "d", cursor: 7 });
+  expect(out).toContain("joined");
+  expect(out).toContain("7 cursor");
+});
+
+test("room result card: read shows the record count and whether more arrived", () => {
+  const more = roomResultText({
+    ok: true,
+    op: "read",
+    records: [MSG, NOTE],
+    cursor: 8,
+    more: true,
+  });
+  expect(more).toContain("2 record(s)");
+  expect(more).toContain("more");
+
+  const caughtUp = roomResultText({ ok: true, op: "read", records: [], cursor: 8, more: false });
+  expect(caughtUp).toContain("0 record(s)");
+  expect(caughtUp).toContain("caught up");
+});
+
+test("room result card: post shows the posted meta and the seq", () => {
+  const out = roomResultText({ ok: true, op: "post", id: "m9", seq: 9, tier: "T0" });
+  expect(out).toContain("posted");
+  expect(out).toContain("seq 9");
+});
+
+test("room result card: claim shows the granted meta and the holder", () => {
+  const out = roomResultText({ ok: true, op: "claim", holder: "agent-1", expiresAt: Date.now() });
+  expect(out).toContain("granted");
+  expect(out).toContain("agent-1");
+});
+
+test("room result card: release shows the released meta", () => {
+  const out = roomResultText({ ok: true, op: "release" });
+  expect(out).toContain("released");
+});
+
+test("room result card: board shows the claim and member counts", () => {
+  const out = roomResultText({
+    ok: true,
+    op: "board",
+    board: {
+      ok: true,
+      claims: [
+        {
+          resource: "build/step",
+          holder: "agent-1",
+          ttlMs: 300_000,
+          expiresAt: Date.now(),
+          acquiredAt: Date.now(),
+          waiting: [],
+          dependsOn: [],
+        },
+      ],
+      roster: [{ agentId: "agent-1", status: "idle", cursor: 1, lag: 0, topics: [] }],
+      topics: [],
+      deliveries: { T0: 0, T1: 0, T2: 0 },
+    },
+  });
+  expect(out).toContain("1 claim(s)");
+  expect(out).toContain("1 member(s)");
+});
+
+test("room result card: topics shows the topic count", () => {
+  const out = roomResultText({
+    ok: true,
+    op: "topics",
+    topics: [
+      { topic: "build", lastSeq: 1, unread: 0 },
+      { topic: "plan", lastSeq: 2, unread: 1 },
+    ],
+  });
+  expect(out).toContain("2 topic(s)");
+});
+
+test("room result card: mute and unmute show their own meta", () => {
+  expect(roomResultText({ ok: true, op: "mute" })).toContain("muted");
+  expect(roomResultText({ ok: true, op: "unmute" })).toContain("unmuted");
+});
+
+test("room result card: tree shows the block count", () => {
+  const out = roomResultText({
+    ok: true,
+    op: "tree",
+    blocks: [{ lo: 1, hi: 2, size: 1, raw: true }],
+  });
+  expect(out).toContain("1 block(s)");
+});
+
+test("room result card: zoom shows the child count", () => {
+  const out = roomResultText({
+    ok: true,
+    op: "zoom",
+    children: [
+      { lo: 1, hi: 2, size: 1, raw: true, text: "a" },
+      { lo: 3, hi: 4, size: 1, raw: true, text: "b" },
+    ],
+  });
+  expect(out).toContain("2 child(ren)");
+});
+
+test("room result card: recall shows the match count", () => {
+  const out = roomResultText({ ok: true, op: "recall", matches: [{ seq: 1, record: MSG }] });
+  expect(out).toContain("1 match(es)");
+});
+
+test("room result card: ok:false shows the error as the badge, not as meta", () => {
+  const out = roomResultText({ ok: false, error: "not holder" });
+  expect(out).toContain("not holder");
+  expect(out).not.toContain("joined");
+  expect(out).not.toContain("posted");
+});
+
+test("room result card: ok:false without an error shows the failed fallback", () => {
+  // The union types `error` as required, so the missing field arrives via an untyped boundary.
+  const out = roomResultText({ ok: false } as unknown as RoomToolDetails);
+  expect(out).toContain("failed");
+});
+
+test("room result card: an ok:false with a non-string error shows the failed fallback", () => {
+  // A forged details payload could carry a non-string error; the card still shows "failed".
+  const out = roomResultText({ ok: false, error: 42 } as unknown as RoomToolDetails);
+  expect(out).toContain("failed");
+  expect(out).not.toContain("42");
 });
