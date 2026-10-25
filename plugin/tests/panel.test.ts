@@ -37,6 +37,7 @@ import {
   PANEL_SPLIT_AT,
   RoomPanel,
   type RoomPanelOptions,
+  registerPanel,
 } from "../src/panel/panel";
 import { renderRosterStrip, statusCounts } from "../src/panel/roster-strip";
 import { enqueueWaiter, grant } from "../src/store/claims";
@@ -442,6 +443,48 @@ test("openRoomPanel degrades instead of throwing outside a TUI", async () => {
   await openRoomPanel(pi, rpc);
 
   expect(notified.length).toBeGreaterThan(0);
+});
+
+test("openRoomPanel notifies instead of throwing when the overlay fails", async () => {
+  const pi = { on: () => {} } as unknown as ExtensionAPI;
+  const notified: string[] = [];
+  const ctx = {
+    hasUI: true,
+    mode: "tui",
+    agent: { id: "Main", kind: "main", name: "main", depth: 0 },
+    cwd: tempRoot(),
+    localProtocolOptions: { getArtifactsDir: () => tempRoot(), getSessionId: () => "s" },
+    setInterval: () => "t",
+    clearTimer: () => {},
+    ui: {
+      notify: (message: string) => notified.push(message),
+      custom: async () => {
+        throw new Error("overlay boom");
+      },
+    },
+  } as unknown as ExtensionContext;
+  await openRoomPanel(pi, ctx);
+  expect(notified.some((m) => m.startsWith("Room panel unavailable:"))).toBe(true);
+});
+
+test("registerPanel registers the shortcut only when the flag is set", () => {
+  const shortcuts: string[] = [];
+  const closers: Array<() => void> = [];
+  const plain = {
+    on: (_event: string, _handler: () => void) => {},
+    getFlag: (_name: string) => undefined,
+    registerShortcut: (key: string) => shortcuts.push(key),
+  } as unknown as ExtensionAPI;
+  registerPanel(plain);
+  expect(shortcuts).toEqual([]);
+  const flagged = {
+    on: (_event: string, _handler: () => void) => {},
+    getFlag: (_name: string) => "ctrl-r",
+    registerShortcut: (key: string) => shortcuts.push(key),
+  } as unknown as ExtensionAPI;
+  registerPanel(flagged);
+  expect(shortcuts).toEqual(["ctrl-r"]);
+  for (const close of closers) close();
 });
 
 // --- /room command wiring -------------------------------------------------
