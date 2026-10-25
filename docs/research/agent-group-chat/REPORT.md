@@ -51,7 +51,6 @@
 - Volatile shared state rides the tail: live state moves out of the system prompt into end-of-request messages [29]; A2A/volatile context routes through a runtime-context message, never the system prompt ahead of history [30]; history stays append-only [31].
 - (a) The digest is above the mutation crossover — rebuilt every turn, mutation ≈1.0 vs ~0.67 crossover (1h TTL crossover ~0.21) [single source] [27] — so the digest segment itself should not be expected to hit cache. This does not condemn the design: the crossover decides breakpoint placement, and the digest rides the tail after the cached prefix [3][39]. To decide fully, measure: per-turn digest byte-change rate by field, prefix-hit rate with/without a post-digest breakpoint, and token cost at observed cadence vs 5-min TTL.
 - (e) Position satisfies the tail rule by design: render order is tools → system (static rule only) → messages/history + digest-as-message [1][39]. Same-agent view: static prefix stays byte-identical, only the tail mutates — prefix hits, tail misses, matching "breakpoint at end of shared portion" [3]. Cross-agent view: isolation + exact-byte-match [1] plus per-agent histories make cross-agent sharing a non-goal — no cross-agent invalidation is introduced. Unconfirmed: exact host attach order of the `before_agent_start` message; needs host prompt/cache logs [39].
-- No clean same-task multi-vs-single token benchmark exists in the files; the SWE-bench dollar figures are unverified secondary [34] (F6 Gaps).
 ### Context sizing: how much each agent should see (F2; reconciliations b, c)
 
 - Subagents run in isolated windows everywhere: Claude Code (own prompt/tools, summary returns; keep `description` fields short, ~15k tokens triggers a warning) [10]; Cursor (clean context, ~10 parallel Explore searches, model routing) [13]; Anthropic research (lead + parallel explorers + grounding citation agent) [7]; Devin (manager/child, state communicated deliberately, never assumed) [15].
@@ -68,13 +67,13 @@
 - Threads + visible turn ownership: subproblems in threads, goal/decisions/status in main; show who is responding and why [19][22]. Threading-forcing is contested (always-thread vs main-summary-plus-artifacts) [22]; orchestration style is a determinism/flexibility trade (round-robin vs selector vs coordinator vs peer mentions) [21][22].
 - Envelope hygiene: stable IDs, idempotency, expiry; routing separate from content; no secrets in chat [23][24]. Floor/mediation/delegation model fits agent turn-taking [25]. Tool-mediated comm (all inter-agent messages via tools) buys auditability but requires teaching the system prompt [26].
 - (d) `body`+`topic` does NOT satisfy explicit routing — `intent`, per-post `status`, and working `reply_to` are genuinely missing [20][38] — but YAGNI holds under manager-dispatch at small scale, where the dispatcher (not the schema) routes. Equivalents already present: `topic`≈thread/channel, claim `topic/key`≈ownership, wait tools≈awaiting/blocked, T0 mention≈`recipient_ids` steering [38][39]. The fields start paying past ~5–8 concurrent agents or under peer-to-peer negotiation [speculative threshold, needs measurement]. Deciding datum: misroute rate vs agent count in real room logs.
-- (f) `cursor`/`lag` + status ordering are staleness/ownership signals (who has seen record N, who is live/stale) — directly load-bearing given no versioned shared-context protocol exists [39 plus F2 gap]. T0 steering, claim-expiry sweep with dedup, and tiered bounded delivery are ownership/delivery machinery [39]. Droppable: reactions/receipts/typing [19], TUI glyphs/colors/thread badges (not model context) [39]. Boundary: staleness/ownership (keep) vs acknowledgment/decoration (drop).
+- (f) `cursor`/`lag` + status ordering are staleness/ownership signals (who has seen record N, who is live/stale) — directly load-bearing given no versioned shared-context protocol exists in the primaries (F2 Gaps). T0 steering, claim-expiry sweep with dedup, and tiered bounded delivery are ownership/delivery machinery [39]. Droppable: reactions/receipts/typing [19], TUI glyphs/colors/thread badges (not model context) [39]. Boundary: staleness/ownership (keep) vs acknowledgment/decoration (drop).
 
 ### Cost and token economics (F6; reconciliation c)
-- (f) `cursor`/`lag` + status ordering are staleness/ownership signals (who has seen record N, who is live/stale) — directly load-bearing given no versioned shared-context protocol exists in the primaries [39] (F2 Gaps). T0 steering, claim-expiry sweep with dedup, and tiered bounded delivery are ownership/delivery machinery [39]. Droppable: reactions/receipts/typing [19], TUI glyphs/colors/thread badges (not model context) [39]. Boundary: staleness/ownership (keep) vs acknowledgment/decoration (drop).
-- No clean same-task multi-vs-single token benchmark exists in the files; the SWE-bench dollar figures are unverified secondary [34-derived]. Treat all multipliers as directional.
+
+- No clean same-task multi-vs-single token benchmark exists in the files; the SWE-bench dollar figures are unverified secondary [34] (F6 Gaps). Treat all multipliers as directional.
 - Planner/worker economics cut both ways and both are true at different levels: isolating the reader is cheap per-agent while worker exploration raises system totals [7][16]. Cursor's numbers: planner tokens small but ~2/3 of cost on Opus 4.8, workers most tokens at 1/3 cost; hybrid fleets $1,339 vs single-model $10,565 at similar quality [single source] [16]. Harness hygiene (66% sysprompt trim, tool offload, explicit breakpoints, line-nos every 10th) cut user tokens 7% with no quality loss [single source] [17].
-- Cache pricing recap: Anthropic 5-min write 1.25×/read 0.1× (1h write 2×), refresh free on hit [1]; 5-min breaks even after one read, 1h needs two [secondary] [36]; OpenAI up to 90% off reused prefix on recent models, hit not guaranteed [single source] [4-derived-via-F6]. Default-TTL silently changed 1h→5min in Mar 2026 — cost assumptions must use 5-min [secondary] [37].
+- Cache pricing recap: Anthropic 5-min write 1.25×/read 0.1× (1h write 2×), refresh free on hit [1]; 5-min breaks even after one read, 1h needs two [secondary] [36]; OpenAI up to 90% off reused prefix on recent models, hit not guaranteed [single source] [4]. Default-TTL silently changed 1h→5min in Mar 2026 — cost assumptions must use 5-min [secondary] [37].
 
 ### Ranked improvements (concrete; docs/schema unless noted)
 
@@ -83,11 +82,11 @@
 3. When-NOT-to-use two-liner in `ROOM_DESCRIPTION` (no one-step/strictly-sequential work; no bulk output — artifact + id instead) — cost guard for an always-loaded (`essential`) tool [38][41].
 4. Shrink the always-broadcast raw tail: lower the 50-record tail, summarize-once, or push bulk payloads to artifact references [7][39]. Nothing here changes the ledger-first truncation order [39].
 5. `key`/`since`/`gen`/`recall` describe cross-refs (wait_for_claim string parity; cursor-advance on read; gen opt-in fence; tree-first/recall-budget cues) [38].
-6. Instrument before optimizing: log digest byte-change rate by field, prefix-hit rate, and which `fail()` strings fire most — today's ranking is by reasoning about failure cost, not a mis-call corpus [38-gaps].
+6. Instrument before optimizing: log digest byte-change rate by field, prefix-hit rate, and which `fail()` strings fire most — today's ranking is by reasoning about failure cost, not a mis-call corpus (F4 Gaps) [38].
 
 ### Do not change
 
-- Cache pricing recap: Anthropic 5-min write 1.25×/read 0.1× (1h write 2×), refresh free on hit [1]; 5-min breaks even after one read, 1h needs two [secondary] [36]; OpenAI up to 90% off reused prefix on recent models, hit not guaranteed [single source] [4]. Default-TTL silently changed 1h→5min in Mar 2026 — cost assumptions must use 5-min [secondary] [37].
+- The 12-op monolith (matches native 9-op `todo` shape [40]); description + schema stay tight because `essential` load taxes every turn [38].
 - Static-rule-only system prompt + digest-as-tail-message [39]; never-throw/content-always-present contract [38].
 - Claim board first-writer-wins + mandatory TTL + expiry sweep with waiter promotion and T0 notice [39].
 - T0/T1/T2 classification, bounded delivery with coalescing, turn budgets, cursor persistence [39].
@@ -97,18 +96,18 @@
 
 - Vs 1:1 DMs: the room is a coordination artifact, not a chat — exclusive ownership with TTL, one durable replayable record a late joiner can read, tiered attention with bounded waits, and a cold-summary tree have no 1:1 equivalent in the findings; the plugin's own rule routes private redirection to `agent://` and shared work to the room [38][41][39]. Head-to-head measurement vs host `agent://` does not exist in these findings — say so in the README, don't overclaim.
 - Vs IRC-style: IRC gives tags/threads without agent identity or ownership [23]; Slack's agent guidance wants streaming, threading, and confirmations, not receipts [19]; A2A/AutoGen want machine-readable routing over prose mentions [20][21]. The room keeps the IRC shape agents already parse (topics, tail, mentions) and adds exactly the three things chat lacks: ownership (claims), staleness (cursor/lag), and steering (T0/T1/T2 + waits) [39].
-- 6. Instrument before optimizing: log digest byte-change rate by field, prefix-hit rate, and which `fail()` strings fire most — today's ranking is by reasoning about failure cost, not a mis-call corpus (F4 Gaps) [38].
+
 ## Open questions
 
 - **Host `agent://` semantics.** No findings file covers the host's 1:1 channel (queue, lease, expiry) — the vs-native justification rests on the plugin's own routing rule [41], not host source. Resolve with a host-source read.
-- **Digest cost at real cadence.** Per-turn byte-change rate by field, prefix-hit rate, truncation frequency — unmeasured; F6 flags digest-vs-full-rebroadcast as needs-own-instrumentation [39][F6-gaps].
+- **Digest cost at real cadence.** Per-turn byte-change rate by field, prefix-hit rate, truncation frequency — unmeasured; needs own instrumentation (F6 Gaps) [39].
 - **Misroute rate vs agent count.** Would decide typed-intent timing (reconciliation d) and validate the ~5–8-agent boundary [speculative].
-- **Same-task multi-vs-single benchmark.** None found; SWE-bench figures unverified [F6-gaps].
-- **Communication-tax share.** AgentTaxo full-PDF percentage not extracted; OpenAI caching numbers need direct-page verify [F6-gaps].
-- **Vendor internals.** Devin/Cursor budgets and summarisation thresholds, per-turn sizing optimum (1–2k is observed norm, not A/B optimum), compaction fidelity, shared-context versioning protocol — all unspecified in primaries [F2-gaps].
-- **UX evidence.** No outcome data on reactions/receipts/typing for agents, no verbose-vs-structured format cost comparison, human+agent mixing underexplored [F3-gaps]; Discord-specific guidance missing from files.
-- **Cache-provider unknowns.** Multi-agent hit-rate benchmarks, cross-provider coherence, long-session eviction vs compaction, provider routing internals [F1-gaps].
-- **Schema unknowns.** Host `prompt.render` support for descriptions, whether agents read `describe` vs `description`, no error corpus to reorder fixes [F4-gaps]; exact host cache boundaries for the digest message [39].
+- **Same-task multi-vs-single benchmark.** None found; SWE-bench figures unverified [34] (F6 Gaps).
+- **Communication-tax share.** AgentTaxo full-PDF percentage not extracted; OpenAI caching numbers need direct-page verify (F6 Gaps) [33][4].
+- **Vendor internals.** Devin/Cursor budgets and summarisation thresholds, per-turn sizing optimum (1–2k is observed norm, not A/B optimum), compaction fidelity, shared-context versioning protocol — all unspecified in primaries (F2 Gaps) [10][13][8].
+- **UX evidence.** No outcome data on reactions/receipts/typing for agents, no verbose-vs-structured format cost comparison, human+agent mixing underexplored (F3 Gaps) [19]; Discord-specific guidance missing from files.
+- **Cache-provider unknowns.** Multi-agent hit-rate benchmarks, cross-provider coherence, long-session eviction vs compaction, provider routing internals (F1 Gaps) [1][2].
+- **Schema unknowns.** Host `prompt.render` support for descriptions, whether agents read `describe` vs `description`, no error corpus to reorder fixes (F4 Gaps) [38][40]; exact host cache boundaries for the digest message [39].
 
 ## Sources
 
@@ -129,16 +128,16 @@ Vendor engineering (multi-agent context & cost) [primary]:
 12. Claude Code how-it-works (tool-result clearing economics) — https://code.claude.com/docs/en/how-claude-code-works.md — 2026-10-26 [primary]
 13. Cursor subagents docs (clean context, Explore/Search roles) — https://cursor.com/docs/subagents — 2026-10-26 [primary]
 14. Cursor prompting + rules (anti-bloat: @-mention discipline, <500-line rules, context ring) — https://cursor.com/docs/agent/prompting ; https://cursor.com/docs/rules — 2026-10-26 [primary]
-- **Digest cost at real cadence.** Per-turn byte-change rate by field, prefix-hit rate, truncation frequency — unmeasured; F6 records digest-vs-full-rebroadcast as needs-own-instrumentation [39] (F6 Gaps).
+15. Cognition: multi-agents working (manager/child, clean-context reviewers, divide-by-context, smart-friend fork) — https://cognition.com/blog/multi-agents-working — 2026-10-26 [primary]
 16. Cursor: agent swarms and the new model economics (planner/worker cost split, fleet pricing) — https://cursor.com/blog/agent-swarm-model-economics — 2026-07-20, read 2026-10-26 [primary]
 17. Cursor: improved token efficiency (sysprompt trim, tool offload, breakpoints, 7% saving) — https://cursor.com/blog/improved-token-efficiency — 2026-09-23, read 2026-10-26 [primary]
 18. Chroma: context rot (length-driven degradation, 18 LLMs) — https://www.trychroma.com/research/context-rot — 2026-10-26 [primary]
-- **Same-task multi-vs-single benchmark.** None found; SWE-bench figures unverified [34] (F6 Gaps).
-- **Communication-tax share.** AgentTaxo full-PDF percentage not extracted; OpenAI caching numbers need direct-page verify (F6 Gaps) [33][4].
-- **Vendor internals.** Devin/Cursor budgets and summarisation thresholds, per-turn sizing optimum (1–2k is observed norm, not A/B optimum), compaction fidelity, shared-context versioning protocol — all unspecified in primaries (F2 Gaps) [10][13][8].
-- **UX evidence.** No outcome data on reactions/receipts/typing for agents, no verbose-vs-structured format cost comparison, human+agent mixing underexplored (F3 Gaps) [19]; Discord-specific guidance missing from files.
-- **Cache-provider unknowns.** Multi-agent hit-rate benchmarks, cross-provider coherence, long-session eviction vs compaction, provider routing internals (F1 Gaps) [1][2].
-- **Schema unknowns.** Host `prompt.render` support for descriptions, whether agents read `describe` vs `description`, no error corpus to reorder fixes (F4 Gaps) [38][40]; exact host cache boundaries for the digest message [39].
+19. Slack agent design concepts (threads, streaming, confirmations; no receipt machinery) — https://docs.slack.dev/concepts/agent-design — 2026-10-26 [primary]
+
+Protocols & specs [primary]:
+20. A2A specification (recipient_ids, intent, status, thread/reply routing) — https://github.com/a2aproject/A2A/blob/main/docs/specification.md — 2026-10-26 [primary]
+21. AutoGen selector group chat (model-based speaker selection) — https://microsoft.github.io/autogen/dev/user-guide/agentchat-user-guide/selector-group-chat.html — 2026-10-26 [primary]
+22. AutoGen conversation patterns (threads, turn ownership) — https://autogenhub.github.io/autogen/docs/tutorial/conversation-patterns/ — 2026-10-26 [primary]
 23. IRCv3 message tags (envelope: IDs, idempotency, expiry) — https://ircv3.github.io/specs/extensions/message-tags.html — 2026-10-26 [primary]
 24. Agent Communication Protocol core v1.0 (routing/content split, no-secrets) — https://github.com/Kickflip73/agent-communication-protocol/blob/main/spec/core-v1.0.md — 2026-10-26 [primary]
 25. OpenFloor inter-agent message (floor/mediation/delegation) — https://openfloor.dev/protocol/specifications/inter-agent-message — 2026-10-26 [primary]
