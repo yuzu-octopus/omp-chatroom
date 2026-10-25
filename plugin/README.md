@@ -45,7 +45,11 @@ not force:
 - A **native `agent://<id>`** message has one addressee, a bounded blast radius, and no shared record.
   Use it to correct or steer one agent.
 
-So: `agent://<id>` to redirect one agent, the room to tell several agents the same thing.
+So: `agent://<id>` to redirect one agent, the room to tell several agents the same thing. Think of
+the room as a **coordination artifact, not a chat**: the claim board and the status ledger are the
+value — who owns what, who is waiting on whom, what was decided. The chat log is the audit trail,
+not the coordination mechanism. (A head-to-head measurement of room-vs-`agent://` on identical tasks
+does not exist yet; the claim above is the evidenced gap table, not a benchmark.)
 
 The full argument, with host-source citations and what breaks without each piece, is in
 `docs/research/omp-agent-chatroom/room-vs-native.md`.
