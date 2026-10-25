@@ -863,6 +863,24 @@ test("`r` in board focus releases the row the user sees (display order: held fir
   }
 });
 
+test("`o` in board focus focuses the selected row's holder; in chat focus it focuses nothing", () => {
+  const store = fixtureStore();
+  const focused: string[] = [];
+  const panel = makePanel(store, 30, { onFocusAgent: (id) => focused.push(id) });
+  try {
+    // Chat focus: `o` has no row to read, so it focuses nothing.
+    panel.handleInput("o");
+    expect(focused).toEqual([]);
+    // Board focus: `o` focuses the selected claim's holder (AgentB).
+    panel.handleInput("2");
+    panel.handleInput("o");
+    expect(focused).toEqual(["AgentB"]);
+  } finally {
+    panel.dispose();
+    store.reset();
+  }
+});
+
 test("the focused pane is visible in the rendered panel", () => {
   const store = fixtureStore();
   const panel = makePanel(store);
