@@ -188,6 +188,203 @@ test(
   },
   WAIT_TIMEOUT_MS,
 );
+test(
+  "R4: a 3-agent claim chain is refused at the closing edge, naming all three",
+  async () => {
+    const root = freshRoot();
+    const bus = new EventBus();
+    const registry = new AgentRegistry();
+    const a = await newSession(bus, registry, root, "AgentA");
+    const b = await newSession(bus, registry, root, "AgentB");
+    const c = await newSession(bus, registry, root, "AgentC");
+    try {
+      await toolOf(a, "room").execute("c-a-hold", {
+        op: "claim",
+        topic: "chain",
+        key: "a",
+        ttl: 300_000,
+      });
+      await toolOf(b, "room").execute("c-b-hold", {
+        op: "claim",
+        topic: "chain",
+        key: "b",
+        ttl: 300_000,
+      });
+      await toolOf(c, "room").execute("c-c-hold", {
+        op: "claim",
+        topic: "chain",
+        key: "c",
+        ttl: 300_000,
+      });
+
+      // A waits for chain/b (held by B), then B waits for chain/c (held by C).
+      // Neither closes a cycle, so both waits proceed.
+      const waitAP = toolOf(a, "wait_for_claim").execute("c-wa", {
+        resource: "chain/b",
+        ttl: 300_000,
+        timeout: 1_000,
+      });
+      await Bun.sleep(50);
+      const waitBP = toolOf(b, "wait_for_claim").execute("c-wb", {
+        resource: "chain/c",
+        ttl: 300_000,
+        timeout: 1_000,
+      });
+      await Bun.sleep(50);
+
+      // C waits for chain/a (held by A): A→B→C→A closes the cycle — refused.
+      const refused = await toolOf(c, "wait_for_claim").execute("c-wc", {
+        resource: "chain/a",
+        ttl: 300_000,
+        timeout: 1_000,
+      });
+      expect(refused.details).toMatchObject({ ok: false, outcome: "aborted" });
+      const rawChain = refused.details?.cycle;
+      const chain: string[] =
+        Array.isArray(rawChain) && rawChain.every((c) => typeof c === "string")
+          ? (rawChain as string[])
+          : [];
+      expect(chain[0]).toBe("AgentC");
+      expect(chain).toContain("AgentA");
+      expect(chain).toContain("AgentB");
+      expect(chain).toContain("AgentC");
+      expect(chain.length).toBeGreaterThan(2);
+
+      // A and B are still waiting — only the closing edge was refused.
+      const settled = await Promise.race([
+        Promise.all([waitAP, waitBP]).then(() => "settled"),
+        Bun.sleep(50).then(() => "waiting"),
+      ]);
+      expect(settled).toBe("waiting");
+    } finally {
+      await a.dispose();
+      await b.dispose();
+      await c.dispose();
+    }
+  },
+  WAIT_TIMEOUT_MS,
+);
+
+test(
+  "R4: a cross-mechanism claim+message cycle is refused, naming the cycle",
+  async () => {
+    const root = freshRoot();
+    const bus = new EventBus();
+    const registry = new AgentRegistry();
+    const a = await newSession(bus, registry, root, "AgentA");
+    const b = await newSession(bus, registry, root, "AgentB");
+    try {
+      await toolOf(a, "room").execute("c-a-hold", {
+        op: "claim",
+        topic: "x",
+        key: "res",
+        ttl: 300_000,
+      });
+      await toolOf(b, "room").execute("c-b-hold", {
+        op: "claim",
+        topic: "y",
+        key: "res",
+        ttl: 300_000,
+      });
+
+      // B waits for a message from A — an edge B→A in the other mechanism.
+      const waitBP = toolOf(b, "wait_for_message").execute("c-wb", {
+        from: "AgentA",
+        timeout: 5_000,
+      });
+      await Bun.sleep(50);
+
+      // A waits for y/res (held by B): A→B→A closes the cycle across mechanisms.
+      const refused = await toolOf(a, "wait_for_claim").execute("c-wa", {
+        resource: "y/res",
+        ttl: 300_000,
+        timeout: 1_000,
+      });
+      expect(refused.details).toMatchObject({ ok: false, outcome: "aborted" });
+      const rawX = refused.details?.cycle;
+      const xCycle: string[] =
+        Array.isArray(rawX) && rawX.every((c) => typeof c === "string") ? (rawX as string[]) : [];
+      expect(xCycle[0]).toBe("AgentA");
+      expect(xCycle).toContain("AgentA");
+      expect(xCycle).toContain("AgentB");
+
+      // B's message wait is still pending — only the closing edge was refused.
+      const stillWaiting = await Promise.race([
+        waitBP.then(() => "settled"),
+        Bun.sleep(50).then(() => "waiting"),
+      ]);
+      expect(stillWaiting).toBe("waiting");
+    } finally {
+      await a.dispose();
+      await b.dispose();
+    }
+  },
+  WAIT_TIMEOUT_MS,
+);
+
+test(
+  "R4: a diamond (A→B, C→B, B→D) is not a cycle — all waits proceed",
+  async () => {
+    const root = freshRoot();
+    const bus = new EventBus();
+    const registry = new AgentRegistry();
+    const a = await newSession(bus, registry, root, "AgentA");
+    const b = await newSession(bus, registry, root, "AgentB");
+    const c = await newSession(bus, registry, root, "AgentC");
+    const d = await newSession(bus, registry, root, "AgentD");
+    try {
+      const roomB = toolOf(b, "room");
+      const roomD = toolOf(d, "room");
+      await roomB.execute("c-b1", { op: "claim", topic: "dia", key: "b1", ttl: 300_000 });
+      await roomB.execute("c-b2", { op: "claim", topic: "dia", key: "b2", ttl: 300_000 });
+      await roomD.execute("c-d", { op: "claim", topic: "dia", key: "d", ttl: 300_000 });
+
+      // B→D first, then A→B and C→B: a diamond, so no wait closes a cycle.
+      const waitBP = toolOf(b, "wait_for_claim").execute("c-wb", {
+        resource: "dia/d",
+        ttl: 300_000,
+        timeout: 5_000,
+      });
+      await Bun.sleep(50);
+      const waitAP = toolOf(a, "wait_for_claim").execute("c-wa", {
+        resource: "dia/b1",
+        ttl: 300_000,
+        timeout: 5_000,
+      });
+      const waitCP = toolOf(c, "wait_for_claim").execute("c-wc", {
+        resource: "dia/b2",
+        ttl: 300_000,
+        timeout: 5_000,
+      });
+      // All three are genuinely blocked — none was refused as a cycle.
+      const settledEarly = await Promise.race([
+        Promise.all([waitAP, waitBP, waitCP]).then(() => true),
+        Bun.sleep(80).then(() => false),
+      ]);
+      expect(settledEarly).toBe(false);
+
+      // Release each resource; every waiter is promoted and settles with an event.
+      await roomB.execute("c-rel-b1", { op: "release", topic: "dia", key: "b1" });
+      await roomB.execute("c-rel-b2", { op: "release", topic: "dia", key: "b2" });
+      await roomD.execute("c-rel-d", { op: "release", topic: "dia", key: "d" });
+
+      const results = await Promise.race([
+        Promise.all([waitAP, waitBP, waitCP]),
+        Bun.sleep(2_000).then(() => null),
+      ]);
+      expect(results).not.toBeNull();
+      for (const res of results!) {
+        expect(res.details).toMatchObject({ ok: true, outcome: "event", acquired: true });
+      }
+    } finally {
+      await a.dispose();
+      await b.dispose();
+      await c.dispose();
+      await d.dispose();
+    }
+  },
+  WAIT_TIMEOUT_MS,
+);
 
 test(
   "R5: a resolved wait is recorded, so wait productivity is measurable",
