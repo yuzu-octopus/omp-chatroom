@@ -4,9 +4,14 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent";
-import { registerRoomCommand } from "../src/commands/room-command";
+import {
+  ROOM_SUBCOMMANDS,
+  registerRoomCommand,
+  roomCompletions,
+} from "../src/commands/room-command";
 import { roomIdFor } from "../src/ids";
 import { enqueueWaiter } from "../src/store/claims";
+import { loadRoomConfig } from "../src/store/config";
 import { resetRoomStores, storeFor } from "../src/store/room-store";
 
 function tempRoot(): string {
@@ -269,4 +274,83 @@ test("/room release of someone else's live claim is refused and the claim stands
   expect(notified.join("\n")).toContain("denied, held by Other");
   expect(store.claims.get("build/step")?.holder).toBe("Other");
   expect(store.records.filter((r) => r.kind === "release")).toHaveLength(0);
+});
+
+// --- /room completions + config set -------------------------------------------
+
+test('roomCompletions("") returns all six subcommands with help text', () => {
+  const completions = roomCompletions("");
+  expect(completions.map((c) => c.value).sort()).toEqual([...ROOM_SUBCOMMANDS].sort());
+  for (const c of completions) {
+    expect(c.label).toBe(c.value);
+    expect(typeof c.description).toBe("string");
+    expect(c.description!.length).toBeGreaterThan(0);
+  }
+});
+
+test("roomCompletions filters by prefix and never returns null", () => {
+  const filtered = roomCompletions("c");
+  expect(filtered.map((c) => c.value).sort()).toEqual(["claim", "config"]);
+  expect(roomCompletions("nope")).toEqual([]);
+  expect(Array.isArray(roomCompletions(""))).toBe(true);
+});
+
+test("/room config set applies a valid number and reports the write", async () => {
+  const notified: string[] = [];
+  const handler = captureHandler(notified);
+  const root = tempRoot();
+  roomStoreForCwd(root);
+
+  await handler("config set maxBodyBytes=4096", headlessCtx(root, notified));
+
+  expect(notified.join("\n")).toContain("maxBodyBytes=4096");
+  expect(loadRoomConfig(`${root}/.omp-room`).maxBodyBytes).toBe(4096);
+});
+
+test("/room config set applies a valid string and reports the write", async () => {
+  const notified: string[] = [];
+  const handler = captureHandler(notified);
+  const root = tempRoot();
+  roomStoreForCwd(root);
+
+  await handler("config set roomId=custom-room", headlessCtx(root, notified));
+
+  expect(notified.join("\n")).toContain("roomId=custom-room");
+  expect(loadRoomConfig(`${root}/.omp-room`).roomId).toBe("custom-room");
+});
+
+test("/room config set with an unknown key is refused and changes nothing", async () => {
+  const notified: string[] = [];
+  const handler = captureHandler(notified);
+  const root = tempRoot();
+  const storeRoot = `${root}/.omp-room`;
+  roomStoreForCwd(root);
+  // Warm-up: opening the store persists the minted roomId (resolveRoomId). Snapshot after so
+  // the refusal assertion compares the set op alone, not the open side effect.
+  await handler("config", headlessCtx(root, notified));
+  notified.length = 0;
+  const before = loadRoomConfig(storeRoot);
+
+  await handler("config set nope=1", headlessCtx(root, notified));
+
+  expect(notified.join("\n")).toContain("unknown key or bad value");
+  expect(loadRoomConfig(storeRoot)).toEqual(before);
+});
+
+test("/room config set with an unparseable number or boolean is refused", async () => {
+  const notified: string[] = [];
+  const handler = captureHandler(notified);
+  const root = tempRoot();
+  const storeRoot = `${root}/.omp-room`;
+  roomStoreForCwd(root);
+  // Same warm-up as above: the store open persists the minted roomId.
+  await handler("config", headlessCtx(root, notified));
+  notified.length = 0;
+  const before = loadRoomConfig(storeRoot);
+
+  await handler("config set maxBodyBytes=notanumber", headlessCtx(root, notified));
+  await handler("config set claimTtlMs=true", headlessCtx(root, notified));
+
+  expect(notified.join("\n")).toContain("unknown key or bad value");
+  expect(loadRoomConfig(storeRoot)).toEqual(before);
 });
