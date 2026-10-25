@@ -52,7 +52,11 @@ async function newSession(
   // the configured provider - dozens per run, on the user's quota, and the suite's duration
   // would depend on the network. The compactor has its own tests (tree.test.ts) with the fake
   // LLM seam; here it is capped at zero.
-  saveRoomConfig(ROOM_ROOT(root), { ...DEFAULT_ROOM_CONFIG, compactionCallsPerDay: 1, ...configOverride });
+  saveRoomConfig(ROOM_ROOT(root), {
+    ...DEFAULT_ROOM_CONFIG,
+    compactionCallsPerDay: 1,
+    ...configOverride,
+  });
   __compactTest.setSpendToday(ROOM_ROOT(root), 1);
   const { session } = await createAgentSession({
     eventBus: bus,
