@@ -1,4 +1,8 @@
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent";
+import { globalMap } from "../globals";
 import { DEFAULT_ROOM_CONFIG } from "../store/config";
 import { cursorFor, lagFor } from "../store/cursors";
 import type { MemberState, RoomStore } from "../store/room-store";
@@ -221,4 +225,41 @@ export function digestStats(store: RoomStore, prev: string | null, next: string)
     commonPrefix,
     truncated,
   };
+}
+
+// F6 — the per-turn cadence harness: hook-only emission. The tool path (`room{op:"join"}`)
+// renders once per join, not per turn, so it carries no cadence signal; instrumenting only the
+// per-turn hook keeps ONE emission site. Previous renders live in a globalThis map keyed by room
+// root (I2: no session-scoped module state); when the flag is off nothing is recorded and the
+// render path is untouched. Test seam: `resetDigestTurns` clears the map.
+export const DIGEST_STATS_ENV = "OMP_ROOM_DIGEST_STATS";
+export const DIGEST_STATS_PATH_ENV = "OMP_ROOM_DIGEST_STATS_PATH";
+const PREV_DIGESTS = globalMap<string, string>("__roomPrevDigests");
+
+export function resetDigestTurns(): void {
+  PREV_DIGESTS.clear();
+}
+
+type DigestTurnLine = DigestStats & { room: string; seq: number; at: number };
+
+/**
+ * Record one turn's digest stats as a JSONL line. Returns the rendered content unchanged so the
+ * call site stays a single expression with zero behavior change when the flag is off: the only
+ * read before the flag check is `store.root` (a field), and `digestStats`/`appendFileSync` run
+ * only when `OMP_ROOM_DIGEST_STATS=1`.
+ */
+export function recordDigestTurn(store: RoomStore, rendered: string): string {
+  if (process.env[DIGEST_STATS_ENV] !== "1") return rendered;
+  const prev = PREV_DIGESTS.get(store.root) ?? null;
+  const stats = digestStats(store, prev, rendered);
+  PREV_DIGESTS.set(store.root, rendered);
+  const line: DigestTurnLine = { room: store.root, seq: store.seq, at: Date.now(), ...stats };
+  const out =
+    process.env[DIGEST_STATS_PATH_ENV] ?? path.join(os.tmpdir(), "omp-room-digest-stats.jsonl");
+  try {
+    fs.appendFileSync(out, `${JSON.stringify(line)}\n`);
+  } catch {
+    // The harness must never break a turn: a bad path degrades to no recording.
+  }
+  return rendered;
 }

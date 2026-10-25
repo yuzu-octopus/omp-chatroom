@@ -10,9 +10,13 @@ import {
   buildDigest,
   DIGEST_BUDGET_TOKENS,
   DIGEST_CLAIMS_CAP,
+  DIGEST_STATS_ENV,
+  DIGEST_STATS_PATH_ENV,
   digestStats,
   estimateTokens,
   ROSTER_CAP,
+  recordDigestTurn,
+  resetDigestTurns,
   UNTRUSTED_CLOSE,
   UNTRUSTED_OPEN,
 } from "../src/onboarding/digest";
@@ -932,4 +936,106 @@ test("an over-budget digest gauges truncated (F6)", () => {
   expect(stats.truncated).toBe(true);
   expect(stats.commonPrefix).toBe(0);
   expect(stats.changedBytes).toBe(tight.length);
+});
+
+// ---------------------------------------------------------------------------------------------
+// 13. F6 — the per-turn cadence harness: one JSONL line per hook render, off unless opted in.
+// ---------------------------------------------------------------------------------------------
+
+test("flag off: the hook render is byte-identical and writes no file (F6 harness)", async () => {
+  delete process.env[DIGEST_STATS_ENV];
+  delete process.env[DIGEST_STATS_PATH_ENV];
+  resetDigestTurns();
+  registerAgents(2);
+  post(0, "hello");
+  const expected = buildDigest(store, viewer("AgentA"));
+
+  const { pi, fire } = fakePi();
+  registerHooks(pi);
+  const result = (await fire(
+    "before_agent_start",
+    { type: "before_agent_start", prompt: "hi", systemPrompt: ["BASE"] },
+    fakeCtx("AgentA"),
+  )) as { message?: { content?: string } } | undefined;
+
+  expect(result?.message?.content).toBe(expected);
+  const def = path.join(os.tmpdir(), "omp-room-digest-stats.jsonl");
+  expect(fs.existsSync(def)).toBe(false);
+});
+
+test("flag on: one JSONL line per hook run with the gauge fields (F6 harness)", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "room-digest-stats-"));
+  const out = path.join(dir, "stats.jsonl");
+  process.env[DIGEST_STATS_ENV] = "1";
+  process.env[DIGEST_STATS_PATH_ENV] = out;
+  resetDigestTurns();
+  try {
+    registerAgents(2);
+    post(0, "hello");
+    const { pi, fire } = fakePi();
+    registerHooks(pi);
+    const ctx = fakeCtx("AgentA");
+    const first = (await fire(
+      "before_agent_start",
+      { type: "before_agent_start", prompt: "hi", systemPrompt: ["BASE"] },
+      ctx,
+    )) as { message?: { content?: string } } | undefined;
+    const second = (await fire(
+      "before_agent_start",
+      { type: "before_agent_start", prompt: "again", systemPrompt: ["BASE"] },
+      ctx,
+    )) as { message?: { content?: string } } | undefined;
+
+    // The harness never alters the render: both turns carry the live digest unchanged.
+    expect(first?.message?.content).toBe(buildDigest(store, viewer("AgentA")));
+    expect(second?.message?.content).toBe(buildDigest(store, viewer("AgentA")));
+
+    const lines = fs.readFileSync(out, "utf8").trim().split("\n");
+    expect(lines.length).toBe(2);
+    const [a, b] = lines.map((l) => JSON.parse(l));
+    for (const row of [a, b]) {
+      expect(typeof row.bytes).toBe("number");
+      expect(typeof row.estTokens).toBe("number");
+      expect(typeof row.changedBytes).toBe("number");
+      expect(typeof row.commonPrefix).toBe("number");
+      expect(typeof row.truncated).toBe("boolean");
+      expect(row.room).toBe(store.root);
+    }
+    // First turn has no previous render (full bytes changed); the identical second render
+    // reuses the stored previous render, so changedBytes is 0.
+    expect(a.changedBytes).toBe(a.bytes);
+    expect(a.commonPrefix).toBe(0);
+    expect(b.changedBytes).toBe(0);
+    expect(b.commonPrefix).toBe(b.bytes);
+  } finally {
+    delete process.env[DIGEST_STATS_ENV];
+    delete process.env[DIGEST_STATS_PATH_ENV];
+    resetDigestTurns();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("flag on: a second consecutive identical render gauges zero churn (F6 harness)", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "room-digest-stats-"));
+  const out = path.join(dir, "stats.jsonl");
+  process.env[DIGEST_STATS_ENV] = "1";
+  process.env[DIGEST_STATS_PATH_ENV] = out;
+  resetDigestTurns();
+  try {
+    registerAgents(2);
+    post(0, "hello");
+    const rendered = buildDigest(store, viewer("AgentA"));
+    recordDigestTurn(store, rendered);
+    recordDigestTurn(store, rendered);
+    const lines = fs.readFileSync(out, "utf8").trim().split("\n");
+    expect(lines.length).toBe(2);
+    const second = JSON.parse(lines[1]!);
+    expect(second.changedBytes).toBe(0);
+    expect(second.commonPrefix).toBe(rendered.length);
+  } finally {
+    delete process.env[DIGEST_STATS_ENV];
+    delete process.env[DIGEST_STATS_PATH_ENV];
+    resetDigestTurns();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

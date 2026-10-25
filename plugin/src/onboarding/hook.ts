@@ -25,7 +25,7 @@ import {
   unregisterSweepNotifier,
 } from "../store/room-store";
 import { owedFloorFor } from "../tools/room";
-import { buildDigest } from "./digest";
+import { buildDigest, recordDigestTurn } from "./digest";
 import rule from "./routing-rule.md" with { type: "text" };
 
 // The static block is appended to the system prompt every turn, so a prior injection is detected by
@@ -115,10 +115,12 @@ export function registerHooks(pi: ExtensionAPI): void {
     };
 
     // §6 — the volatile digest is per-turn state: it rides the turn's message, after the cached
-    // prefix, never the system prompt.
+    // prefix, never the system prompt. recordDigestTurn returns the render unchanged and appends
+    // one JSONL line per turn only when OMP_ROOM_DIGEST_STATS=1 (hook-only emission: the join
+    // tool path renders once per join, not per turn, so it carries no cadence signal).
     const message = {
       customType: DIGEST_MESSAGE_TYPE,
-      content: buildDigest(store, viewer),
+      content: recordDigestTurn(store, buildDigest(store, viewer)),
       display: false,
     };
 
