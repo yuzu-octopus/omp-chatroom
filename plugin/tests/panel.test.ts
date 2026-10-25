@@ -472,7 +472,7 @@ test("openRoomPanel notifies instead of throwing when the overlay fails", async 
   expect(notified.some((m) => m.startsWith("Room panel unavailable:"))).toBe(true);
 });
 
-test("registerPanel registers the shortcut only when the flag is set", () => {
+test("registerPanel registers the shortcut only when the flag is set", async () => {
   const shortcuts: string[] = [];
   const closers: Array<() => void> = [];
   const plain = {
@@ -488,7 +488,26 @@ test("registerPanel registers the shortcut only when the flag is set", () => {
     registerShortcut: (key: string) => shortcuts.push(key),
   } as unknown as ExtensionAPI;
   registerPanel(flagged);
-  expect(shortcuts).toEqual(["ctrl-r"]);
+  // The registered handler opens the panel: with no TUI it degrades instead of throwing.
+  const handlers: Array<(ctx: ExtensionContext) => Promise<void>> = [];
+  const withHandler = {
+    on: (_event: string, _handler: () => void) => {},
+    getFlag: (_name: string) => "ctrl-r",
+    registerShortcut: (
+      _key: string,
+      options: { handler: (ctx: ExtensionContext) => Promise<void> },
+    ) => handlers.push(options.handler),
+  } as unknown as ExtensionAPI;
+  registerPanel(withHandler);
+  expect(handlers).toHaveLength(1);
+  const notified: string[] = [];
+  const printCtx = {
+    hasUI: false,
+    mode: "print",
+    ui: { notify: (message: string) => notified.push(message) },
+  } as unknown as ExtensionContext;
+  await handlers[0](printCtx);
+  expect(notified.length).toBeGreaterThan(0);
   for (const close of closers) close();
 });
 
