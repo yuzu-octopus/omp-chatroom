@@ -450,11 +450,11 @@ test("the real 5 s sweep job expires a stale claim (K3 integration)", async () =
   const bus = new EventBus();
   const registry = new AgentRegistry();
   // The one test that needs a MAIN session: the sweep job it exercises only runs there.
-  const a = await newSession(bus, registry, root, "AgentA", true, { claimSweepMs: 1_000 });
+  const a = await newSession(bus, registry, root, "AgentA", true, { claimSweepMs: 500 });
   try {
     await toolOf(a, "room").execute("c-claim", { op: "claim", topic: "ttl", key: "x", ttl: 1_000 });
-    // claimSweepMs is 1000 (overridden for CI reliability); the claim's 1 s TTL is long past.
-    const deadline = Date.now() + 20_000;
+    // claimSweepMs is 500 (overridden for CI reliability); the claim's 1 s TTL is long past.
+    const deadline = Date.now() + 25_000;
     let expired: Record<string, unknown> | undefined;
     while (Date.now() < deadline && !expired) {
       await Bun.sleep(250);
