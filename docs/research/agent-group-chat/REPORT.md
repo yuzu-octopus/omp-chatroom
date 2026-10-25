@@ -153,7 +153,7 @@ Implementation evidence (PRs/issues) [primary]:
 Research & quantitative [primary unless noted]:
 32. Stanford Digital Economy Lab working paper 2026-04-14 (1000× coding-vs-chat, 30× same-task variance; arXiv 2604.22750) — https://digitaleconomy.stanford.edu — read 2026-10-26 [primary] [single source]
 33. AgentTaxo full PDF (26pp, ICLR 2025 FM-Wild workshop; OpenReview PDF `https://openreview.net/pdf?id=0iLbiYYIpC` mirrored at `https://lacuna.tiptreesystems.com/pdf/art_d529552aa46f6c9576a28ea506676d49` — OpenReview direct fetch bot-walled at read time; abstract at https://mlanthology.org/iclrw/2025/wang2025iclrw-agenttaxo/) — read 2026-10-26 [primary] [single source; MGSM verifier-recycling figure garbled "5-%" in extract]
-34. ANYMAC, EMNLP 2025 (5× fewer prompt tokens vs G-Designer on GSM8K) — https://aclanthology.org/2025.emnlp-main.584 — 2026-10-26 [primary] [single source, via secondary extract]
+34. ANYMAC, EMNLP 2025 (ANYMAC-Eff 5× fewer prompt tokens vs G-Designer on GSM8K, exact quote §5.4 p.11561; full ANYMAC 95.66 vs G-Designer 95.07 Table 1 p.11560; within-multi-agent, NOT vs single-agent; limitation §Limitations p.11562: HumanEval below SOTA from overly long contexts, 1k RL samples) — https://aclanthology.org/2025.emnlp-main.584 — full PDF read 2026-10-26 [primary]
 
 Secondary:
 35. ax0x: prompt cache is architecture (identical-prefix fan-out) — https://blog.ax0x.ai/prompt-cache-is-architecture — 2026-10-26 [secondary]
