@@ -2,7 +2,12 @@ import { afterAll, beforeAll, expect, setSystemTime, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentRef, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import {
+  type AgentRef,
+  AgentRegistry,
+  type ExtensionAPI,
+  type ExtensionContext,
+} from "@oh-my-pi/pi-coding-agent";
 import { resolveLocalRoot } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
 import {
   type Component,
@@ -604,12 +609,17 @@ test("handleInput returns true for a mapped key and false for an unmapped one", 
 
 // --- 8. onTerminalInput registration ---------------------------------------
 
-/** A fake ctx that captures the onTerminalInput handler and the done callback. */
-function captureTerminalInput(): {
+/**
+ * A fake ctx that captures the onTerminalInput handler, the done callback, and every `notify`.
+ * The `notified` array also captures the rejection branch of `openRoomPanel`'s delivery float
+ * (lines 620-629): the handler path is async but the test awaits a macrotask before asserting.
+ */
+function captureTerminalInput(options: { agentId?: string } = {}): {
   handler: (data: string) => { consume: true } | undefined;
   done: () => void;
   unsubscribe: () => void;
   unsubscribeCalls: number;
+  notified: Array<{ message: string; level: string }>;
   tuiCtx: ExtensionContext;
 } {
   // `openRoomPanel` hands the host theme to the panel; the module-level `theme` export is
@@ -622,17 +632,22 @@ function captureTerminalInput(): {
   const unsubscribe = () => {
     unsubscribeCalls += 1;
   };
+  const notified: Array<{ message: string; level: string }> = [];
   const root = tempRoot();
   const tuiCtx = {
     hasUI: true,
     mode: "tui",
-    agent: { id: "Main", kind: "main", name: "main", depth: 0 },
+    agent: { id: options.agentId ?? "Main", kind: "main", name: "main", depth: 0 },
     cwd: root,
     localProtocolOptions: { getArtifactsDir: () => root, getSessionId: () => "sess-panel" },
     setInterval: () => "t",
     clearTimer: () => {},
+    // The host's managed timers (I4): the bounded send needs a deadline, and a raw timer is
+    // forbidden — so the fake ctx exposes the same `ctx.setTimeout` pair the attention tests use.
+    setTimeout: (callback: (...args: unknown[]) => void, ms?: number): Timer =>
+      setTimeout(callback, ms),
     ui: {
-      notify: () => {},
+      notify: (message: string, level?: string) => notified.push({ message, level: level ?? "" }),
       custom: async (
         factory: (
           tui: TUI,
@@ -668,6 +683,7 @@ function captureTerminalInput(): {
     get unsubscribeCalls() {
       return unsubscribeCalls;
     },
+    notified,
     tuiCtx,
   };
 }
@@ -880,6 +896,205 @@ test("panel `r` on a stale held row refreshes without throwing or appending a re
   // No throw, no release record appended by the panel, and the board re-projects cleanly.
   expect(store.records.length).toBe(recordsBefore);
   expect(store.records.filter((r) => r.kind === "release").length).toBe(0);
+});
+test("panel `r` on a foreign holder's EXPIRED claim reclaims through the arbiter", async () => {
+  // Lines 615-616: the foreign-holder branch — `r` on a claim held by ANOTHER agent routes to
+  // `reclaimIfStale`, not to `release`. Staleness here comes from a parked holder (deterministic:
+  // no wall-clock sleep): the registry reports "parked", so the lease is stale even with a live
+  // TTL, and the reclaim reasons "reclaimed" and promotes the waiter.
+  const pi = { on: () => {} } as unknown as ExtensionAPI;
+  const capture = captureTerminalInput({ agentId: "Main" });
+  await openRoomPanel(pi, capture.tuiCtx);
+  const store = roomStoreFor(capture.tuiCtx);
+  // Other holds the lease; Main waits on it.
+  grant(store, "build/step", "Other", 600_000);
+  enqueueWaiter(store, "build/step", "Main");
+  AgentRegistry.global().register({
+    id: "Other",
+    displayName: "Other",
+    kind: "sub",
+    status: "parked",
+    session: null,
+  });
+  try {
+    expect(capture.handler("2")).toEqual({ consume: true });
+    expect(capture.handler("r")).toEqual({ consume: true });
+    // The stale foreign claim was reclaimed: a release record naming the displaced holder.
+    const releases = store.records.filter((r) => r.kind === "release");
+    expect(releases.length).toBe(1);
+    expect(releases[0]).toMatchObject({
+      resource: "build/step",
+      reason: "reclaimed",
+      prevHolder: "Other",
+    });
+    // The waiter (Main) was promoted to the lease.
+    expect(store.claims.get("build/step")?.holder).toBe("Main");
+  } finally {
+    AgentRegistry.global().unregister("Other");
+  }
+  // The floated delivery pass resolves after the sync key path; flush it before teardown.
+  await Promise.resolve();
+});
+
+test("panel `r` on a foreign holder's LIVE claim appends nothing (reclaim-if-stale refuses)", async () => {
+  // The same 615-616 branch, live side: `reclaimIfStale` on a lease that is neither expired nor
+  // held by a parked/aborted agent returns `{ reclaimed: false }` — no record, no promotion, no
+  // throw. The panel still refreshes, so the board keeps showing the foreign holder.
+  const pi = { on: () => {} } as unknown as ExtensionAPI;
+  const capture = captureTerminalInput({ agentId: "Main" });
+  await openRoomPanel(pi, capture.tuiCtx);
+  const store = roomStoreFor(capture.tuiCtx);
+  grant(store, "build/step", "Other", 600_000);
+  expect(capture.handler("2")).toEqual({ consume: true });
+  const recordsBefore = store.records.length;
+  expect(capture.handler("r")).toEqual({ consume: true });
+  expect(store.records.length).toBe(recordsBefore);
+  expect(store.claims.get("build/step")?.holder).toBe("Other");
+  // The floated delivery pass resolves after the sync key path; flush it before teardown.
+  await Promise.resolve();
+});
+
+test("panel `o` on a held claim names the holder and points at the agent hub", async () => {
+  // Line 635: the REAL onFocusAgent closure — no extension-facing focus action exists, so the
+  // overlay names the agent and tells the human to jump via the agent hub. Driven through the
+  // REAL panel behind `openRoomPanel` (board focus + `o`), not a stubbed callback.
+  const pi = { on: () => {} } as unknown as ExtensionAPI;
+  const capture = captureTerminalInput({ agentId: "Main" });
+  await openRoomPanel(pi, capture.tuiCtx);
+  const store = roomStoreFor(capture.tuiCtx);
+  grant(store, "build/step", "Other", 600_000);
+  expect(capture.handler("2")).toEqual({ consume: true });
+  expect(capture.handler("o")).toEqual({ consume: true });
+  expect(capture.notified).toHaveLength(1);
+  expect(capture.notified[0]!.message).toContain("Other");
+  expect(capture.notified[0]!.message).toContain("agent hub");
+  expect(capture.notified[0]!.level).toBe("info");
+});
+
+test("panel `r` delivery failure surfaces as a warning notify (lines 620-628)", async () => {
+  // Lines 620-628: the key path is sync but the push is async — a rejection lands in the `.then`
+  // rejection arm and surfaces via `notify` as a warning. Forced headless by registering a live
+  // registry session whose send REJECTS: the release record classifies T0 for the displaced holder
+  // (prevHolder === Other), so the pass attempts the send and the rejection propagates as the
+  // pass's failure note.
+  const pi = { on: () => {} } as unknown as ExtensionAPI;
+  const capture = captureTerminalInput({ agentId: "Main" });
+  await openRoomPanel(pi, capture.tuiCtx);
+  const store = roomStoreFor(capture.tuiCtx);
+  // Other is a RUNNING follower of the topic: Main's own live lease releases with reason
+  // "released", which classifies T1 for a topic follower — so the pass attempts the send to
+  // Other, Other's session REJECTS, and the rejection propagates as the pass's failure note.
+  // (The reclaim shapes cannot force this: a stale-by-expiry row projects as `expired`, which
+  // `handleInput` refuses to release, and a parked holder is SKIPPED by `deliver` with no send.)
+  grant(store, "build/step", "Main", 60_000);
+  store.members.set("Other", {
+    agentId: "Other",
+    joinedAtSeq: 0,
+    topics: new Set(["build"]),
+    muted: new Set(),
+    threadRoots: new Set(),
+    heldTopics: new Set(),
+  });
+  AgentRegistry.global().register({
+    id: "Other",
+    displayName: "Other",
+    kind: "sub",
+    status: "running",
+    session: {
+      sendCustomMessage: async () => {
+        throw new Error("transport boom");
+      },
+    } as never,
+  });
+  try {
+    expect(capture.handler("2")).toEqual({ consume: true });
+    expect(capture.handler("r")).toEqual({ consume: true });
+    // The release itself still went through (the log is durable before the push runs).
+    expect(store.records.filter((r) => r.kind === "release")).toHaveLength(1);
+    // The floated push rejects → the rejection arm notifies a warning. The host's send resolves
+    // when the target's turn ends, so the rejection needs a macrotask to land.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(capture.notified.some((n) => n.message.startsWith("delivery: "))).toBe(true);
+    expect(
+      capture.notified.some((n) => n.message.startsWith("delivery: ") && n.level === "warning"),
+    ).toBe(true);
+  } finally {
+    AgentRegistry.global().unregister("Other");
+  }
+});
+
+test("registerPanel's session_shutdown closer closes the open panel (ACTIVE_PANEL observable)", async () => {
+  // Lines 677-681: the closer invokes the captured `close`, which unsubscribes the terminal-input
+  // listener and calls the host's overlay `done`. Observable headlessly: the custom stub captures
+  // the host-side `done`, and the `onTerminalInput` stub counts unsubscribes.
+  //
+  // `openRoomPanel` awaits `ctx.ui.custom` and DELETES the ACTIVE_PANEL entry in its `finally`
+  // when the overlay resolves — so the custom stub must stay PENDING (the overlay is still open)
+  // while the shutdown fires. The pending promise is settled at the end so the open call can
+  // return and the `afterAll` tmp cleanup is not held up.
+  //
+  // NOTE: `close` does NOT dispose the RoomPanel (the host owns teardown; dispose is only for the
+  // panel's own listeners/timer) — so the age timer is NOT cleared here. Line 639's clearTimer
+  // passthrough is already covered by the dispose-idempotence tests through the real panel.
+  const shutdownHandlers: Array<() => void> = [];
+  const pi = {
+    on: (event: string, handler: () => void) => {
+      if (event === "session_shutdown") shutdownHandlers.push(handler);
+    },
+    getFlag: (_name: string) => undefined,
+  } as unknown as ExtensionAPI;
+  registerPanel(pi);
+  expect(shutdownHandlers).toHaveLength(1);
+  ensureThemeSync();
+  let unsubscribes = 0;
+  let hostDoneCalls = 0;
+  const overlayOpen = Promise.withResolvers<void>();
+  const root = tempRoot();
+  const tuiCtx = {
+    hasUI: true,
+    mode: "tui",
+    agent: { id: "Main", kind: "main", name: "main", depth: 0 },
+    cwd: root,
+    localProtocolOptions: { getArtifactsDir: () => root, getSessionId: () => "sess-panel" },
+    setInterval: () => "age-timer",
+    clearTimer: () => {},
+    ui: {
+      notify: () => {},
+      custom: async (
+        factory: (
+          tui: TUI,
+          hostTheme: Theme,
+          keybindings: unknown,
+          closeOverlay: () => void,
+        ) => Component,
+      ) => {
+        const panel = factory(tuiStub(30), theme, {}, () => {
+          hostDoneCalls += 1;
+        });
+        void panel;
+        // The overlay stays open (the host would resolve this when the user closes it).
+        await overlayOpen.promise;
+        return undefined as never;
+      },
+      onTerminalInput: () => () => {
+        unsubscribes += 1;
+      },
+    },
+  } as unknown as ExtensionContext;
+  const open = openRoomPanel(pi, tuiCtx);
+  // Let the factory run (ACTIVE_PANEL is set inside `custom`'s synchronous factory call).
+  await Promise.resolve();
+  await Promise.resolve();
+  // The shutdown closer runs the captured `close`: unsubscribe once + host done once.
+  shutdownHandlers[0]!();
+  expect(unsubscribes).toBe(1);
+  expect(hostDoneCalls).toBe(1);
+  // ...and the ACTIVE_PANEL entry is gone: a second shutdown is a no-op (no double-unsubscribe).
+  shutdownHandlers[0]!();
+  expect(unsubscribes).toBe(1);
+  expect(hostDoneCalls).toBe(1);
+  overlayOpen.resolve();
+  await open;
 });
 
 // --- the live-pty findings: the index leak, the focus, the selection --------
