@@ -6,6 +6,7 @@ import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent";
 import { registerRoomCommand } from "../src/commands/room-command";
 import { roomIdFor } from "../src/ids";
+import { enqueueWaiter } from "../src/store/claims";
 import { resetRoomStores, storeFor } from "../src/store/room-store";
 
 function tempRoot(): string {
@@ -200,4 +201,72 @@ test("/room join records membership even when the agent already has a cursor", a
   // A second join is still a no-op: no second member record.
   await handler("join", ctx);
   expect(store.records.filter((r) => r.kind === "member" && r.from === "Main")).toHaveLength(1);
+});
+// --- /room release: the arbiter path (release → promote → deliver) --------------
+
+test("/room release drops your own claim and the board no longer lists it", async () => {
+  const notified: string[] = [];
+  const handler = captureHandler(notified);
+  const root = tempRoot();
+  const store = roomStoreForCwd(root);
+  store.append({ kind: "claim", from: "Main", resource: "build/step", ttlMs: 60_000 });
+  expect(store.claims.get("build/step")?.holder).toBe("Main");
+
+  await handler("release build step", headlessCtx(root, notified));
+
+  expect(store.claims.has("build/step")).toBe(false);
+  expect(notified.join("\n")).toContain("room release build/step → released");
+  expect(store.records.filter((r) => r.kind === "release")).toHaveLength(1);
+
+  notified.length = 0;
+  await handler("board", headlessCtx(root, notified));
+  expect(notified.join("\n")).toContain("claims: none");
+  expect(notified.join("\n")).not.toContain("build/step");
+});
+
+test("/room release promotes the oldest waiter with the dropped lease", async () => {
+  const notified: string[] = [];
+  const handler = captureHandler(notified);
+  const root = tempRoot();
+  const store = roomStoreForCwd(root);
+  store.append({ kind: "claim", from: "Main", resource: "build/step", ttlMs: 60_000 });
+  store.members.set("Waiter", {
+    agentId: "Waiter",
+    joinedAtSeq: 0,
+    topics: new Set(),
+    muted: new Set(),
+    threadRoots: new Set(),
+    heldTopics: new Set(),
+    waitedResource: "build/step",
+  });
+  enqueueWaiter(store, "build/step", "Waiter");
+  const calls: Send[] = [];
+  registerSession("Waiter", calls);
+  try {
+    await handler("release build step", headlessCtx(root, notified));
+    expect(store.claims.get("build/step")?.holder).toBe("Waiter");
+    expect(store.waiters.get("build/step")).toBeUndefined();
+    expect(notified.join("\n")).toContain("room release build/step → released");
+    // The release record classifies T1 for the waiter (waitedResource match) and must push;
+    // the waiter's own promoted claim is self-authored, so it only bumps the cursor.
+    expect(calls.length).toBe(1);
+    expect(calls[0]!.options).toMatchObject({ deliverAs: "aside" });
+  } finally {
+    AgentRegistry.global().unregister("Waiter");
+  }
+});
+
+test("/room release of someone else's live claim is refused and the claim stands", async () => {
+  const notified: string[] = [];
+  const handler = captureHandler(notified);
+  const root = tempRoot();
+  const store = roomStoreForCwd(root);
+  // A fresh 60s lease is not stale, so the reclaim path cannot fire — this must deny.
+  store.append({ kind: "claim", from: "Other", resource: "build/step", ttlMs: 60_000 });
+
+  await handler("release build step", headlessCtx(root, notified));
+
+  expect(notified.join("\n")).toContain("denied, held by Other");
+  expect(store.claims.get("build/step")?.holder).toBe("Other");
+  expect(store.records.filter((r) => r.kind === "release")).toHaveLength(0);
 });
