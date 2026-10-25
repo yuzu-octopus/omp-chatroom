@@ -120,7 +120,7 @@ Provider docs & API references [primary]:
 6. OpenAI forum: caching not applied when schema changes (tool-definition stability) — https://community.openai.com/t/prompt-caching-not-applied-when-schema-changes/967577 — 2026-10-26 [primary]
 
 Vendor engineering (multi-agent context & cost) [primary]:
-7. Anthropic: multi-agent research system (orchestrator/worker, effort budgets, 15×-vs-chat, token-variance factors) — https://www.anthropic.com/engineering/multi-agent-research-system — 2026-10-26 [primary]
+7. Anthropic: multi-agent research system (orchestrator/worker, effort budgets, 15×-vs-chat, token-variance factors) — https://www.anthropic.com/research/multi-agent-research-system — 2026-10-26 [primary]
 8. Anthropic: effective context engineering (attention budget, 1–2k distill, JIT retrieval, notes vs compaction vs multi-agent) — https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents — 2026-10-26 [primary]
 9. Anthropic: fold subagents into the main loop (single-loop wins for coupled chains; three keep-subagent conditions) — https://claude.com/resources/articles/building-agents-when-to-fold-subagents-into-your-main-agent-loop — 2026-10-26 [primary]
 10. Claude Code sub-agents docs (isolated windows, description budget) — https://code.claude.com/docs/en/sub-agents — 2026-10-26 [primary]
