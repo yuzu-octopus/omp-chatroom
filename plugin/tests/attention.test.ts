@@ -509,6 +509,7 @@ test("deliver dispatches on kind and never reads .body on a kind that lacks it",
   expect(wLine).not.toContain("<system-reminder>");
   const dLine = renderLine(delivered(16, { tier: "T0" }), escapeForDelivery("got seq"), "T0");
   expect(dLine).toContain("tier:T0");
+  expect(renderLine(member(18), escapeForDelivery("joined"), "T2")).toContain("presence");
 
   // The model-facing line carries the tier badge, the actor and the topic/resource (K17).
   const line = renderLine(
