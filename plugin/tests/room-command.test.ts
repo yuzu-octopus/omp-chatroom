@@ -428,3 +428,103 @@ test("/room config set with an unparseable number or boolean is refused", async 
   expect(notified.join("\n")).toContain("unknown key or bad value");
   expect(loadRoomConfig(storeRoot)).toEqual(before);
 });
+
+// --- validation branches: warnings refuse and mutate nothing ------------------
+
+test("/room release with no args warns and appends nothing", async () => {
+  const notified: string[] = [];
+  const handler = captureHandler(notified);
+  const root = tempRoot();
+  const store = roomStoreForCwd(root);
+  const before = store.records.length;
+
+  await handler("release", headlessCtx(root, notified));
+
+  expect(notified.join("\n")).toContain("release requires <topic> <key>");
+  expect(store.records.length).toBe(before);
+  expect(store.claims.size).toBe(0);
+});
+
+test("/room release of an unknown resource warns and appends nothing", async () => {
+  const notified: string[] = [];
+  const handler = captureHandler(notified);
+  const root = tempRoot();
+  const store = roomStoreForCwd(root);
+  const before = store.records.length;
+
+  await handler("release build missing", headlessCtx(root, notified));
+
+  expect(notified.join("\n")).toContain("unknown resource");
+  expect(store.records.length).toBe(before);
+  expect(store.claims.has("build/missing")).toBe(false);
+});
+
+test("/room release of someone else's stale claim reclaims and names the successor", async () => {
+  const notified: string[] = [];
+  const handler = captureHandler(notified);
+  const root = tempRoot();
+  const store = roomStoreForCwd(root);
+  // ttlMs 0 is already past at append time, so the lease is stale without any clock tricks.
+  store.append({ kind: "claim", from: "Other", resource: "build/step", ttlMs: 0 });
+  store.members.set("Waiter", {
+    agentId: "Waiter",
+    joinedAtSeq: 0,
+    topics: new Set(),
+    muted: new Set(),
+    threadRoots: new Set(),
+    heldTopics: new Set(),
+    waitedResource: "build/step",
+  });
+  enqueueWaiter(store, "build/step", "Waiter");
+
+  await handler("release build step", headlessCtx(root, notified));
+
+  expect(notified.join("\n")).toContain("reclaimed (was stale)");
+  expect(notified.join("\n")).toContain("Waiter");
+  expect(store.claims.get("build/step")?.holder).toBe("Waiter");
+  expect(store.records.some((r) => r.kind === "release" && r.reason === "reclaimed")).toBe(true);
+});
+
+test("/room post with no body warns and appends nothing", async () => {
+  const notified: string[] = [];
+  const handler = captureHandler(notified);
+  const root = tempRoot();
+  const store = roomStoreForCwd(root);
+  const before = store.records.length;
+
+  await handler("post build", headlessCtx(root, notified));
+
+  expect(notified.join("\n")).toContain("post requires <topic> <body>");
+  expect(store.records.length).toBe(before);
+  expect(store.records.some((r) => r.kind === "msg")).toBe(false);
+});
+
+test("/room post over maxBodyBytes errors and appends nothing", async () => {
+  const notified: string[] = [];
+  const handler = captureHandler(notified);
+  const root = tempRoot();
+  const store = roomStoreForCwd(root);
+  const before = store.records.length;
+
+  await handler(`post build ${"x".repeat(9000)}`, headlessCtx(root, notified));
+
+  expect(notified.join("\n")).toContain("body exceeds maxBodyBytes");
+  expect(store.records.length).toBe(before);
+  expect(store.records.some((r) => r.kind === "msg")).toBe(false);
+});
+
+test("/room config set with no assignment warns and changes nothing", async () => {
+  const notified: string[] = [];
+  const handler = captureHandler(notified);
+  const root = tempRoot();
+  const storeRoot = `${root}/.omp-room`;
+  roomStoreForCwd(root);
+  await handler("config", headlessCtx(root, notified));
+  notified.length = 0;
+  const before = loadRoomConfig(storeRoot);
+
+  await handler("config set", headlessCtx(root, notified));
+
+  expect(notified.join("\n")).toContain("config set requires <key>=<value>");
+  expect(loadRoomConfig(storeRoot)).toEqual(before);
+});
