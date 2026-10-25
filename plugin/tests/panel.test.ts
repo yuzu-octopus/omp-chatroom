@@ -1290,6 +1290,27 @@ test("the panel's frame glyph and title separator come from the theme", () => {
   }
 });
 
+test("a theme without boxRound.vertical falls back to the host default glyph, not a throw", () => {
+  // The half-built theme of 18.8.7: boxRound exists but has no vertical member.
+  const shim = uncolouredTheme() as unknown as Record<string, unknown>;
+  const { vertical: _dropped, ...rest } = shim.boxRound as Record<string, string>;
+  const custom = { ...shim, boxRound: rest };
+  const store = fixtureStore();
+  const panel = makePanel(store, 30, { theme: custom as unknown as Theme });
+  try {
+    const rows = panel.render(100);
+    const text = rows.join("\n");
+    // Falls back to BOX_ROUND.vertical ("│") instead of rendering "undefined" or throwing.
+    expect(text).not.toContain("undefined");
+    const chatLine = rows.find((row) => row.includes("hello-chat"));
+    expect(chatLine).toBeDefined();
+    for (const row of rows) expect(visibleWidth(row)).toBe(100);
+  } finally {
+    panel.dispose();
+    store.reset();
+  }
+});
+
 test("the chat row's clock is local time, like the host's transcript", () => {
   // The row sliced `toISOString()`, which is UTC, while the host renders its own timestamps in
   // local time (pi-tui/src/chat/user-message.ts uses `toLocaleTimeString`;
