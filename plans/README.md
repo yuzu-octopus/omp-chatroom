@@ -6,7 +6,7 @@ Baseline at plan time: `tsc` 0 errors, `biome check` clean, `bun test tests/`
 reproduced — see plan 014). Execute in the order below unless dependencies say
 otherwise. Each executor: read the plan fully before starting, honor its STOP
 conditions, and update your row when done.
-Round-06ec26f (2026-10-26): tsc 0 errors, biome clean, 381 pass / 1 skip / 0 fail / 18 files; host pin 18.12.3. Since round-92f6260: 4 selectT1 spend/limit/first-record tests.
+Round-72601a0 (2026-10-26): tsc 0 errors, biome clean, 436 pass / 1 skip / 0 fail / 18 files; host pin 18.12.3. Since round-06ec26f: wait/message/agent result cards, match filters, completions, corrupt paths, claim race, board, guards, presence marker.
 
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
