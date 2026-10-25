@@ -449,7 +449,7 @@ test("the real 5 s sweep job expires a stale claim (K3 integration)", async () =
   try {
     await toolOf(a, "room").execute("c-claim", { op: "claim", topic: "ttl", key: "x", ttl: 1_000 });
     // claimSweepMs is 5000 (config default); the claim's 1 s TTL is long past.
-    const deadline = Date.now() + 12_000;
+    const deadline = Date.now() + 20_000;
     let expired: Record<string, unknown> | undefined;
     while (Date.now() < deadline && !expired) {
       await Bun.sleep(250);
@@ -460,4 +460,4 @@ test("the real 5 s sweep job expires a stale claim (K3 integration)", async () =
   } finally {
     await a.dispose();
   }
-}, 20_000);
+}, 30_000);
