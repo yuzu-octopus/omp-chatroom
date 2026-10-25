@@ -10,6 +10,7 @@ import {
   buildDigest,
   DIGEST_BUDGET_TOKENS,
   DIGEST_CLAIMS_CAP,
+  digestStats,
   estimateTokens,
   ROSTER_CAP,
   UNTRUSTED_CLOSE,
@@ -877,4 +878,58 @@ test("the room jobs restart after the main session's shutdown (F6)", async () =>
   // The registry must be empty now, so a new main session schedules the jobs again.
   const restarted = captureSweep(store.root);
   expect(restarted.length).toBe(2);
+});
+
+// ---------------------------------------------------------------------------------------------
+// 12. F6 — the digestStats gauge: the numbers a live multi-turn run records per turn.
+// ---------------------------------------------------------------------------------------------
+
+test("identical re-renders gauge zero churn and no truncation (F6)", () => {
+  registerAgents(3);
+  for (let i = 0; i < 5; i++) post(i, `msg-${i}`);
+
+  const first = buildDigest(store, viewer("AgentA"));
+  const again = buildDigest(store, viewer("AgentA"));
+  expect(again).toBe(first);
+
+  const stats = digestStats(store, first, again);
+  expect(stats.changedBytes).toBe(0);
+  expect(stats.commonPrefix).toBe(first.length);
+  expect(stats.truncated).toBe(false);
+  expect(stats.bytes).toBe(again.length);
+  expect(stats.estTokens).toBe(estimateTokens(again));
+});
+
+test("one appended record gauges header-plus-tail churn (F6)", () => {
+  registerAgents(3);
+  for (let i = 0; i < 5; i++) post(i, `msg-${i}`);
+
+  const first = buildDigest(store, viewer("AgentA"));
+  post(5, "msg-5");
+  const second = buildDigest(store, viewer("AgentA"));
+
+  const stats = digestStats(store, first, second);
+  // Honest shape at this scale: the header's record count moves (5 → 6 record(s)), ending the
+  // common prefix early, and every roster line's lag ticks 5 → 6 — so changedBytes is most of
+  // the render, not just the appended tail line. The gauge's job is to expose exactly that
+  // ripple (the per-field breakdown the open question wants is follow-up work, not this gauge).
+  expect(stats.commonPrefix).toBeGreaterThan(0);
+  expect(stats.changedBytes).toBe(second.length - stats.commonPrefix);
+  expect(stats.changedBytes).toBeLessThan(second.length);
+  expect(second.slice(stats.commonPrefix)).toContain("msg-5");
+  expect(stats.truncated).toBe(false);
+});
+
+test("an over-budget digest gauges truncated (F6)", () => {
+  registerAgents(3);
+  for (let i = 0; i < 50; i++) post(i, `record-${i}-${"Z".repeat(600)}`);
+
+  const tight = buildDigest(store, viewer("AgentA"), 900);
+  expect(estimateTokens(tight)).toBeLessThanOrEqual(900);
+  expect(tight).not.toContain("record-0-");
+
+  const stats = digestStats(store, null, tight);
+  expect(stats.truncated).toBe(true);
+  expect(stats.commonPrefix).toBe(0);
+  expect(stats.changedBytes).toBe(tight.length);
 });

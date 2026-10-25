@@ -167,3 +167,58 @@ export function buildDigest(
   }
   return out;
 }
+
+// F6 — the per-turn gauge that turns "digest cost at real cadence" into numbers: bytes and the
+// estimate the budget is enforced against, the common prefix vs the previous render (the cacheable
+// head, in bytes), its complement `changedBytes`, and whether this render omitted content.
+// Shape is (store, prev, next) — the smallest honest one: truncation is undetectable from the
+// string alone (a truncated render fits its budget by construction), so the gauge compares rendered
+// section counts against what the store holds, capped the way buildDigest caps; cap-cuts and
+// budget-cuts both read as truncated, and telling them apart would need a full-budget re-render —
+// a second renderer, not an observer. The only non-argument read is the registry size, the same
+// source buildDigest renders the roster from; no I/O, no timers, no mutation.
+export type DigestStats = {
+  /** Rendered size in UTF-16 code units (`string.length`). */
+  bytes: number;
+  /** The same estimate the budget is enforced against (chars/4). */
+  estTokens: number;
+  /** Bytes after the common prefix vs `prev` (`next.length - commonPrefix`). */
+  changedBytes: number;
+  /** Longest common leading-substring length vs `prev` (0 when there is no previous render). */
+  commonPrefix: number;
+  /** Whether any section rendered fewer lines than the store holds (within caps). */
+  truncated: boolean;
+};
+
+export function digestStats(store: RoomStore, prev: string | null, next: string): DigestStats {
+  let commonPrefix = 0;
+  if (prev !== null) {
+    const end = Math.min(prev.length, next.length);
+    while (commonPrefix < end && prev[commonPrefix] === next[commonPrefix]) commonPrefix += 1;
+  }
+  // Line shapes mirror the render: roster/claim lines lead with "- ", backlog lines with "[seq]".
+  // A room-authored body containing "held by" rides inside a "[seq] …" line, so the "- " lead
+  // keeps it out of the claim count; the backlog count is section-sliced like `recentLines`.
+  const lines = next.split("\n");
+  const rosterLines = lines.filter(
+    (line) => line.startsWith("- ") && line.includes("· cursor="),
+  ).length;
+  const claimLines = lines.filter(
+    (line) => line.startsWith("- ") && line.includes("held by"),
+  ).length;
+  const recentAt = lines.indexOf("Recent:");
+  const closeAt = lines.indexOf(UNTRUSTED_CLOSE);
+  const backlogLines =
+    recentAt < 0 ? 0 : lines.slice(recentAt + 1, closeAt < 0 ? lines.length : closeAt).length;
+  const truncated =
+    rosterLines < Math.min(AgentRegistry.global().list().length, ROSTER_CAP) ||
+    claimLines < Math.min(store.claims.size, DIGEST_CLAIMS_CAP) ||
+    backlogLines < Math.min(store.records.length, RAW_TAIL_R);
+  return {
+    bytes: next.length,
+    estTokens: estimateTokens(next),
+    changedBytes: next.length - commonPrefix,
+    commonPrefix,
+    truncated,
+  };
+}
