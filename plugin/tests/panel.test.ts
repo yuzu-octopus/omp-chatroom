@@ -897,6 +897,37 @@ test("the focused pane is visible in the rendered panel", () => {
   }
 });
 
+test("`k`/`g`/`G` move the focused pane's own selection; `1` returns focus to chat", () => {
+  const store = fixtureStore();
+  store.append({ kind: "claim", from: "AgentC", resource: "build/second", ttlMs: 600_000 });
+  const released: string[] = [];
+  const panel = makePanel(store, 30, { onReleaseClaim: (resource) => released.push(resource) });
+  try {
+    // Board focus: `j` moves down to the second row, `k` moves back up.
+    panel.handleInput("2");
+    panel.handleInput("j");
+    panel.handleInput("r");
+    expect(released).toEqual(["build/second"]);
+    panel.handleInput("k");
+    panel.handleInput("r");
+    expect(released).toEqual(["build/second", "build/step"]);
+    // `G` jumps to the bottom row, `g` back to the top.
+    panel.handleInput("G");
+    panel.handleInput("r");
+    expect(released).toEqual(["build/second", "build/step", "build/second"]);
+    panel.handleInput("g");
+    panel.handleInput("r");
+    expect(released).toEqual(["build/second", "build/step", "build/second", "build/step"]);
+    // `1` returns focus to chat: `r` releases nothing there.
+    panel.handleInput("1");
+    panel.handleInput("r");
+    expect(released).toEqual(["build/second", "build/step", "build/second", "build/step"]);
+  } finally {
+    panel.dispose();
+    store.reset();
+  }
+});
+
 test("R9: the board row shows what the claim is waiting on", () => {
   const now = Date.now();
   const rows: BoardRow[] = [
