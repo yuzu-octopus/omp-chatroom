@@ -1079,3 +1079,83 @@ test(
   },
   WAIT_TIMEOUT_MS,
 );
+
+test(
+  "wait_for_agent on a corrupt room root still resolves on status change, unrecorded, no throw",
+  async () => {
+    // R5: wait_for_agent waits on the process agent registry, not the room — a corrupt room
+    // root only means the wait goes unrecorded. Same blocker-file trick as wait_for_message.
+    AgentRegistry.resetGlobalForTests();
+    const root = freshRoot();
+    const bus = new EventBus();
+    const registry = AgentRegistry.global();
+    fs.mkdirSync(path.join(root, ".omp-room"), { recursive: true });
+    fs.writeFileSync(path.join(root, ".omp-room", "room"), "not a dir");
+    const a = await newSession(bus, undefined, root, "AgentA");
+    const peer = await newSession(bus, undefined, root, "AgentB");
+    try {
+      const waitP = toolOf(a, "wait_for_agent").execute("c-agent-corrupt", {
+        agents: ["AgentB"],
+        timeout: 5_000,
+      });
+      // Let the wait subscribe first: a change before the baseline is captured
+      // becomes the baseline and never resolves (same settle delay as the happy path).
+      await Bun.sleep(80);
+      registry.setStatus("AgentB", "idle");
+      const res = await Promise.race([waitP, Bun.sleep(5_000).then(() => null)]);
+      expect(res).not.toBeNull();
+      expect(res!.details).toMatchObject({ ok: true, outcome: "event" });
+      expect(res!.useless).not.toBe(true);
+      expect(Array.isArray(res!.content)).toBe(true);
+    } finally {
+      await a.dispose();
+      await peer.dispose();
+      AgentRegistry.resetGlobalForTests();
+    }
+  },
+  WAIT_TIMEOUT_MS,
+);
+
+test(
+  "R4: an agent-agent wait cycle (A waits B, B waits A) is refused, naming the cycle",
+  async () => {
+    const root = freshRoot();
+    const bus = new EventBus();
+    const registry = new AgentRegistry();
+    const a = await newSession(bus, registry, root, "AgentA");
+    const b = await newSession(bus, registry, root, "AgentB");
+    try {
+      // A waits for B's status — the edge A→B goes in as the wait starts.
+      const waitAP = toolOf(a, "wait_for_agent").execute("c-wa-ab", {
+        agents: ["AgentB"],
+        timeout: 5_000,
+      });
+      await Bun.sleep(50);
+
+      // B waits for A: B→A closes the cycle, so only this second edge is refused.
+      const refused = await toolOf(b, "wait_for_agent").execute("c-wb-ba", {
+        agents: ["AgentA"],
+        timeout: 1_000,
+      });
+      expect(refused.details).toMatchObject({ ok: false, outcome: "aborted" });
+      expect(refused.isError).toBe(true);
+      const rawX = refused.details?.cycle;
+      const xCycle: string[] =
+        Array.isArray(rawX) && rawX.every((c) => typeof c === "string") ? (rawX as string[]) : [];
+      expect(xCycle[0]).toBe("AgentB");
+      expect(xCycle).toContain("AgentA");
+      expect(xCycle).toContain("AgentB");
+
+      // A's wait is still pending — only the closing edge was refused.
+      const stillWaiting = await Promise.race([
+        waitAP.then(() => "settled"),
+        Bun.sleep(50).then(() => "waiting"),
+      ]);
+      expect(stillWaiting).toBe("waiting");
+    } finally {
+      await a.dispose();
+      await b.dispose();
+    }
+  },
+  WAIT_TIMEOUT_MS,
+);
