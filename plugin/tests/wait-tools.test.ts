@@ -823,3 +823,197 @@ test(
   },
   WAIT_TIMEOUT_MS,
 );
+// --- wait_for_message rendering + filter branches (describeMatch, matches) ---
+
+/**
+ * describeMatch is module-private, so the rendering is covered through the event
+ * outcome: start a wait, produce the matching room activity, assert the
+ * kind-specific one-line text in content. Only `msg` records satisfy the filter
+ * (matches() line ~228), so the non-msg branches below are exercised only for
+ * the shapes the wait can actually resolve on; the unreachable fallthroughs
+ * stay uncovered by construction, not by omission.
+ */
+test(
+  "wait_for_message renders the matched msg as `from · topic:t · body`",
+  async () => {
+    const root = freshRoot();
+    const bus = new EventBus();
+    const registry = new AgentRegistry();
+    const a = await newSession(bus, registry, root, "AgentA");
+    const b = await newSession(bus, registry, root, "AgentB");
+    try {
+      const pending = toolOf(a, "wait_for_message").execute("c-msg-render", {
+        from: "AgentB",
+        topic: "sync",
+        timeout: 5_000,
+      });
+      await toolOf(b, "room").execute("c-post", {
+        op: "post",
+        topic: "sync",
+        body: "parser is green",
+      });
+      const res = await Promise.race([pending, Bun.sleep(2_000).then(() => null)]);
+      expect(res).not.toBeNull();
+      expect(res!.details).toMatchObject({ ok: true, outcome: "event" });
+      expect(textOf(res!)).toContain('AgentB · topic:sync · "parser is green"');
+    } finally {
+      await a.dispose();
+      await b.dispose();
+    }
+  },
+  WAIT_TIMEOUT_MS,
+);
+
+test(
+  "wait_for_message with a topic filter resolves only on that topic's post",
+  async () => {
+    const root = freshRoot();
+    const bus = new EventBus();
+    const registry = new AgentRegistry();
+    const a = await newSession(bus, registry, root, "AgentA");
+    const b = await newSession(bus, registry, root, "AgentB");
+    try {
+      const pending = toolOf(a, "wait_for_message").execute("c-topic-filter", {
+        topic: "wanted",
+        timeout: 5_000,
+      });
+      // A post on another topic must NOT resolve the wait.
+      await toolOf(b, "room").execute("c-post-other", {
+        op: "post",
+        topic: "other",
+        body: "wrong room",
+      });
+      const ignored = await Promise.race([
+        pending.then(() => "settled"),
+        Bun.sleep(100).then(() => "waiting"),
+      ]);
+      expect(ignored).toBe("waiting");
+      // A post on the wanted topic resolves it with the topic-first rendering.
+      await toolOf(b, "room").execute("c-post-wanted", {
+        op: "post",
+        topic: "wanted",
+        body: "right room",
+      });
+      const res = await Promise.race([pending, Bun.sleep(2_000).then(() => null)]);
+      expect(res).not.toBeNull();
+      expect(res!.details).toMatchObject({ ok: true, outcome: "event" });
+      expect(textOf(res!)).toContain('AgentB · topic:wanted · "right room"');
+    } finally {
+      await a.dispose();
+      await b.dispose();
+    }
+  },
+  WAIT_TIMEOUT_MS,
+);
+
+test(
+  "wait_for_message with a from filter ignores posts from other agents",
+  async () => {
+    const root = freshRoot();
+    const bus = new EventBus();
+    const registry = new AgentRegistry();
+    const a = await newSession(bus, registry, root, "AgentA");
+    const b = await newSession(bus, registry, root, "AgentB");
+    const c = await newSession(bus, registry, root, "AgentC");
+    try {
+      const pending = toolOf(a, "wait_for_message").execute("c-from-filter", {
+        from: "AgentB",
+        timeout: 5_000,
+      });
+      await toolOf(c, "room").execute("c-post-c", {
+        op: "post",
+        topic: "sync",
+        body: "not the one",
+      });
+      const ignored = await Promise.race([
+        pending.then(() => "settled"),
+        Bun.sleep(100).then(() => "waiting"),
+      ]);
+      expect(ignored).toBe("waiting");
+      await toolOf(b, "room").execute("c-post-b", {
+        op: "post",
+        topic: "sync",
+        body: "the one",
+      });
+      const res = await Promise.race([pending, Bun.sleep(2_000).then(() => null)]);
+      expect(res).not.toBeNull();
+      expect(res!.details).toMatchObject({ ok: true, outcome: "event" });
+      expect(textOf(res!)).toContain('AgentB · topic:sync · "the one"');
+    } finally {
+      await a.dispose();
+      await b.dispose();
+      await c.dispose();
+    }
+  },
+  WAIT_TIMEOUT_MS,
+);
+
+test(
+  "wait_for_message with mention:true resolves only on a post that mentions the waiter",
+  async () => {
+    const root = freshRoot();
+    const bus = new EventBus();
+    const registry = new AgentRegistry();
+    const a = await newSession(bus, registry, root, "AgentA");
+    const b = await newSession(bus, registry, root, "AgentB");
+    try {
+      const pending = toolOf(a, "wait_for_message").execute("c-mention-filter", {
+        mention: true,
+        timeout: 5_000,
+      });
+      await toolOf(b, "room").execute("c-post-plain", {
+        op: "post",
+        topic: "sync",
+        body: "no ping",
+      });
+      const ignored = await Promise.race([
+        pending.then(() => "settled"),
+        Bun.sleep(100).then(() => "waiting"),
+      ]);
+      expect(ignored).toBe("waiting");
+      await toolOf(b, "room").execute("c-post-mention", {
+        op: "post",
+        topic: "sync",
+        body: "ping you",
+        mention: ["AgentA"],
+      });
+      const res = await Promise.race([pending, Bun.sleep(2_000).then(() => null)]);
+      expect(res).not.toBeNull();
+      expect(res!.details).toMatchObject({ ok: true, outcome: "event" });
+      expect(textOf(res!)).toContain('AgentB · topic:sync · "ping you"');
+    } finally {
+      await a.dispose();
+      await b.dispose();
+    }
+  },
+  WAIT_TIMEOUT_MS,
+);
+
+test(
+  "wait_for_message with no filters resolves on any new post",
+  async () => {
+    const root = freshRoot();
+    const bus = new EventBus();
+    const registry = new AgentRegistry();
+    const a = await newSession(bus, registry, root, "AgentA");
+    const b = await newSession(bus, registry, root, "AgentB");
+    try {
+      const pending = toolOf(a, "wait_for_message").execute("c-no-filter", {
+        timeout: 5_000,
+      });
+      await toolOf(b, "room").execute("c-post", {
+        op: "post",
+        topic: "anything",
+        body: "first post wins",
+      });
+      const res = await Promise.race([pending, Bun.sleep(2_000).then(() => null)]);
+      expect(res).not.toBeNull();
+      expect(res!.details).toMatchObject({ ok: true, outcome: "event" });
+      expect(textOf(res!)).toContain('AgentB · topic:anything · "first post wins"');
+    } finally {
+      await a.dispose();
+      await b.dispose();
+    }
+  },
+  WAIT_TIMEOUT_MS,
+);
