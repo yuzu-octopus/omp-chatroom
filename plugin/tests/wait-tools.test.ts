@@ -1159,3 +1159,196 @@ test(
   },
   WAIT_TIMEOUT_MS,
 );
+
+test(
+  "wait_for_claim on a resource the caller already holds returns an immediate event, queueing nothing",
+  async () => {
+    const root = freshRoot();
+    const bus = new EventBus();
+    const registry = new AgentRegistry();
+    const a = await newSession(bus, registry, root, "AgentA");
+    const b = await newSession(bus, registry, root, "AgentB");
+    try {
+      const roomA = toolOf(a, "room");
+      await roomA.execute("c-hold", { op: "claim", topic: "self", key: "res", ttl: 300_000 });
+
+      // Self-hold fast path: resolves without blocking — no settle window needed.
+      const res = await toolOf(a, "wait_for_claim").execute("c-self", {
+        resource: "self/res",
+        timeout: 5_000,
+      });
+      expect(res.details).toMatchObject({
+        ok: true,
+        outcome: "event",
+        acquired: true,
+        claim: { holder: "AgentA", resource: "self/res" },
+      });
+      expect(res.useless).not.toBe(true);
+
+      // Nothing was queued: after A releases, B's claim is granted outright — a queued
+      // waiter would have been promoted by the release instead, denying B.
+      await roomA.execute("c-rel", { op: "release", topic: "self", key: "res" });
+      const grantB = await toolOf(b, "room").execute("c-take", {
+        op: "claim",
+        topic: "self",
+        key: "res",
+        ttl: 300_000,
+      });
+      expect(grantB.details).toMatchObject({ ok: true, op: "claim", holder: "AgentB" });
+    } finally {
+      await a.dispose();
+      await b.dispose();
+    }
+  },
+  WAIT_TIMEOUT_MS,
+);
+
+test(
+  "wait_for_claim on a corrupt room root returns aborted + error, never throws",
+  async () => {
+    const root = freshRoot();
+    const bus = new EventBus();
+    const registry = new AgentRegistry();
+    // Same blocker-file trick as the wait_for_message corrupt test: a file where the
+    // room/ directory must go → mkdir fails (ENOTDIR). Written BEFORE any session opens
+    // the root, since the in-memory store is keyed per root.
+    fs.mkdirSync(path.join(root, ".omp-room"), { recursive: true });
+    fs.writeFileSync(path.join(root, ".omp-room", "room"), "not a dir");
+    const b = await newSession(bus, registry, root, "AgentB");
+    try {
+      const res = await toolOf(b, "wait_for_claim").execute("c-corrupt", {
+        resource: "x/y",
+        timeout: 5_000,
+      });
+      expect(res.details).toMatchObject({ ok: false, outcome: "aborted", acquired: false });
+      expect(res.isError).toBe(true);
+      const details: Record<string, unknown> = res.details ?? {};
+      expect(typeof details.error).toBe("string");
+      expect(Array.isArray(res.content)).toBe(true);
+    } finally {
+      await b.dispose();
+    }
+  },
+  WAIT_TIMEOUT_MS,
+);
+
+test(
+  "wait_for_claim requeues past a foreign-claim win (maxWaitMs clamp holds) and is promoted on the next release",
+  async () => {
+    const root = freshRoot();
+    const bus = new EventBus();
+    const registry = new AgentRegistry();
+    const a = await newSession(bus, registry, root, "AgentA");
+    const b = await newSession(bus, registry, root, "AgentB");
+    const c = await newSession(bus, registry, root, "AgentC");
+    try {
+      const roomA = toolOf(a, "room");
+      const roomC = toolOf(c, "room");
+      await roomA.execute("c-hold", { op: "claim", topic: "race", key: "res", ttl: 300_000 });
+
+      // C queues first (oldest), then B with a 1 ms maxWaitMs — clamped to the 1000 ms
+      // floor, so a foreign win arriving long before that stays queued, never times out.
+      const waitCP = toolOf(c, "wait_for_claim").execute("c-wc", {
+        resource: "race/res",
+        timeout: 5_000,
+      });
+      await Bun.sleep(50);
+      const waitBP = toolOf(b, "wait_for_claim").execute("c-wb", {
+        resource: "race/res",
+        timeout: 5_000,
+        maxWaitMs: 1,
+      });
+      await Bun.sleep(50);
+
+      // A releases: the oldest waiter C is promoted. B sees C's claim record — a foreign
+      // win — and requeues to the back (elapsed << clamped 1000 ms, so no livelock timeout).
+      await roomA.execute("c-rel", { op: "release", topic: "race", key: "res" });
+      const winnerC = await Promise.race([waitCP, Bun.sleep(2_000).then(() => null)]);
+      expect(winnerC).not.toBeNull();
+      expect(winnerC!.details).toMatchObject({
+        ok: true,
+        outcome: "event",
+        acquired: true,
+        claim: { holder: "AgentC" },
+      });
+
+      // B is still queued — a foreign win never settles a waiter while maxWaitMs holds.
+      const stillWaiting = await Promise.race([
+        waitBP.then(() => "settled"),
+        Bun.sleep(80).then(() => "waiting"),
+      ]);
+      expect(stillWaiting).toBe("waiting");
+
+      // C releases: B is the only waiter left, so B is promoted and settles with an event.
+      await roomC.execute("c-rel-c", { op: "release", topic: "race", key: "res" });
+      const winnerB = await Promise.race([waitBP, Bun.sleep(2_000).then(() => null)]);
+      expect(winnerB).not.toBeNull();
+      expect(winnerB!.details).toMatchObject({
+        ok: true,
+        outcome: "event",
+        acquired: true,
+        claim: { holder: "AgentB" },
+      });
+    } finally {
+      await a.dispose();
+      await b.dispose();
+      await c.dispose();
+    }
+  },
+  WAIT_TIMEOUT_MS,
+);
+
+test(
+  "wait_for_claim with an exceeded maxWaitMs times out on the next foreign-claim win instead of requeueing forever",
+  async () => {
+    const root = freshRoot();
+    const bus = new EventBus();
+    const registry = new AgentRegistry();
+    const a = await newSession(bus, registry, root, "AgentA");
+    const b = await newSession(bus, registry, root, "AgentB");
+    const c = await newSession(bus, registry, root, "AgentC");
+    try {
+      const roomA = toolOf(a, "room");
+      await roomA.execute("c-hold", { op: "claim", topic: "race", key: "res", ttl: 300_000 });
+
+      // C oldest, then B with maxWaitMs at the 1000 ms floor and a long timeout: only the
+      // maxWaitMs guard can settle B early.
+      const waitCP = toolOf(c, "wait_for_claim").execute("c-wc", {
+        resource: "race/res",
+        timeout: 30_000,
+      });
+      await Bun.sleep(50);
+      const waitBP = toolOf(b, "wait_for_claim").execute("c-wb", {
+        resource: "race/res",
+        timeout: 30_000,
+        maxWaitMs: 1_000,
+      });
+      // Let B's maxWaitMs elapse before anything happens — the guard only runs when a
+      // foreign-claim record arrives, so the trigger must come after this sleep.
+      await Bun.sleep(1_300);
+
+      // A releases: C is promoted; B sees the foreign win with maxWaitMs exceeded and
+      // settles {timeout, acquired:false} instead of requeueing (the livelock guard).
+      await roomA.execute("c-rel", { op: "release", topic: "race", key: "res" });
+      const loserB = await Promise.race([waitBP, Bun.sleep(2_000).then(() => null)]);
+      expect(loserB).not.toBeNull();
+      expect(loserB!.details).toMatchObject({ ok: true, outcome: "timeout", acquired: false });
+      expect(loserB!.useless).toBe(true);
+
+      // C still won normally.
+      const winnerC = await Promise.race([waitCP, Bun.sleep(2_000).then(() => null)]);
+      expect(winnerC).not.toBeNull();
+      expect(winnerC!.details).toMatchObject({
+        ok: true,
+        outcome: "event",
+        acquired: true,
+        claim: { holder: "AgentC" },
+      });
+    } finally {
+      await a.dispose();
+      await b.dispose();
+      await c.dispose();
+    }
+  },
+  WAIT_TIMEOUT_MS,
+);
