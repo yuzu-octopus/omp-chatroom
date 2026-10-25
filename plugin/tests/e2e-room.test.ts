@@ -45,13 +45,14 @@ async function newSession(
   root: string,
   id: string,
   main = false,
+  configOverride: Partial<typeof DEFAULT_ROOM_CONFIG> = {},
 ) {
   // The compactor only starts for a MAIN session, and this file's sessions are main (the
   // claim-sweep job only runs there). Without this the compactor would fire REAL model calls at
   // the configured provider - dozens per run, on the user's quota, and the suite's duration
   // would depend on the network. The compactor has its own tests (tree.test.ts) with the fake
   // LLM seam; here it is capped at zero.
-  saveRoomConfig(ROOM_ROOT(root), { ...DEFAULT_ROOM_CONFIG, compactionCallsPerDay: 1 });
+  saveRoomConfig(ROOM_ROOT(root), { ...DEFAULT_ROOM_CONFIG, compactionCallsPerDay: 1, ...configOverride });
   __compactTest.setSpendToday(ROOM_ROOT(root), 1);
   const { session } = await createAgentSession({
     eventBus: bus,
@@ -445,10 +446,10 @@ test("the real 5 s sweep job expires a stale claim (K3 integration)", async () =
   const bus = new EventBus();
   const registry = new AgentRegistry();
   // The one test that needs a MAIN session: the sweep job it exercises only runs there.
-  const a = await newSession(bus, registry, root, "AgentA", true);
+  const a = await newSession(bus, registry, root, "AgentA", true, { claimSweepMs: 1_000 });
   try {
     await toolOf(a, "room").execute("c-claim", { op: "claim", topic: "ttl", key: "x", ttl: 1_000 });
-    // claimSweepMs is 5000 (config default); the claim's 1 s TTL is long past.
+    // claimSweepMs is 1000 (overridden for CI reliability); the claim's 1 s TTL is long past.
     const deadline = Date.now() + 20_000;
     let expired: Record<string, unknown> | undefined;
     while (Date.now() < deadline && !expired) {
