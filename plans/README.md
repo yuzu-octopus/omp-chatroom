@@ -6,7 +6,7 @@ Baseline at plan time: `tsc` 0 errors, `biome check` clean, `bun test tests/`
 reproduced — see plan 014). Execute in the order below unless dependencies say
 otherwise. Each executor: read the plan fully before starting, honor its STOP
 conditions, and update your row when done.
-Round-10b6f60 (2026-10-26): tsc 0 errors, biome clean, 438 pass / 1 skip / 0 fail / 18 files; host pin 18.12.3. Since round-fdded7a: message-side cycle refusal.
+Round-0370583 (2026-10-26): tsc 0 errors, biome clean, 444 pass / 1 skip / 0 fail / 18 files; host pin 18.12.3. Since round-10b6f60: stale-row release race, boxRound fallback, nav keys, presence marker.
 
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
