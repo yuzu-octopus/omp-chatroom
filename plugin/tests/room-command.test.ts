@@ -89,6 +89,80 @@ test("/room claim with a numeric TTL grants with that lease (positive control)",
   expect(notified.some((line) => line.includes("granted"))).toBe(true);
 });
 
+test("/room claim re-claims your own lease → renewed with the new expiry, no contended record", async () => {
+  const notified: string[] = [];
+  const handler = captureHandler(notified);
+  const root = tempRoot();
+  const store = roomStoreForCwd(root);
+  await handler("claim build step 60000", headlessCtx(root, notified));
+  expect(store.claims.get("build/step")?.holder).toBe("Main");
+
+  await handler("claim build step 120000", headlessCtx(root, notified));
+
+  expect(notified.some((line) => line.includes("renewed"))).toBe(true);
+  expect(notified.some((line) => line.includes("expires in 120s"))).toBe(true);
+  // The renewal replaces the lease: same holder, new expiry …
+  expect(store.claims.get("build/step")?.holder).toBe("Main");
+  expect(store.claims.get("build/step")?.ttlMs).toBe(120_000);
+  // … appended as a second claim record, and the loss path never fires.
+  expect(store.records.filter((r) => r.kind === "claim")).toHaveLength(2);
+  expect(store.records.filter((r) => r.kind === "contended")).toHaveLength(0);
+});
+
+test("/room claim on another holder's live lease → denied with a contended record", async () => {
+  const notified: string[] = [];
+  const handler = captureHandler(notified);
+  const root = tempRoot();
+  const store = roomStoreForCwd(root);
+  // A fresh 60s lease is live, so the renew-own path cannot fire — this must deny.
+  store.append({ kind: "claim", from: "Other", resource: "build/step", ttlMs: 60_000 });
+
+  await handler("claim build step 60000", headlessCtx(root, notified));
+
+  expect(notified.join("\n")).toContain("denied, held by Other");
+  expect(store.claims.get("build/step")?.holder).toBe("Other");
+  // R5 — the loss is a measurement: one contended record naming claimant and holder …
+  const contended = store.records.filter((r) => r.kind === "contended");
+  expect(contended).toHaveLength(1);
+  expect(contended[0]).toMatchObject({ from: "Main", resource: "build/step", holder: "Other" });
+  // … and no new claim record.
+  expect(store.records.filter((r) => r.kind === "claim")).toHaveLength(1);
+});
+
+test("/room claim renewal notifies the waiter but does not promote it", async () => {
+  const notified: string[] = [];
+  const handler = captureHandler(notified);
+  const root = tempRoot();
+  const store = roomStoreForCwd(root);
+  await handler("claim build step 60000", headlessCtx(root, notified));
+  // W is mid-wait on build/step; the renewal re-appends a claim on that resource …
+  store.members.set("Waiter", {
+    agentId: "Waiter",
+    joinedAtSeq: 0,
+    topics: new Set(),
+    muted: new Set(),
+    threadRoots: new Set(),
+    heldTopics: new Set(),
+    waitedResource: "build/step",
+  });
+  enqueueWaiter(store, "build/step", "Waiter");
+  const calls: Send[] = [];
+  registerSession("Waiter", calls);
+  try {
+    await handler("claim build step 60000", headlessCtx(root, notified));
+    expect(notified.some((line) => line.includes("renewed"))).toBe(true);
+    // … which classifies T1 for the waiter (M-8) and pushes an aside …
+    expect(calls.length).toBe(1);
+    expect(calls[0]!.options).toMatchObject({ deliverAs: "aside" });
+    // … but the lease stays with the holder: no promotion, no release record.
+    expect(store.claims.get("build/step")?.holder).toBe("Main");
+    expect(store.records.filter((r) => r.kind === "release")).toHaveLength(0);
+    expect(store.waiters.get("build/step")).toEqual(["Waiter"]);
+  } finally {
+    AgentRegistry.global().unregister("Waiter");
+  }
+});
+
 test("/room config shows only live knobs — no inert line, no reserved flags", async () => {
   const notified: string[] = [];
   const handler = captureHandler(notified);
