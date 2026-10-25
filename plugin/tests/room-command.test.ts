@@ -572,3 +572,68 @@ test("/room board with claim+waiter+members+posts shows TTL, waiting, cursor/lag
     AgentRegistry.global().unregister("Bob");
   }
 });
+
+// --- entry guards: unknown subcommand, corrupt store, claim-no-args, post member update ---
+
+test("/room unknown subcommand warns with usage and appends nothing", async () => {
+  const notified: string[] = [];
+  const handler = captureHandler(notified);
+  const root = tempRoot();
+  const store = roomStoreForCwd(root);
+  const before = store.records.length;
+
+  await handler("frobnicate", headlessCtx(root, notified));
+
+  expect(store.records.length).toBe(before);
+  expect(notified.some((line) => line.includes('unknown subcommand "frobnicate"'))).toBe(true);
+  expect(notified.some((line) => line.includes("usage: /room"))).toBe(true);
+});
+
+test("/room on a corrupt store reports room unavailable and never throws", async () => {
+  const notified: string[] = [];
+  const handler = captureHandler(notified);
+  const root = tempRoot();
+  // Blocker file where the room/ directory must go → mkdir fails (ENOTDIR). Written BEFORE
+  // any session opens the root: the in-memory store is keyed per root, so corrupting after a
+  // session would reuse the cached healthy store (cf. wait-tools.test.ts corrupt tests).
+  fs.mkdirSync(path.join(root, ".omp-room"), { recursive: true });
+  fs.writeFileSync(path.join(root, ".omp-room", "room"), "not a dir");
+
+  await handler("board", headlessCtx(root, notified));
+
+  expect(notified.some((line) => line.includes("room unavailable"))).toBe(true);
+});
+
+test("/room claim with no args warns and appends nothing", async () => {
+  const notified: string[] = [];
+  const handler = captureHandler(notified);
+  const root = tempRoot();
+  const store = roomStoreForCwd(root);
+  const before = store.records.length;
+
+  await handler("claim", headlessCtx(root, notified));
+
+  expect(store.records.length).toBe(before);
+  expect(store.claims.size).toBe(0);
+  expect(notified.some((line) => line.includes("claim requires <topic> <key>"))).toBe(true);
+});
+
+test("/room post updates the member lastMessageId and topics", async () => {
+  const notified: string[] = [];
+  const handler = captureHandler(notified);
+  const root = tempRoot();
+  const store = roomStoreForCwd(root);
+  await handler("join", headlessCtx(root, notified));
+
+  await handler("post build hello world", headlessCtx(root, notified));
+
+  const member = store.members.get("Main");
+  expect(member).toBeDefined();
+  expect(member?.topics.has("build")).toBe(true);
+  const last = store.records.filter((r) => r.kind === "msg").at(-1);
+  expect(last?.kind).toBe("msg");
+  expect(member?.lastMessageId).toBeDefined();
+  if (last?.kind === "msg" && member?.lastMessageId !== undefined)
+    expect(last.id).toBe(member.lastMessageId);
+  expect(notified.some((line) => line.includes("room post → build"))).toBe(true);
+});
