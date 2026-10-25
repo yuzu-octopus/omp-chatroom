@@ -43,25 +43,27 @@ advanced on delivery into context, never on send.
 
 ## Key Directories
 
-| Path | Purpose |
+|Path|Purpose|
 |---|---|
-| `plugin/src/store/` | room root, log, projection, claim arbiter, cursors, config, tree, compactor |
-| `plugin/src/attention/` | tier classification, governor, delivery adapter |
-| `plugin/src/panel/` | three-pane overlay (chrome, keys, chat, board, roster) |
-| `plugin/src/cards/` | quote-bordered body lines, message cards, tool cards |
-| `plugin/src/tools/` | `room` and the three wait tools |
-| `plugin/src/onboarding/` | digest, routing rule, `before_agent_start` hook |
-| `plugin/src/commands/` | slash commands |
-| `docs/research/omp-agent-chatroom/` | brief → REPORT → REPORT-v2 → PLAN-build → REPORT-v3 → build |
-| `docs/research/omp-agent-notes/` | agent-facing notes on src / tests / config / docs |
-| `docs/research/optmem-2026-10-08/` | OptMem/UniiChat revision 2026-10-08: four reports + rejection |
+|`plugin/src/store/`|room root, log, projection, claim arbiter, cursors, config, tree, compactor|
+|`plugin/src/attention/`|tier classification, governor, delivery adapter|
+|`plugin/src/panel/`|three-pane overlay (chrome, keys, chat, board, roster)|
+|`plugin/src/cards/`|quote-bordered body lines, message cards, tool cards|
+|`plugin/src/tools/`|`room` and the three wait tools|
+|`plugin/src/onboarding/`|digest, routing rule, `before_agent_start` hook|
+|`plugin/src/commands/`|slash commands|
+|`docs/research/omp-agent-chatroom/`|brief → REPORT → REPORT-v2 → PLAN-build → REPORT-v3 → build|
+|`docs/research/omp-agent-notes/`|agent-facing notes on src / tests / config / docs|
+|`docs/research/large-swarm-coordination/`|large-swarm research round: brief, REPORT, findings|
+|`plans/`|numbered implementation plans (001–021) + index|
+|`plugin/skills/omp-agent-chatroom/`|skill shipped with the plugin|
 
 ## Development Commands
 
 ```sh
 cd plugin
-bun test tests/                                 # the whole suite (302 pass, 15 files)
-bun check                                        # typecheck (Bun's own; ~10x faster than tsc)
+bun test tests/                                 # whole suite (362 pass, 18 files)
+bun check                                        # typecheck (Bun's own; ~10× faster than tsc)
 bunx --bun tsc --noEmit -p tsconfig.json        # the same typecheck via tsc (CI runs this)
 bunx --bun @biomejs/biome check src tests       # lint + format
 bunx --bun @biomejs/biome check src tests --write   # apply fixes
@@ -102,23 +104,23 @@ yourself. The human has the machine and will run it.
 
 **Runtime is Bun. Never Node, npm, or npx.** There is no root `package.json` and no workspace.
 
-**Invariants that must hold when editing** (I1–I11):
+**Invariants that must hold when editing** (I1–I13):
 
-| # | Rule | Enforced at |
+|#|Rule|Enforced at|
 |---|---|---|
-| I1 | mutations are synchronous — no `await` between mint, write, project, notify | `store/room-store.ts:149-168` |
-| I2 | no session-scoped module state; key by root/agent in `globalThis` maps | `store/room-store.ts:60-67`, `store/compactor.ts:43`, `store/compactor.ts:111`, `store/tree-store.ts:133` |
-| I3 | key every shared structure by `ctx.agent.id` | `store/room-store.ts:243-250`, `panel/panel.ts:29` |
-| I4 | timers via `ctx.setInterval` only — never a raw timer (a throw is process-fatal) | `store/compactor.ts:303-317`, `store/room-store.ts:345-380` |
-| I5 | synchronous append survives a crash — `fsyncSync` in the one `appendLine` path | `store/log.ts:81-95` |
-| I6 | every wait promise settles — signal, timeout and promotion all `finish()` | `tools/wait-for-claim.ts:147-190` and both siblings |
-| I7 | the compactor's daily spend cap **and** its write mutex are per room root — never process-global, or a busy room starves the other | `store/compactor.ts:36-52`, `store/compactor.ts:106-122` |
-| I8 | delivery is serialised per room root — two concurrent posts reach a recipient in seq order | `tools/room.ts:357-376` |
-| I9 | a recipient's cursor never advances past a record it has not seen — the owed floor is applied to **every** cursor bump in `deliver()` (the T0/T1 path included, not only the T2 one) | `attention/delivery.ts:78-83`, `tools/room.ts:450-457` |
-| I10 | the load-time host-drift check **warns**, it never throws — a working room beats a plugin that refuses to load | `index.ts:31-47` |
-| I11 | a delivery never waits for the recipient's whole turn — the host's send resolves at the end of the **target's** turn, so every send is bounded (250 ms); a rejection inside the bound still surfaces as `deliveryError`, and the per-recipient deliveries run concurrently so one slow recipient cannot hold up the others | `attention/delivery.ts:25`, `attention/delivery.ts:38-63`, `attention/delivery.ts:145-153`, `tools/room.ts:333-337` |
-| I12 | a delivered T0 is delivered ONCE — while an older record is still owed the cursor cannot advance past it, so the T0 would be re-selected and re-sent (a wake+steer storm); the delivered T0s are remembered per room root and per recipient | `store/cursors.ts:32-72`, `attention/delivery.ts:144-158`, `tools/room.ts:449-456` |
-| I13 | the retention `gap` record is CARRIED by the next pass — it is T1 for every viewer but is appended outside any op's batch, so left uncarried it pinned every cursor and froze the room | `tools/room.ts:462-480`, `attention/tiers.ts:36` |
+|I1|mutations are synchronous — no `await` between mint, write, project, notify|`store/room-store.ts:149-168`|
+|I2|no session-scoped module state; key by root/agent in `globalThis` maps|`store/room-store.ts:60-67`, `store/compactor.ts:43`, `store/compactor.ts:111`, `store/tree-store.ts:133`|
+|I3|key every shared structure by `ctx.agent.id`|`store/room-store.ts:243-250`, `panel/panel.ts:29`|
+|I4|timers via `ctx.setInterval` only — never a raw timer (a throw is process-fatal)|`store/compactor.ts:303-317`, `store/room-store.ts:345-380`|
+|I5|synchronous append survives a crash — `fsyncSync` in the one `appendLine` path|`store/log.ts:81-95`|
+|I6|every wait promise settles — signal, timeout and promotion all `finish()`|`tools/wait-for-claim.ts:147-190` and both siblings|
+|I7|the compactor's daily spend cap **and** its write mutex are per room root — never process-global, or a busy room starves the other|`store/compactor.ts:36-52`, `store/compactor.ts:106-122`|
+|I8|delivery is serialised per room root — two concurrent posts reach a recipient in seq order|`tools/room.ts:357-376`|
+|I9|a recipient's cursor never advances past a record it has not seen — the owed floor is applied to **every** cursor bump in `deliver()` (the T0/T1 path included, not only the T2 one)|`attention/delivery.ts:78-83`, `tools/room.ts:450-457`|
+|I10|the load-time host-drift check **warns**, it never throws — a working room beats a plugin that refuses to load|`index.ts:31-47`|
+|I11|a delivery never waits for the recipient's whole turn — the host's send resolves at the end of the **target's** turn, so every send is bounded (250 ms); a rejection inside the bound still surfaces as `deliveryError`, and the per-recipient deliveries run concurrently so one slow recipient cannot hold up the others|`attention/delivery.ts:25`, `attention/delivery.ts:38-63`, `attention/delivery.ts:145-153`, `tools/room.ts:333-337`|
+|I12|a delivered T0 is delivered ONCE — while an older record is still owed the cursor cannot advance past it, so the T0 would be re-selected and re-sent (a wake+steer storm); the delivered T0s are remembered per room root and per recipient|`store/cursors.ts:32-72`, `attention/delivery.ts:144-158`, `tools/room.ts:449-456`|
+|I13|the retention `gap` record is CARRIED by the next pass — it is T1 for every viewer but is appended outside any op's batch, so left uncarried it pinned every cursor and froze the room|`tools/room.ts:462-480`, `attention/tiers.ts:36`|
 
 **The room lives in the global omp session store, not in the project tree.** The room root is
 `getSessionsDir()/rooms/<16 hex chars of the project path>` — i.e. `~/.omp/agent/sessions/rooms/<hash>`
@@ -174,25 +176,25 @@ Detailed conventions and the not-covered list: `docs/research/omp-agent-notes/te
 
 ## Important Files
 
-| File | Why |
+|File|Why|
 |---|---|
-| `plugin/src/index.ts` | the extension entry — calls every `registerX` |
-| `plugin/src/version.ts` | `HOST_VERSION_PIN`; the drift gate and the load-time warning |
-| `plugin/src/store/room-store.ts` | append, projection, refcounted registry, retention |
-| `plugin/src/store/room-root.ts` | where the room lives: global session store, temp-dir exception, legacy migration |
-| `plugin/src/store/log.ts` | the one append path, with `fsyncSync` |
-| `plugin/src/store/tree-store.ts` | `cover`, `putNode`, `pending`/`ready`, `TREE_REC=512` |
-| `plugin/src/store/compactor.ts` | background summarisation, rate cap, retry-with-ruler |
-| `plugin/src/attention/tiers.ts` → `governor.ts` → `delivery.ts` | the attention pipeline |
-| `plugin/src/panel/panel.ts` | the overlay; `resolveTheme` handles a host theme with no `fg` |
-| `plugin/src/onboarding/routing-rule.md` | the shipped room-vs-`agent://` rule |
-| `docs/research/omp-agent-chatroom/PLAN-build.md` | normative design; §4.1 ops, §5.2 caps, §10 risks |
-| `docs/research/omp-agent-chatroom/HANDOFF.md` | current build state and verification evidence |
+|`plugin/src/index.ts`|the extension entry — calls every `registerX`|
+|`plugin/src/version.ts`|`HOST_VERSION_PIN`; the drift gate and the load-time warning|
+|`plugin/src/store/room-store.ts`|append, projection, refcounted registry, retention|
+|`plugin/src/store/room-root.ts`|where the room lives: global session store, temp-dir exception, legacy migration|
+|`plugin/src/store/log.ts`|the one append path, with `fsyncSync`|
+|`plugin/src/store/tree-store.ts`|`cover`, `putNode`, `pending`/`ready`, `TREE_REC=512`|
+|`plugin/src/store/compactor.ts`|background summarisation, rate cap, retry-with-ruler|
+|`plugin/src/attention/tiers.ts` → `governor.ts` → `delivery.ts`|the attention pipeline|
+|`plugin/src/panel/panel.ts`|the overlay; `resolveTheme` handles a host theme with no `fg`|
+|`plugin/src/onboarding/routing-rule.md`|the shipped room-vs-`agent://` rule|
+|`docs/research/omp-agent-chatroom/PLAN-build.md`|normative design; §4.1 ops, §5.2 caps, §10 risks|
+|`docs/research/omp-agent-chatroom/HANDOFF.md`|current build state and verification evidence|
 
 ## Runtime/Tooling Preferences
 
 - **Bun only** — `bun` 1.4.3. Package manager, runner, and runtime. No `node`, `npm`, or `npx`.
-- **Host: omp 18.12.3.** The plugin pins it exactly in both `peerDependencies` and
+- **Host: omp 18.12.6.** The plugin pins it exactly in both `peerDependencies` and
   `devDependencies` — `@oh-my-pi/pi-coding-agent`, `@oh-my-pi/pi-tui`, `@oh-my-pi/pi-ai` and
   `@oh-my-pi/pi-utils` — because the ten deep subpath imports (`DEEP_SPECIFIERS`) are
   wildcard-only, not public API. The ten are
@@ -200,8 +202,7 @@ Detailed conventions and the not-covered list: `docs/research/omp-agent-notes/te
   and
   `@oh-my-pi/pi-tui/{chat/messages,chrome/overlay-box,render/render-utils,render/status-line,theme/active-symbols,tools/renderer}`
   — `theme/active-symbols` is the tenth (it is the host's own symbol lookup, which the plugin's
-  theme shim resolves through rather than copying; the shim's publish path uses the SAME module to
-  restore the host's mirror, so the count stays at ten). Two of the ten are imported by the TESTS
+  theme shim resolves through rather than copying). Two of the ten are imported by the TESTS
   only (`pi-coding-agent/internal-urls/local-protocol` and `pi-coding-agent/utils/event-bus`): no
   source file imports them, but they are still subpaths the plugin resolves, so they belong in the
   list a host bump is audited against.
@@ -242,7 +243,7 @@ legacy migration, the cold-tree summaries (faithful at the leaves, and a prompt 
 room message was summarised as DATA, never obeyed), and the unprompted discovery rate (MEASURED at
 75–86 %). The one thing that cannot be verified is live coordination across two omp *processes*: the
 room's single-writer lock refuses the second writer by design, so that boundary is documented
-rather than tested. See "Live verification" below.
+rather than tested.
 
 **Do not re-litigate these settled findings** — both are recorded with evidence:
 
@@ -254,37 +255,37 @@ rather than tested. See "Live verification" below.
   rejected change matches Taelin's `push` **worse** (8/400 vs 140/400).
   `docs/research/optmem-2026-10-08/A-merge-age-verification.md`.
 
-## Live Verification (omp 18.12.3)
+## Room vs direct message — routing rule
 
-The plugin was verified **live** against omp **18.12.3** — the exact version the plugin pins
-(`omp --version` → `omp/18.12.3`; `plugin/package.json` peer + dev deps and `plugin/node_modules`
-all 18.12.3). The packaged/linked route works: `omp plugin list` shows
-`omp-agent-chatroom@0.1.0  Available: [room, wait-tools, panel]`, linked at
-`~/.omp/plugins/node_modules/omp-agent-chatroom -> /home/yuzu/projects/omp-chatroom/plugin`.
+**`agent://<id>`** when exactly ONE agent is the recipient, when the recipients must not see each
+other's replies, when you are correcting or steering one running agent, or when broadcasting would
+amplify an error.
 
-The full set of checks below was run on **18.12.2**; the host then moved to 18.12.3 mid-round (the
-drift gate caught it, and the pin moved with it), and the essential checks were re-run on
-**18.12.3**: the room tool in a real model turn (`room join → rc1b11bca8146aa11 … cursor 0`,
-`room post → t1 · seq 2`), the legacy migration keeping its room id (`room join →
-rLEGACYFFFFGGGG`), and the `/room` panel opening and rendering (`Room #r9ee775e0aa4fd033 ·
-chat|board · 1 running`, `no claims` in the board pane).
+**The room** (`room{op:"post"}`) when several agents must see the message AND each other's
+responses, when it is a coordination artifact — a claim, a release, a shared finding, a status, an
+async update — or when it is a question that wants cross-critique.
 
-| Check | Live result |
-|---|---|
-| Plugin load | a fresh omp process loads the plugin with **zero stderr output** |
-| `room` tool in a real model turn | `join` → `rb1665961b913ad8e · 0 claim(s) · 1 member(s) · cursor 0`; `board` → `0 claim(s), 1 member(s), 0 topic(s) / Main · running · lag 1`; a second run did `join` → `post` (`t1 · seq 2`) → `claim` (`t1/k1` → granted, expires in 300s) |
-| Digest reaches the model | as a real custom message with `customType` `room:digest` |
-| Global room root | room data lands in the **global** store at `<sessions>/rooms/<16 hex of the project path>/room/{config.json,<roomId>.jsonl}` (the leaf equals `sha256(projectPath).slice(0,16)`) and **never** in the project directory — the project tree stayed empty (no `.omp-room`) |
-| XDG branch of `getSessionsDir()` | with `XDG_DATA_HOME` set **and** `$XDG_DATA_HOME/omp` existing, it resolves to `$XDG_DATA_HOME/omp/sessions`; without that app dir it falls back to `~/.omp/agent/sessions` |
-| Legacy migration | a project-local `.omp-room/room/<id>.jsonl` + `config.json` was copied into the global room with the **same room id** and the legacy record preserved as seq 1 (live). The migration is now a MOVE: the legacy room is removed once the copy is verified, so the project tree keeps no `.omp-room` (the removal is covered by `tests/room-root.test.ts` and the e2e test; a SKIPPED migration removes nothing and leaves the legacy room byte-for-byte intact). A project genuinely under `os.tmpdir()` stays project-local and creates no global room |
-| `/room` panel in a real terminal | **renders** — `tmux` is not installed on this machine, so a raw pty was used (python `pty.fork()` + `TIOCSWINSZ` 120x40, writing `/room` to the master fd). The panel showed the live room: the posted message in the chat pane, the held claim in the board pane, and the room id in the title matched the id in the global store file. The plugin's own panel trace shows `boxRound=object` (the field that used to crash it with `theme.boxRound` undefined) and `RoomPanel ctor: theme=object fg=function`, with no `FAILED` line and no `Room panel unavailable` notification |
-| Noise | the plugin produced **no** errors, warnings or stack traces across all runs (the plugin's own stderr was empty; the only stderr was host-level noise — slow-startup notices and MCP server timeouts — and no matching entries in `~/.omp/logs/`) |
-| Unprompted discovery | **measured over 16 trials**: the model claimed before mutating in 12 (85.7 % of scored trials, 75.0 % counting the two harness-error trials as misses). All three probe inputs (digest, routing rule, tool description) reached the model in 16/16; the control with the room plugin not loaded produced zero room calls. Every miss had the same shape: the model inspected the file and never consulted the room — and in a solo room the digest reads `1 live · 0 record(s)`, so the model correctly concluded there was nobody to coordinate with |
-| Coordination under real models | claim arbitration (a second claim refused, naming the holder, one shared durable log), mention delivery (a subagent's `post` with `mention:[parent]` arrived as a real `[T0] room ⟵ …` steer — the `⟵` is the model-facing prose arrow, TEXT in the model's input, not a painted glyph), release freeing the resource, and `wait_for_message` / `wait_for_claim` returning `outcome: "event"` without hanging |
-| The inline cards | **render in a real transcript** — `✉ room ⟵ Poster just now` + a quote-bordered body, and `▦ Room: join` / `▦ Room: post …` for the tool cards. That recording PREDATES the symbol-set change: the run painted the plugin's OWN hardcoded glyph (`▦`), not the host's — the current build paints the HOST's `status.info`/`status.pending` for the user's active symbol set instead, so the `▦` in the transcript is the OLD build, not the current one. The plugin paints no DECORATIVE glyph of its own **in the panel and the cards** — the envelope is the host's `tool.irc`, the tool cards' icons are `status.info`/`status.pending`, and every one of them follows the user's active symbol set; the literals that remain are text punctuation and delimiters (the `…` ellipsis, the panel title's `|`) and the **model-facing** prose arrows (`⟵` in the attention deliveries and the tool descriptions, `→` in the wait tools — the `⟵` in the transcript quote above is one of them), which are TEXT in the model's input, not painted glyphs, and are deliberately out of the symbol set's scope. The poster sees no message card for its own message (delivery suppresses self-authored records). `omp render` shows the RAW custom message instead: the render CLI builds its session without an `extensionRunner`, so the plugin's renderer never runs there — it is not a valid oracle |
-| The process boundary | **cross-process coordination is COLD only**: the log, the board and the digest are shared (a later process replays the log), but LIVE coordination is in-process (delivery resolves targets through the local `AgentRegistry`), and a second live writer on one project directory is refused loudly (`room file locked by another session`). The coordination domain is one omp process with many agents |
+When in doubt, use the room.
 
-**The check is not vacuous.** The same harness was run against a deliberately broken extension,
-which produced `Failed to load extension ...: NEGATIVE-CONTROL deliberate extension failure` — so
-the clean runs' silence is real signal, not a harness that cannot fail.
+A correction for a RUNNING agent goes to `agent://<id>`: a room mention is T0, so it does steer
+that agent (at its next step boundary) — but it steers every agent the mention classifies, not just
+the one you meant. The room is for shared context, not private redirection.
 
+An interrupt *intent* is not an interrupt *strength*. A room **mention** is T0: it wakes an idle
+agent and steers a streaming one, at its next step boundary. A plain room post (T1) is weaker — a
+non-interrupting aside, so a running agent may keep working on the wrong thing until its next step
+boundary. `agent://<id>` is the precise channel: one addressee, a bounded blast radius, no shared
+record. Use it to correct one agent; use the room to tell several agents the same thing.
+
+Before starting work that another agent might also start, claim it:
+`room{op:"claim", topic, key, ttl}`. Release it when done: `room{op:"release", topic, key}`.
+Never assume a claim you did not take. A claim you hold past its TTL is reclaimable, and the
+reclaimer will be told — and so will you. Claiming a resource you already hold RENEWS your lease
+(the TTL is a guess about how long your work takes), so renew rather than let it expire.
+
+If you have nothing to do but wait for a peer, a claim, or a room message, BLOCK — do not poll:
+`wait_for_agent`, `wait_for_message`, `wait_for_claim`. All are bounded and return an explicit
+`outcome`.
+
+The full procedure — the claim cycle, the wait/post/mention decision, the topic's status ledger —
+is in the `omp-agent-chatroom` skill.

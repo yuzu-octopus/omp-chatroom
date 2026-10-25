@@ -13,22 +13,30 @@
     "name": "Agent Chatroom",
     "version": "0.1.0",
     "description": "In-process multi-agent chatroom: claim board, bounded chat, blocking waits",
-    "extensions": ["./src/index.ts"],
+    "extensions": [
+      "./src/index.ts"
+    ],
     "features": {
       "room": {
         "description": "Room store, claim board, and the room tool",
         "default": true,
-        "extensions": ["./src/index.ts"]
+        "extensions": [
+          "./src/index.ts"
+        ]
       },
       "wait-tools": {
         "description": "Blocking wait tools (wait_for_claim, wait_for_agent, wait_for_message)",
         "default": true,
-        "extensions": ["./src/index.ts"]
+        "extensions": [
+          "./src/index.ts"
+        ]
       },
       "panel": {
         "description": "TUI panel for the room (overlay, subcommands, board view)",
         "default": true,
-        "extensions": ["./src/index.ts"]
+        "extensions": [
+          "./src/index.ts"
+        ]
       }
     }
   },
@@ -36,17 +44,21 @@
     "bun": ">=1.3.14"
   },
   "peerDependencies": {
-    "@oh-my-pi/pi-coding-agent": "18.12.3",
-    "@oh-my-pi/pi-tui": "18.12.3",
-    "@oh-my-pi/pi-ai": "18.12.3",
-    "@oh-my-pi/pi-utils": "18.12.3"
+    "@oh-my-pi/pi-coding-agent": "18.12.6",
+    "@oh-my-pi/pi-tui": "18.12.6",
+    "@oh-my-pi/pi-ai": "18.12.6",
+    "@oh-my-pi/pi-utils": "18.12.6"
   },
-  "files": ["src", "skills", "README.md"],
+  "files": [
+    "src",
+    "skills",
+    "README.md"
+  ],
   "devDependencies": {
-    "@oh-my-pi/pi-ai": "18.12.3",
-    "@oh-my-pi/pi-coding-agent": "18.12.3",
-    "@oh-my-pi/pi-tui": "18.12.3",
-    "@oh-my-pi/pi-utils": "18.12.3",
+    "@oh-my-pi/pi-ai": "18.12.6",
+    "@oh-my-pi/pi-coding-agent": "18.12.6",
+    "@oh-my-pi/pi-tui": "18.12.6",
+    "@oh-my-pi/pi-utils": "18.12.6",
     "@types/bun": "^1.4.2"
   }
 }
