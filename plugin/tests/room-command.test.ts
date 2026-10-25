@@ -528,3 +528,47 @@ test("/room config set with no assignment warns and changes nothing", async () =
   expect(notified.join("\n")).toContain("config set requires <key>=<value>");
   expect(loadRoomConfig(storeRoot)).toEqual(before);
 });
+
+test("/room board with claim+waiter+members+posts shows TTL, waiting, cursor/lag, unread math", async () => {
+  const notified: string[] = [];
+  const handler = captureHandler(notified);
+  const root = tempRoot();
+  const store = roomStoreForCwd(root);
+  // Two members join; gamma post lands BEFORE the viewer cursor (read), alpha/beta after (unread).
+  store.append({ kind: "member", from: "Alice", action: "join" });
+  store.append({ kind: "member", from: "Bob", action: "join" });
+  store.append({ kind: "msg", from: "Alice", topic: "gamma", body: "old news" });
+  // Viewer cursor sits right after the gamma post: gamma is read, later posts are unread.
+  store.cursors.set("Main", store.seq);
+  const cursorAt = store.seq;
+  store.append({ kind: "msg", from: "Alice", topic: "alpha", body: "fresh alpha" });
+  store.append({ kind: "msg", from: "Bob", topic: "beta", body: "fresh beta" });
+  // A live claim with one waiter.
+  store.append({ kind: "claim", from: "Main", resource: "build/step", ttlMs: 120_000 });
+  enqueueWaiter(store, "build/step", "Waiter");
+  const aliceCalls: Send[] = [];
+  const bobCalls: Send[] = [];
+  registerSession("Alice", aliceCalls);
+  registerSession("Bob", bobCalls);
+  try {
+    await handler("board", headlessCtx(root, notified));
+    const text = notified.join("\n");
+    // Claim row: resource + holder + TTL countdown + waiting count.
+    expect(text).toContain("claim build/step · holder Main");
+    expect(text).toMatch(/\d+s left/);
+    expect(text).toContain("1 waiting");
+    // Member rows: status + cursor + lag.
+    expect(text).toContain("member Alice [running]");
+    expect(text).toContain("member Bob [running]");
+    expect(text).toMatch(/member Alice \[running\] · cursor \d+ · lag \d+/);
+    expect(text).toMatch(/member Bob \[running\] · cursor \d+ · lag \d+/);
+    // Topic rows: last seq + unread (gamma read → 0, alpha/beta unread → ≥1).
+    const lastSeq = store.seq;
+    expect(text).toContain(`topic gamma · last seq ${cursorAt} · unread 0`);
+    expect(text).toContain(`topic alpha · last seq ${cursorAt + 1} · unread 1`);
+    expect(text).toContain(`topic beta · last seq ${lastSeq - 1} · unread 1`);
+  } finally {
+    AgentRegistry.global().unregister("Alice");
+    AgentRegistry.global().unregister("Bob");
+  }
+});
