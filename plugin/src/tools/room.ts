@@ -55,8 +55,11 @@ Triggers: before editing a shared file or step check the board, then claim the r
 find something other agents need, post it; when you finish, release your claims; when you have
 nothing to do but wait for a peer, a message, or a claim, block on the wait tools instead of polling.
 
+First call is join: it registers you and mints your cursor; board/read before join see empty state.
+
 NOT for private redirection — use agent://<id> when exactly one agent is the recipient and no shared
-record is wanted.
+record is wanted. When NOT to use: do not claim one-step or strictly-sequential work; do not post
+bulk output (artifact + id instead).
 
 Ops: join (first call) · read (records since your cursor) · post (send to a topic; mention is T0
 wake+steer, so use it only when you really need to interrupt) · claim/release (exclusive ownership of
@@ -638,7 +641,9 @@ export function registerRoomTool(pi: ExtensionAPI): void {
         "recall",
       ])
       .describe(
-        "join · read · post · claim · release · board · topics · mute · unmute · tree · zoom · recall",
+        "join · read · post · claim · release · board · topics · mute · unmute · tree · zoom · recall. " +
+          "Join first; post needs topic+body; claim/release need topic+key; zoom needs lo+hi from tree; " +
+          "recall needs pattern.",
       ),
     topic: z
       .string()
@@ -682,7 +687,8 @@ export function registerRoomTool(pi: ExtensionAPI): void {
       .string()
       .optional()
       .describe(
-        'Second half of a claim resource, e.g. "src/auth". The full resource is "<topic>/<key>".',
+        'Second half of a claim resource, e.g. "src/auth". The full resource is "<topic>/<key>". ' +
+          'Same "<topic>/<key>" string wait_for_claim takes.',
       ),
     status: z
       .object({
@@ -704,7 +710,8 @@ export function registerRoomTool(pi: ExtensionAPI): void {
       .describe(
         "The fencing token: the generation of the grant this call belongs to. A claim whose " +
           "generation is stale - the resource was granted again since - is refused, and a post " +
-          "into a topic you claim must carry that claim's current generation.",
+          "into a topic you claim must carry that claim's current generation. " +
+          "Optional; only post-into-claimed-topic and claim-after-displacement check it.",
       ),
     dependsOn: z
       .array(z.string())
@@ -722,14 +729,17 @@ export function registerRoomTool(pi: ExtensionAPI): void {
     since: z
       .number()
       .optional()
-      .describe("Resume read at this log seq number (not a timestamp). Defaults to your cursor."),
+      .describe(
+        "Resume read at this log seq number (not a timestamp). Defaults to your cursor; " +
+          "read advances it — re-reading the same since re-delivers.",
+      ),
     limit: z.number().optional().describe("Max records to return from read. 1…200, default 50."),
     lo: z
       .number()
       .optional()
       .describe(
         "First seq of the tree range for zoom, the same [lo, hi) pair the tree op printed. " +
-          "hi-lo must be a power of two and lo aligned to it.",
+          "hi-lo must be a power of two and lo aligned to it. Tree first, then zoom with its exact [lo,hi).",
       ),
     hi: z
       .number()
@@ -741,7 +751,8 @@ export function registerRoomTool(pi: ExtensionAPI): void {
       .describe(
         "Regex for recall over the raw log, newest first, max 100 matches. Max 200 chars; " +
           "patterns with a quantifier over a quantified group ((a+)+) are refused, and the " +
-          "scan stops at its 1s budget between records.",
+          "scan stops at its 1s budget between records. Recall is newest-first, 1s budget, may time out — " +
+          "narrow the pattern and retry.",
       ),
   });
 
