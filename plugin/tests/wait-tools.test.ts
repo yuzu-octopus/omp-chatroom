@@ -805,6 +805,43 @@ test(
 );
 
 test(
+  "wait_for_agent require:all waits for every named peer, not the first",
+  async () => {
+    AgentRegistry.resetGlobalForTests();
+    const root = freshRoot();
+    const bus = new EventBus();
+    const a = await newSession(bus, undefined, root, "AgentA");
+    const peerB = await newSession(bus, undefined, root, "AgentB");
+    const peerC = await newSession(bus, undefined, root, "AgentC");
+    try {
+      const waitP = toolOf(a, "wait_for_agent").execute("c-agent-all", {
+        agents: ["AgentB", "AgentC"],
+        timeout: 120_000,
+        require: "all",
+      });
+      await Bun.sleep(80);
+      AgentRegistry.global().setStatus("AgentB", "idle");
+      // One of two changed: require:all must NOT settle yet.
+      const early = await Promise.race([
+        waitP.then(() => "settled"),
+        Bun.sleep(200).then(() => "waiting"),
+      ]);
+      expect(early).toBe("waiting");
+      AgentRegistry.global().setStatus("AgentC", "idle");
+      const res = await Promise.race([waitP, Bun.sleep(5_000).then(() => null)]);
+      expect(res).not.toBeNull();
+      expect(res!.details).toMatchObject({ ok: true, outcome: "event" });
+    } finally {
+      await a.dispose();
+      await peerB.dispose();
+      await peerC.dispose();
+      AgentRegistry.resetGlobalForTests();
+    }
+  },
+  WAIT_TIMEOUT_MS,
+);
+
+test(
   "wait_for_message times out normally: {outcome:'timeout'}, useless:true, content array, no throw",
   async () => {
     const root = freshRoot();
