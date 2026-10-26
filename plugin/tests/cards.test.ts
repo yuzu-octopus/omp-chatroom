@@ -856,6 +856,7 @@ test("describeWaitCall names the wait and its target", () => {
   expect(JSON.stringify(claim?.head)).toContain("wait_for_claim");
   const msg = describeWaitCall({ from: "AgentB", mention: true }, options);
   expect(JSON.stringify(msg?.head)).toContain("wait_for_message");
+  expect(JSON.stringify(msg?.head)).toContain("AgentB");
 });
 
 test("describeWaitResult carries outcome meta and error tone", () => {
