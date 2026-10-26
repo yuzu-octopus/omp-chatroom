@@ -1077,8 +1077,10 @@ test("read: the budget is per turn — a repeat read is throttled and the turn b
 });
 test("read: every record kind renders its own model-facing line", async () => {
   // recordLine arms (room.ts:228-245): one of each kind in the log, then a
-  // read asserts each shape. `note` has no producer so its arm stays uncovered.
+  // read asserts each shape. `note` has no tool-path producer (no op mints
+  // it), so the arm is pinned by appending one directly.
   const { store, ctx } = newTestStore();
+  store.append({ kind: "note", from: "AgentB", topic: "build", body: "margin-note" });
   store.append({ kind: "msg", from: "AgentB", topic: "build", body: "hello" });
   store.append({ kind: "claim", from: "AgentB", resource: "build/step", ttlMs: 60_000 });
   store.append({
@@ -1102,6 +1104,7 @@ test("read: every record kind renders its own model-facing line", async () => {
   store.append({ kind: "delivered", from: "AgentB", deliveredSeq: 1, tier: "T1" });
   const result = await invokeRoom(ctx, { op: "read", limit: 50 });
   const text = result.content.map((c) => c.text ?? "").join("\n");
+  expect(text).toContain('note build · "margin-note"');
   expect(text).toContain('build · "hello"');
   expect(text).toContain("claim build/step");
   expect(text).toContain("release build/step · released");
