@@ -1406,3 +1406,36 @@ test(
   },
   WAIT_TIMEOUT_MS,
 );
+test(
+  "wait_for_message emits heartbeat updates while blocked",
+  async () => {
+    // Lines 233-243: the U5 heartbeat fires every 500 ms via onUpdate while the
+    // wait is outstanding. A 1200 ms wait with no matching post must produce at
+    // least one heartbeat carrying the elapsed-seconds text.
+    const root = freshRoot();
+    const bus = new EventBus();
+    const a = await newSession(bus, undefined, root, "AgentA");
+    try {
+      const updates: unknown[] = [];
+      const pending = toolOf(a, "wait_for_message").execute(
+        "c-heartbeat",
+        { timeout: 1_200 },
+        undefined,
+        (u: unknown) => {
+          updates.push(u);
+        },
+      );
+      const res = await Promise.race([pending, Bun.sleep(3_000).then(() => null)]);
+      expect(res).not.toBeNull();
+      expect(res!.details).toMatchObject({ ok: true, outcome: "timeout" });
+      expect(updates.length).toBeGreaterThanOrEqual(1);
+      const texts = updates
+        .map((u) => ((u as { content?: Array<{ text?: string }> }).content ?? []).map((c) => c.text ?? "").join(" "))
+        .join("\n");
+      expect(texts).toContain("waiting");
+    } finally {
+      await a.dispose();
+    }
+  },
+  WAIT_TIMEOUT_MS,
+);

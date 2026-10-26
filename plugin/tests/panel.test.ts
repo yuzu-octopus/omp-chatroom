@@ -259,6 +259,18 @@ test("chat pane windows a 5000-record room instead of materialising every row", 
   // A taller window still cannot exceed its own budget.
   expect(pane(60, 40).length).toBe(40);
 });
+test("chat pane follows the selection above the tail window", () => {
+  // Line 204: with 20 rows and a height-5 window the tail starts at row 15;
+  // selecting row 0 pulls the window up so the marker stays visible.
+  const records: RoomRecord[] = Array.from({ length: 20 }, (_, i) => msg(i + 1, `line-${i + 1}`));
+  const rows = projectChatRows(records, viewer(), 0);
+  const pane = createChatPane(() => rows, 5, theme, () => 0);
+  const out = pane(60, 5);
+  expect(out.length).toBe(5);
+  expect(out.join("\n")).toContain("line-1");
+  expect(out.join("\n")).not.toContain("line-20");
+});
+
 
 // --- 4. board pane claim row ---------------------------------------------
 
