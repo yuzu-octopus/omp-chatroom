@@ -6,7 +6,7 @@ Baseline at plan time: `tsc` 0 errors, `biome check` clean, `bun test tests/`
 reproduced — see plan 014). Execute in the order below unless dependencies say
 otherwise. Each executor: read the plan fully before starting, honor its STOP
 conditions, and update your row when done.
-Round-fcc3a4a (2026-10-26): tsc 0 errors, biome clean, 527 pass / 1 skip / 0 fail / 18 files; host pin 18.12.6. +4 promoted-TTL assertions on the expireStale test (inherits dead lease window), mutation-checked; suite still 529 total.
+Round-a053d9d (2026-10-26): tsc 0 errors, biome clean, 528 pass / 1 skip / 0 fail / 18 files; host pin 18.12.6. +1 TTL-clamp test (mandatory 1s..1d window), mutation-checked.
 
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
