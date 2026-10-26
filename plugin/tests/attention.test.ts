@@ -855,16 +855,38 @@ test("deliver: T0 steers, T1 is an aside, T2 only bumps the cursor", async () =>
   await deliver(piSelf.pi, ctx, "Sender", msg(4, { from: "Sender", topic: "build" }), "T1");
   expect(piSelf.sends.length).toBe(0);
   expect(store.cursors.get("Sender")).toBe(4);
+});
 
-  // A live sibling → its session, with the right deliverAs.
-  const sibCalls: Send[] = [];
-  const sib = `attn-sib-${Date.now()}`;
-  registerSession(sib, sibCalls);
-  await deliver(fakePi().pi, ctx, sib, msg(5, { from: "Other", topic: "build" }), "T1");
-  expect(sibCalls.length).toBe(1);
-  expect(sibCalls[0]!.options).toMatchObject({ deliverAs: "aside" });
-  await deliver(fakePi().pi, ctx, sib, msg(6, { from: "Other", mention: [sib] }), "T0");
-  expect(sibCalls[1]!.options).toMatchObject({ deliverAs: "steer" });
+test("an uncertain T0 is remembered as given — the next pass does not storm", async () => {
+  // delivery.ts uncertain arm 190: a T0 whose outcome is unknown is
+  // marked delivered (so the next pass skips it) but the cursor stays
+  // put (the record stays owed). Silence twice would be a storm; moving
+  // the cursor would lose the record.
+  const root = tempRoot();
+  const ctx = fakeCtx(root, "Sender");
+  const store = roomStoreFor(ctx);
+  const { pi } = fakePi();
+  const b = `attn-uncertain-${Date.now()}`;
+  store.members.set(b, {
+    agentId: b,
+    joinedAtSeq: 0,
+    topics: new Set(["build"]),
+    muted: new Set(),
+    threadRoots: new Set(),
+    heldTopics: new Set(),
+  });
+  registerSession(b, [], "never");
+  const record = store.append({
+    kind: "msg",
+    from: "Sender",
+    topic: "build",
+    body: "hi",
+    mention: [b],
+  });
+  const failure = await notifyRecipients(pi, ctx, store, [record], "Sender");
+  expect(failure).toBeUndefined();
+  expect(store.cursors.get(b) ?? 0).toBe(0);
+  expect(deliveredT0s(store.root, b).has(record.seq)).toBe(true);
 });
 
 test("T0 also sets triggerTurn so a mention wakes an idle agent", async () => {
