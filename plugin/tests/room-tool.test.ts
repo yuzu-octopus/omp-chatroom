@@ -357,6 +357,9 @@ test("R7: a retried post with the same key returns the first one instead of post
   });
   expect(mismatch.details).toMatchObject({ ok: false });
   expect(store.seq).toBe(seqAfterFirst);
+  // ...and the mismatch names the key, so the retrier learns WHICH key
+  // collided instead of just "parameters differ".
+  expect(JSON.stringify(mismatch.content)).toContain("finding-1");
 });
 
 test("R5: a lost claim is recorded, so contention is measurable", async () => {
