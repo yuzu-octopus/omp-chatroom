@@ -805,6 +805,33 @@ test(
 );
 
 test(
+  "wait_for_agent treats a pre-changed peer as baseline, not an event",
+  async () => {
+    // The status moved BEFORE the wait: the baseline IS idle, so nothing
+    // "changed" during the wait and it times out. The baseline exists so
+    // an already-idle peer is not an instant event.
+    AgentRegistry.resetGlobalForTests();
+    const root = freshRoot();
+    const bus = new EventBus();
+    const a = await newSession(bus, undefined, root, "AgentA");
+    const peer = await newSession(bus, undefined, root, "AgentB");
+    try {
+      AgentRegistry.global().setStatus("AgentB", "idle");
+      const res = await toolOf(a, "wait_for_agent").execute("c-agent-baseline", {
+        agents: ["AgentB"],
+        timeout: 1_000,
+      });
+      expect(res.details).toMatchObject({ ok: true, outcome: "timeout" });
+    } finally {
+      await a.dispose();
+      await peer.dispose();
+      AgentRegistry.resetGlobalForTests();
+    }
+  },
+  WAIT_TIMEOUT_MS,
+);
+
+test(
   "wait_for_agent require:all waits for every named peer, not the first",
   async () => {
     AgentRegistry.resetGlobalForTests();
