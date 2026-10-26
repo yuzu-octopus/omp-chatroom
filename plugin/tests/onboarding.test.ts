@@ -126,6 +126,42 @@ test("truncation drops the raw-tail backlog first and never drops the cursor/lag
   expect(tight).toContain("Caps:");
   expect(tight).toContain("build/step");
 });
+test("the digest backlog renders one line per record kind", () => {
+  // recordLine arms (digest.ts:43-58): the backlog is kind-specific text,
+  // not the raw record. One of each uncovered kind in the tail.
+  post(0, "a message");
+  store.append({ kind: "note", from: "AgentA", topic: "build", body: "a note" });
+  store.append({ kind: "claim", from: "AgentB", resource: "build/step", ttlMs: 60_000 });
+  store.append({
+    kind: "release",
+    from: "AgentB",
+    resource: "build/step",
+    reason: "released",
+    prevHolder: "AgentB",
+  });
+  store.append({ kind: "member", from: "AgentC", action: "join" });
+  store.append({ kind: "gap", from: "system", skipped: 2, reason: "retention" });
+  store.append({ kind: "contended", from: "AgentD", resource: "build/step", holder: "AgentB" });
+  store.append({
+    kind: "wait",
+    from: "AgentD",
+    waited: "claim",
+    target: "build/step",
+    outcome: "timeout",
+    enqueuedAt: 1,
+  });
+  store.append({ kind: "delivered", from: "AgentB", deliveredSeq: 3, tier: "T1" });
+  const digest = buildDigest(store, viewer("AgentA"));
+  expect(digest).toContain("a message");
+  expect(digest).toContain("note AgentA");
+  expect(digest).toContain("claim AgentB");
+  expect(digest).toContain("release AgentB");
+  expect(digest).toContain("member AgentC join");
+  expect(digest).toContain("gap system skipped 2");
+  expect(digest).toContain("contended AgentD");
+  expect(digest).toContain("wait AgentD");
+  expect(digest).toContain("delivered AgentB");
+});
 
 // ---------------------------------------------------------------------------------------------
 // 3. K22 regression: room content cannot forge a harness tag or close the untrusted region.
