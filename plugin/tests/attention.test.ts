@@ -1751,3 +1751,21 @@ test("delivered-T0 registry evicts oldest entries past the cap instead of growin
     forgetDeliveredT0(root);
   }
 });
+
+test("forgetDeliveredT0 drops exactly that room — other rooms keep theirs", () => {
+  // cursors.ts forgetDeliveredT0 71-73: keyed by room root. Forgetting
+  // room A must not touch room B's registry: a shared-room wipe would
+  // re-storm B's already-told T0s.
+  const a = `forget-a-${Date.now()}`;
+  const b = `forget-b-${Date.now()}`;
+  try {
+    markDeliveredT0(a, "X", 1);
+    markDeliveredT0(b, "X", 2);
+    forgetDeliveredT0(a);
+    expect(deliveredT0s(a, "X").size).toBe(0);
+    expect(deliveredT0s(b, "X").has(2)).toBe(true);
+  } finally {
+    forgetDeliveredT0(a);
+    forgetDeliveredT0(b);
+  }
+});
