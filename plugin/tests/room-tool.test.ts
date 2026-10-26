@@ -1438,6 +1438,7 @@ test("a clean release carries no deliveryError envelope — only failures do", a
   await invokeRoom(ctx, { op: "claim", topic: "build", key: "step", ttl: 60_000 });
   const res = await invokeRoom(ctx, { op: "release", topic: "build", key: "step" });
   expect(res.details).toMatchObject({ ok: true, op: "release" });
+  expect(res.content.map((c) => c.text ?? "").join("\n")).toContain("released");
   expect("deliveryError" in (res.details ?? {})).toBe(false);
 });
 
