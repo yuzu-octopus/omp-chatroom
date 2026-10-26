@@ -6,7 +6,7 @@ Baseline at plan time: `tsc` 0 errors, `biome check` clean, `bun test tests/`
 reproduced — see plan 014). Execute in the order below unless dependencies say
 otherwise. Each executor: read the plan fully before starting, honor its STOP
 conditions, and update your row when done.
-Round-8dd41ee (2026-10-26): tsc 0 errors, biome clean, 518 pass / 1 skip / 0 fail / 18 files; host pin 18.12.6. +1 gen-baseline assertion on the existing R1 test (double-mint 0→1→2 pinned exactly), mutation-checked; suite still 520 total.
+Round-07ce706 (2026-10-26): tsc 0 errors, biome clean, 520 pass / 1 skip / 0 fail / 18 files; host pin 18.12.6. +1 cursor-resume test (corrupt entries skipped, newest valid wins), mutation-checked.
 
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
