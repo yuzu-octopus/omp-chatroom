@@ -187,6 +187,29 @@ test("a malformed mid-file record is skipped and does not shift later seq values
   closeRoomLog(root, roomId);
 });
 
+test("a record with a malformed status ledger is quarantined as invalid", () => {
+  // Lines 292-297: a msg whose status is not five {reason, answer} string
+  // pairs fails validation — replay skips it without shifting later seqs.
+  const root = tempRoot();
+  const roomId = roomIdFor(root);
+  const fd = roomLogFd(root, roomId);
+  appendLine(fd, `${JSON.stringify(msg(1))}\n`);
+  const badStatus = {
+    is_request_satisfied: { reason: "r", answer: "a" },
+    is_in_loop: { reason: "r", answer: "a" },
+    is_progress_being_made: { reason: "r", answer: "a" },
+    next_speaker: { reason: "r", answer: "a" },
+    instruction_or_question: { reason: 42, answer: "a" },
+  };
+  appendLine(fd, `${JSON.stringify({ ...msg(2), status: badStatus })}\n`);
+  appendLine(fd, `${JSON.stringify(msg(3))}\n`);
+  const { records, skipped } = replay(fd);
+  expect(skipped).toBe(1);
+  expect(records.filter((r) => r.kind === "msg").map((r) => r.seq)).toEqual([1, 3]);
+  expect(records.filter((r) => r.kind === "gap").length).toBe(1);
+  closeRoomLog(root, roomId);
+});
+
 // --- 5. roomIdFor is a pure function of the root --------------------------
 
 test("roomIdFor is a pure function of the root, never derived from a session id", () => {
