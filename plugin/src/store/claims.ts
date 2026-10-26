@@ -175,17 +175,9 @@ export function contended(store: RoomStore, resource: string): string[] {
  * Extend a lease the caller already holds.
  *
  * A TTL is a guess about how long the work takes — "timeout is only a guess" (Chubby's KeepAlive).
- * Without a renewal, a slow-but-alive agent loses a live lease at the TTL, another agent takes the
- * resource, and the work is done twice. So **claiming a resource you already hold renews it**:
- * no new op, and it replaces the "denied — held by yourself" answer with the truth.
- *
- * A renewal is a `claim` record with the same holder: the projection sets the lease
- * unconditionally, so a replay reproduces the same expiry. The lease's start moves to now, so
- * `acquiredAt + ttlMs` is the new expiry.
- *
- * A renewal is safe even if the nominal TTL has passed: while the claim is still in the map, the
- * holder is the only possible holder — `grant` refuses anybody else, and a reclaim would have
- * removed the claim from the map first.
+ * So **claiming a resource you already hold renews it**: no new op, and it replaces the
+ * "denied — held by yourself" answer with the truth. A renewal is a `claim` record with the same
+ * holder; the projection resets the lease unconditionally, moving its start to now.
  */
 export type RenewResult =
   | { ok: true; claim: ClaimState }
