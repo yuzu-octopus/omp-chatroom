@@ -216,6 +216,10 @@ test("R9: the board says who is blocked on what", async () => {
   const text = board.content.map((c) => c.text ?? "").join("\n");
   expect(text).toContain("waiting: AgentB"); // who waits on it
   expect(text).toContain("needs build/schema"); // what it waits on
+  // ...and the R9 counters: one claim with a waiter, one dependency.
+  expect(board.details).toMatchObject({ ok: true, op: "board" });
+  const claims = (board.details as { board: { claims: unknown[] } }).board.claims;
+  expect(claims).toHaveLength(1);
 });
 
 test("R1: a displaced agent's late write is fenced out by its stale generation", async () => {
