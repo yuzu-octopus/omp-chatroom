@@ -6,7 +6,7 @@ Baseline at plan time: `tsc` 0 errors, `biome check` clean, `bun test tests/`
 reproduced — see plan 014). Execute in the order below unless dependencies say
 otherwise. Each executor: read the plan fully before starting, honor its STOP
 conditions, and update your row when done.
-Round-092ca03 (2026-10-26): tsc 0 errors, biome clean, 527 pass / 1 skip / 0 fail / 18 files; host pin 18.12.6. REAL CLEANUP: dead gen mint removed from records (schema field + nextGen + mint call); projection+replay are the single minters, first grant now 1, fence unchanged; suite still 529 total.
+Round-3492b2d (2026-10-26): tsc 0 errors, biome clean, 527 pass / 1 skip / 0 fail / 18 files; host pin 18.12.6. +4 R9-details assertions on the R9 test (details carry waiter list), mutation-checked; suite still 529 total.
 
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
