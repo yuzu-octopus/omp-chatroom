@@ -264,6 +264,7 @@ test("R1: a displaced agent's late write is fenced out by its stale generation",
     gen,
   });
   expect(staleClaim.details).toMatchObject({ ok: false });
+  expect(JSON.stringify(staleClaim.content)).toContain("build/step");
 
   const stalePost = await invokeRoom(ctx, {
     op: "post",
