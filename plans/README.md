@@ -6,7 +6,7 @@ Baseline at plan time: `tsc` 0 errors, `biome check` clean, `bun test tests/`
 reproduced — see plan 014). Execute in the order below unless dependencies say
 otherwise. Each executor: read the plan fully before starting, honor its STOP
 conditions, and update your row when done.
-Round-33ad9a8 (2026-10-26): tsc 0 errors, biome clean, 480 pass / 1 skip / 0 fail / 18 files; host pin 18.12.6. +1 persisted-cursor resume test (§3.5, line 106), mutation-checked.
+Round-4d4b7cd (2026-10-26): tsc 0 errors, biome clean, 481 pass / 1 skip / 0 fail / 18 files; host pin 18.12.6. REAL FIX: wait-edge graph evicted on dispose (was dead code leaking per-root state). Test pins phantom-cycle fix.
 
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
