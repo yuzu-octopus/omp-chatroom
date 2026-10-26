@@ -1371,6 +1371,7 @@ test("board content names the holder, not just the count", async () => {
   expect(text).toContain("left"); // the remaining TTL
   expect(text).not.toBe("room board → 1 claim(s), 1 member(s), 0 topic(s)");
   expect(text).toContain("room board → 1 claim(s)");
+  expect(text).toContain("1 member(s)");
 });
 
 test("board content stays capped on a large roster (no context blowout)", async () => {
