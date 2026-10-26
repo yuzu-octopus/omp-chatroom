@@ -1262,6 +1262,7 @@ test("room on a corrupt root returns ok:false + error, never throws", async () =
   expect(typeof res.details?.error).toBe("string");
   expect(Array.isArray(res.content)).toBe(true);
 });
+
 test("post with a body over maxBodyBytes is refused and appends nothing", async () => {
   // K19 arm (room.ts:860-862): the cap is enforced before the record is
   // drafted — an oversized body never lands in the log, even truncated.
@@ -1274,6 +1275,17 @@ test("post with a body over maxBodyBytes is refused and appends nothing", async 
   // A body exactly at the cap is admitted.
   const ok = await invokeRoom(ctx, { op: "post", topic: "build", body: "y".repeat(8192) });
   expect(ok.details).toMatchObject({ ok: true });
+});
+
+test("a clean post carries no deliveryError envelope — only failures do", async () => {
+  // room.ts okWithDelivery 619-625: deliveryError is ADDED only when a
+  // failure note exists. A clean post's details must have NO deliveryError
+  // key at all — a key that is always present (even undefined) teaches
+  // models to treat delivery as suspect on every post.
+  const { ctx } = newTestStore();
+  const res = await invokeRoom(ctx, { op: "post", topic: "build", body: "clean hello" });
+  expect(res.details).toMatchObject({ ok: true, op: "post" });
+  expect("deliveryError" in (res.details ?? {})).toBe(false);
 });
 test("release by a non-holder is denied naming the holder", async () => {
   // Release-denied arm (room.ts:1100-1104): a live lease held by someone
