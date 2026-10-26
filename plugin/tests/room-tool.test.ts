@@ -1880,3 +1880,11 @@ test("a throwing mutation is a result, never a throw out of the tool", async () 
     (store as { append: typeof store.append }).append = original;
   }
 });
+
+test("release of a missing key is refused as unknown and appends nothing", async () => {
+  const { store, ctx } = newTestStore();
+  const before = store.records.length;
+  const res = await invokeRoom(ctx, { op: "release", topic: "build", key: "ghost" });
+  expect(res.details).toMatchObject({ ok: false, error: "unknown resource" });
+  expect(store.records.length).toBe(before);
+});
