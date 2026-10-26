@@ -936,6 +936,7 @@ test("topics: empty room returns empty array", async () => {
   const { ctx } = newTestStore();
   const result = await invokeRoom(ctx, { op: "topics" });
   expect(result.details).toMatchObject({ ok: true, op: "topics", topics: [] });
+  expect(result.content.map((c) => c.text ?? "").join("\n")).toContain("0 topic(s)");
 });
 
 test("topics lists a note-only topic with its unread count", async () => {
