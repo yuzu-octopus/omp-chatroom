@@ -822,6 +822,9 @@ test("a recipient whose T1 backlog exceeds the window is TOLD to read, not left 
   // the hint the recipient is deaf and never learns why.
   const texts = recipientCalls.map((c) => JSON.stringify(c.payload));
   expect(texts.some((t) => t.includes("read with"))).toBe(true);
+  // ...and the scope pins the count: 14 owed against a 10 window leaves
+  // +4 refused — the hint names the exact number, not "some".
+  expect(texts.some((t) => t.includes("+4"))).toBe(true);
   // And the hint is NOT a failure: the pass reports nothing — the
   // overflow notice is guidance, not a transport error.
   const failure = await notifyRecipients(fakePi().pi, ctx, store, [fresh], "Sender");
