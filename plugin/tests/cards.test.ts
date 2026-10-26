@@ -859,3 +859,48 @@ test("describeWaitResult carries outcome meta and error tone", () => {
   );
   expect(aborted?.tone).toBe("error");
 });
+
+// --- message card uncovered arms --------------------------------------------
+
+test("message card quotes array content blocks when the record has no body", () => {
+  // bodyOf lines 61-63: a member record carries no body, so the card falls
+  const message: CustomMessage = {
+    ...cardMessage("room:board-delta", MEMBER),
+    content: [
+      { type: "text", text: "hello " },
+      { type: "image", data: "x", mimeType: "image/png" },
+      { type: "text", text: "world" },
+    ],
+  };
+  const out = render(renderMessageCard(message, { expanded: false }, theme), 60).join("\n");
+  expect(out).toContain("hello world");
+});
+
+test("expanded release card names the previous holder and seq", () => {
+  // Lines 243-245: the expanded release card discloses prevHolder + seq.
+  // "prev holder" is expanded-only (the collapsed line has resource+reason).
+  const out = render(
+    renderClaimCard(cardMessage("room:claim", RELEASE), { expanded: true }, theme),
+    60,
+  ).join("\n");
+  expect(out).toContain("prev holder agent-1");
+});
+
+test("board delta card titles contended records as a loss", () => {
+  // Lines 263-265: the collapsed title names who lost what to whom.
+  const contended: RoomRecord = {
+    v: 1,
+    seq: 9,
+    ts: Date.now(),
+    kind: "contended",
+    id: "x1",
+    from: "agent-2",
+    resource: "build/step",
+    holder: "agent-1",
+  };
+  const con = render(
+    renderBoardDeltaCard(cardMessage("room:board-delta", contended), { expanded: false }, theme),
+    80,
+  ).join("\n");
+  expect(con).toContain("lost build/step");
+});
