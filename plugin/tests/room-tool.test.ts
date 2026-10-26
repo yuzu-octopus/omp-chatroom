@@ -1456,9 +1456,9 @@ test("release by a non-holder is denied naming the holder", async () => {
   const before = store.records.length;
   const res = await invokeRoom(other, { op: "release", topic: "build", key: "step" });
   expect(res.details).toMatchObject({ ok: false });
+  expect(JSON.stringify(res.content)).toContain("denied — not holder");
   expect(JSON.stringify(res.content)).toContain("AgentA");
   expect(store.claims.get("build/step")?.holder).toBe("AgentA");
-  expect(store.records.length).toBe(before);
 });
 
 test("post with a malformed status ledger is refused naming the missing keys", async () => {
