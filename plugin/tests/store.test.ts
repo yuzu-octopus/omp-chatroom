@@ -432,11 +432,10 @@ test("persistOwnCursor / restoreOwnCursor round-trip through appendEntry('chatro
   expect(restoreOwnCursor(ctx, "r123")).toBe(43);
 });
 
-test("restoreOwnCursor skips corrupt cursor entries and takes the newest valid one", () => {
-  // cursors.ts isCursorData 80-89: entries whose data is not a
-  // { roomId: string, seq: number } are skipped, and the scan runs
-  // newest-first — so a corrupt entry on top never shadows an older
-  // valid one.
+test("restoreOwnCursor skips corrupt cursor entries and non-custom types", () => {
+  // cursors.ts isCursorData 80-89 + entry-type filter: entries whose data
+  // is not a { roomId, seq } — or whose type is not custom at all — are
+  // skipped newest-first, so neither shadows the older valid one.
   const entries: Array<{ type: string; customType: string; data?: unknown }> = [
     { type: "custom", customType: "chatroom:cursor", data: { roomId: "r123", seq: 7 } },
     {
@@ -444,7 +443,8 @@ test("restoreOwnCursor skips corrupt cursor entries and takes the newest valid o
       customType: "chatroom:cursor",
       data: { roomId: "r123", seq: "not-a-number" },
     },
-    { type: "custom", customType: "other", data: { roomId: "r123", seq: 99 } },
+    { type: "custom", customType: "chatroom:cursor", data: null },
+    { type: "non-custom", customType: "chatroom:cursor", data: { roomId: "r123", seq: 99 } },
   ];
   const ctx = {
     sessionManager: { getEntries: () => entries },
