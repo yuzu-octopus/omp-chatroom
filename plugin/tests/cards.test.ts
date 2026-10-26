@@ -839,6 +839,7 @@ test("describeRoomResult carries meta and error tone", () => {
   );
   expect(ok?.tone).toBe("neutral");
   expect(ok?.head?.length).toBeGreaterThan(0);
+  expect(JSON.stringify(ok?.head)).toContain("joined");
   const err = describeRoomResult(
     { details: { ok: false, error: "not holder" } } as unknown as AgentToolResult<RoomToolDetails>,
     options,
