@@ -111,6 +111,22 @@ test("renew: a non-holder cannot renew somebody else's lease", () => {
   expect(s.seq).toBe(seqBefore);
 });
 
+test("renew: a missing claim cannot be renewed — it must be claimed", () => {
+  // claims.ts `renew` 208: no row at all → `existing === undefined` → the
+  // ok:false arm with holder undefined and expiresAt 0. Renewing what was
+  // never claimed is a claim, not a renewal.
+  const s = newStore();
+  const seqBefore = s.seq;
+  const denied = renew(s, "build/step", "A", 60_000);
+  expect(denied.ok).toBe(false);
+  if (!denied.ok) {
+    expect(denied.holder).toBeUndefined();
+    expect(denied.expiresAt).toBe(0);
+  }
+  // a denied renewal is not state
+  expect(s.seq).toBe(seqBefore);
+});
+
 test("R6: the status ledger is written by the topic's claim holder, and its shape is checked", async () => {
   const { store, ctx } = newTestStore();
   const ledger = {
