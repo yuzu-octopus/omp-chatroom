@@ -6,7 +6,7 @@ Baseline at plan time: `tsc` 0 errors, `biome check` clean, `bun test tests/`
 reproduced — see plan 014). Execute in the order below unless dependencies say
 otherwise. Each executor: read the plan fully before starting, honor its STOP
 conditions, and update your row when done.
-Round-1674118 (2026-10-26): tsc 0 errors, biome clean, 537 pass / 1 skip / 0 fail / 18 files; host pin 18.12.6. +1 unknown-release pin (unknown resource, appends nothing; dropped guard crashes), mutation-checked.
+Round-d37c55a (2026-10-26): tsc 0 errors, biome clean, 538 pass / 1 skip / 0 fail / 18 files; host pin 18.12.6. +1 release-guard pin (requires topic and key; dropped guard crashes), mutation-checked.
 
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
