@@ -232,6 +232,63 @@ test("roomIdFor is a pure function of the root, never derived from a session id"
   expect(roomIdFor(root1)).not.toContain("sess-2");
 });
 
+test("per-kind field violations are quarantined without shifting later seqs", () => {
+  // Lines 329-351: each kind's extra shape check. One bad line per arm,
+  // all skipped as invalid; the good records keep their seqs.
+  const root = tempRoot();
+  const roomId = roomIdFor(root);
+  const fd = roomLogFd(root, roomId);
+  const badPerformative = { ...msg(1), performative: "shout" };
+  const badTtl = {
+    v: 1,
+    seq: 2,
+    ts: 1002,
+    kind: "claim",
+    id: "c2",
+    from: "A",
+    resource: "t/k",
+    ttlMs: NaN,
+  };
+  const badAction = {
+    v: 1,
+    seq: 3,
+    ts: 1003,
+    kind: "member",
+    id: "m3",
+    from: "A",
+    action: "explode",
+  };
+  const badReason = {
+    v: 1,
+    seq: 4,
+    ts: 1004,
+    kind: "release",
+    id: "r4",
+    from: "A",
+    resource: "t/k",
+    reason: "vanished",
+    prevHolder: "A",
+  };
+  const badGap = {
+    v: 1,
+    seq: 5,
+    ts: 1005,
+    kind: "gap",
+    id: "g5",
+    from: "system",
+    skipped: 1.5,
+    reason: "retention",
+  };
+  for (const bad of [badPerformative, badTtl, badAction, badReason, badGap]) {
+    appendLine(fd, `${JSON.stringify(bad)}\n`);
+  }
+  appendLine(fd, `${JSON.stringify(msg(6))}\n`);
+  const { records, skipped } = replay(fd);
+  expect(skipped).toBe(5);
+  expect(records.filter((r) => r.kind === "msg").map((r) => r.seq)).toEqual([6]);
+  closeRoomLog(root, roomId);
+});
+
 // --- 6. logPathFor is stable and single-convention ------------------------
 
 test("logPathFor is stable and single-convention, and is the file the store writes", () => {
