@@ -421,6 +421,15 @@ test("persistOwnCursor / restoreOwnCursor round-trip through appendEntry('chatro
   expect(entries[0].customType).toBe("chatroom:cursor");
   expect(restoreOwnCursor(ctx, "r123")).toBe(42);
   expect(restoreOwnCursor(ctx, "other-room")).toBe(null);
+  // Newest-valid-wins: a later corrupt entry on top never shadows the
+  // older valid one, and a later valid entry replaces it.
+  entries.push({
+    type: "custom",
+    customType: "chatroom:cursor",
+    data: { roomId: "r123", seq: 43 },
+  });
+  entries.push({ type: "custom", customType: "chatroom:cursor", data: "garbage" });
+  expect(restoreOwnCursor(ctx, "r123")).toBe(43);
 });
 
 test("restoreOwnCursor skips corrupt cursor entries and takes the newest valid one", () => {
