@@ -97,6 +97,14 @@ test("renew: the holder extends its own lease instead of being denied", () => {
   // and it is in the log, so a replay reproduces it
   const last = s.records.at(-1);
   expect(last?.kind).toBe("claim");
+  // A renewal keeps the generation: ownership did not change, so the
+  // fence still fences on the original grant's gen. Proved by the
+  // RETURNED claim too — `renewed.claim.gen` is the same number, not
+  // a fresh mint. (The record's own `gen` field is ignored by the
+  // projection, which recomputes it: double-mint lands every grant on
+  // an even number.)
+  expect(s.claims.get("build/step")?.gen).toBe(first.ok ? first.claim.gen : -1);
+  if (renewed.ok) expect(renewed.claim.gen).toBe(first.ok ? first.claim.gen : -1);
 });
 
 test("renew: a non-holder cannot renew somebody else's lease", () => {
