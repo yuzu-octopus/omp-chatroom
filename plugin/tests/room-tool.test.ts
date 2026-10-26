@@ -968,6 +968,7 @@ test("mute: whole-room mute adds empty string sentinel", async () => {
   const { store, ctx } = newTestStore();
   const result = await invokeRoom(ctx, { op: "mute" });
   expect(result.details).toMatchObject({ ok: true, op: "mute" });
+  expect(result.content.map((c) => c.text ?? "").join("\n")).toContain("whole room");
   const member = store.members.get("AgentA");
   expect(member?.muted.has("")).toBe(true);
 });
