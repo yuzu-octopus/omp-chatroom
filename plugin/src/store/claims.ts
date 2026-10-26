@@ -79,7 +79,6 @@ export function grant(
     from: holder,
     resource,
     ttlMs,
-    gen: nextGen(store, resource, holder),
     // Self is not a dependency (the block check above drops it): recording
     // it would mislead the board ("needs X" while holding X).
     ...(dependsOn !== undefined && dependsOn.length > 0
@@ -88,25 +87,15 @@ export function grant(
   });
   return { ok: true, claim: store.claims.get(resource)! };
 }
-
 /**
- * R1 — the generation of a grant, per resource.
- *
- * It rises when OWNERSHIP changes: a fresh grant, or one that takes the resource from a previous
- * holder, gets the next generation; a RENEWAL by the same holder keeps it, because a renewal
- * changes nothing about who owns the resource. The counter survives the release (it lives beside
- * the claim map, not inside it), so a resource that is granted, released and granted again never
- * reuses a generation.
+ * R1 — the generation rule, per resource. It rises when OWNERSHIP changes:
+ * a fresh grant, or one that takes the resource from a previous holder,
+ * gets the next generation; a RENEWAL by the same holder keeps it. The
+ * counter survives the release (it lives beside the claim map, not inside
+ * it), so a re-grant never reuses a generation. The projection
+ * (room-store.ts) and the replay (hydrateClaims) each apply this same rule
+ * — the RECORD carries no `gen` field.
  */
-function nextGen(store: RoomStore, resource: string, holder: string): number {
-  const current = store.claimGens.get(resource) ?? 0;
-  const previous = store.claims.get(resource);
-  const ownershipChanges = previous === undefined || previous.holder !== holder;
-  const gen = ownershipChanges ? current + 1 : Math.max(current, 1);
-  store.claimGens.set(resource, gen);
-  return gen;
-}
-
 /**
  * R1 — the generation a caller claims to hold, and whether it is stale.
  *

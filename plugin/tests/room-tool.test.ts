@@ -99,10 +99,7 @@ test("renew: the holder extends its own lease instead of being denied", () => {
   expect(last?.kind).toBe("claim");
   // A renewal keeps the generation: ownership did not change, so the
   // fence still fences on the original grant's gen. Proved by the
-  // RETURNED claim too — `renewed.claim.gen` is the same number, not
-  // a fresh mint. (The record's own `gen` field is ignored by the
-  // projection, which recomputes it: double-mint lands every grant on
-  // an even number.)
+  // RETURNED claim too — `renewed.claim.gen` is the same number.
   expect(s.claims.get("build/step")?.gen).toBe(first.ok ? first.claim.gen : -1);
   if (renewed.ok) expect(renewed.claim.gen).toBe(first.ok ? first.claim.gen : -1);
 });
@@ -227,13 +224,10 @@ test("R1: a displaced agent's late write is fenced out by its stale generation",
   const first = await invokeRoom(ctx, { op: "claim", topic: "build", key: "step" });
   expect(first.details).toMatchObject({ ok: true, op: "claim", holder: "AgentA" });
   const gen = first.details?.gen as number;
-  // nextGen mints the generation and `append` projects it: the record and
-  // the projection compute the SAME increment twice (0→1, then 1→2), so a
-  // first grant lands on 2. The fence only needs monotonicity, and the
-  // replay path recomputes the same double increment — so it is stable,
-  // not drift. Pinned exactly so a future single-mint change shows up
-  // HERE, not as a silent fence shift.
-  expect(gen).toBe(2);
+  // A first grant starts the counter at exactly 1 — the fence's baseline.
+  // (The record's own `gen` field is gone: the projection is the single
+  // minter now, so no double increment.)
+  expect(gen).toBe(1);
 
   // A is displaced: the lease is reclaimed and the resource granted again, so the generation moves.
   expect(release(store, "build/step", "AgentA", "released")).toBe(true);

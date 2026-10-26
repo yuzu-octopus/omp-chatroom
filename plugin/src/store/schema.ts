@@ -32,13 +32,6 @@ export type RoomRecord =
       ttlMs: number;
       /** R3 — the resources that must be free before this one may be claimed. */
       dependsOn?: string[];
-      /**
-       * R1 — the generation of this grant, per resource. It rises whenever OWNERSHIP changes, so a
-       * holder whose lease was reclaimed can be told its token is stale. Kleppmann: "you need to
-       * include a fencing token with every write request... the storage server remembers that it
-       * has already processed a write with a higher token number".
-       */
-      gen?: number;
     }
   | {
       v: 1;

@@ -216,7 +216,7 @@ async function waitForClaim(
             ttlMs: record.ttlMs,
             acquiredAt: record.ts,
             seq: record.seq,
-            gen: record.gen ?? store.claims.get(resource)?.gen ?? 1,
+            gen: store.claims.get(resource)?.gen ?? 1,
             dependsOn: record.dependsOn ?? [],
           }),
         );
