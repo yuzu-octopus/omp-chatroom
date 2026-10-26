@@ -219,7 +219,13 @@ test("R1: a displaced agent's late write is fenced out by its stale generation",
   const first = await invokeRoom(ctx, { op: "claim", topic: "build", key: "step" });
   expect(first.details).toMatchObject({ ok: true, op: "claim", holder: "AgentA" });
   const gen = first.details?.gen as number;
-  expect(gen).toBeGreaterThan(0);
+  // nextGen mints the generation and `append` projects it: the record and
+  // the projection compute the SAME increment twice (0→1, then 1→2), so a
+  // first grant lands on 2. The fence only needs monotonicity, and the
+  // replay path recomputes the same double increment — so it is stable,
+  // not drift. Pinned exactly so a future single-mint change shows up
+  // HERE, not as a silent fence shift.
+  expect(gen).toBe(2);
 
   // A is displaced: the lease is reclaimed and the resource granted again, so the generation moves.
   expect(release(store, "build/step", "AgentA", "released")).toBe(true);
