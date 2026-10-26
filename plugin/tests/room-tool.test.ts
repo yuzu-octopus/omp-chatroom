@@ -978,6 +978,7 @@ test("unmute: removes topic from muted set", async () => {
   await invokeRoom(ctx, { op: "mute", topic: "build" });
   const result = await invokeRoom(ctx, { op: "unmute", topic: "build" });
   expect(result.details).toMatchObject({ ok: true, op: "unmute" });
+  expect(result.content.map((c) => c.text ?? "").join("\n")).toContain("build");
   const member = store.members.get("AgentA");
   expect(member?.muted.has("build")).toBe(false);
 });
