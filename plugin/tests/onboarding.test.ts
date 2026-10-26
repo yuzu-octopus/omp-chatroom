@@ -1071,6 +1071,18 @@ test("flag on: one JSONL line per hook run with the gauge fields (F6 harness)", 
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+test("turn_start on a corrupt room degrades silently, never throws", async () => {
+  // Hook lines 153-155: resetTurnBudget opens the room; a corrupt root
+  // throws inside roomStoreFor — the catch keeps the turn alive.
+  const bad = fs.mkdtempSync(path.join(os.tmpdir(), "room-hook-bad-"));
+  fs.mkdirSync(path.join(bad, ".omp-room"), { recursive: true });
+  fs.writeFileSync(path.join(bad, ".omp-room", "room"), "not a dir");
+  const { pi, fire } = fakePi();
+  registerHooks(pi);
+  const ctx = { ...fakeCtx("AgentA"), cwd: bad };
+  await expect(fire("turn_start", { type: "turn_start" }, ctx)).resolves.toBeUndefined();
+  fs.rmSync(bad, { recursive: true, force: true });
+});
 test("flag on with an unwritable path: the turn still renders, recording degrades silently", () => {
   // Line 261: a bad stats path must never break a turn — the harness
   // swallows the write error and returns the render unchanged. A directory
