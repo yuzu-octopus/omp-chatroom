@@ -1213,6 +1213,55 @@ test(
   },
   WAIT_TIMEOUT_MS,
 );
+test(
+  "R4: a cross-mechanism wait cycle (agent waits claim-holder who waits the agent) is refused",
+  async () => {
+    // A holds claim race/res. B waits for the claim (edge B→resource, holder
+    // A). A then waits for B: the agent-target walk reaches B's resource edge
+    // and resolves the holder THROUGH the claim map (wait-for-agent.ts:171) —
+    // the lambda no pure agent-agent cycle ever invokes.
+    const root = freshRoot();
+    const bus = new EventBus();
+    const registry = new AgentRegistry();
+    const a = await newSession(bus, registry, root, "AgentA");
+    const b = await newSession(bus, registry, root, "AgentB");
+    try {
+      await toolOf(a, "room").execute("c-hold", {
+        op: "claim",
+        topic: "race",
+        key: "res",
+        ttl: 60_000,
+      });
+      const waitBP = toolOf(b, "wait_for_claim").execute("c-wb-claim", {
+        resource: "race/res",
+        timeout: 5_000,
+      });
+      await Bun.sleep(100);
+      const refused = await toolOf(a, "wait_for_agent").execute("c-wa-cycle", {
+        agents: ["AgentB"],
+        timeout: 1_000,
+      });
+      expect(refused.details).toMatchObject({ ok: false, outcome: "aborted" });
+      expect(refused.isError).toBe(true);
+      const raw = refused.details?.cycle;
+      const cycle: string[] =
+        Array.isArray(raw) && raw.every((c) => typeof c === "string") ? (raw as string[]) : [];
+      expect(cycle[0]).toBe("AgentA");
+      expect(cycle).toContain("AgentA");
+      expect(cycle).toContain("AgentB");
+      // B's claim wait is still pending — only the closing edge was refused.
+      const stillWaiting = await Promise.race([
+        waitBP.then(() => "settled"),
+        Bun.sleep(50).then(() => "waiting"),
+      ]);
+      expect(stillWaiting).toBe("waiting");
+    } finally {
+      await a.dispose();
+      await b.dispose();
+    }
+  },
+  WAIT_TIMEOUT_MS,
+);
 
 test(
   "wait_for_claim on a resource the caller already holds returns an immediate event, queueing nothing",
