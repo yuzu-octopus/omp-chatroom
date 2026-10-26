@@ -652,7 +652,7 @@ test("hydrateClaims restores the holder's heldTopics so the board stays correct"
     threadRoots: new Set(),
     heldTopics: new Set(),
   });
-  grant(s, "build/step", "A", 60_000);
+  grant(s, "build/step", "A", 60_000, ["build/schema"]);
   const snapshot = s.records.slice();
 
   s.claims.clear();
@@ -661,8 +661,10 @@ test("hydrateClaims restores the holder's heldTopics so the board stays correct"
 
   expect(s.claims.get("build/step")?.holder).toBe("A");
   expect(s.members.get("A")?.heldTopics.has("build")).toBe(true);
-  // ...and the TTL travels too: the replayed lease carries the same window.
+  // ...and the TTL + dependency list travel too: the replayed lease
+  // carries the same window and the same "needs" the board shows.
   expect(s.claims.get("build/step")?.ttlMs).toBe(60_000);
+  expect(s.claims.get("build/step")?.dependsOn).toEqual(["build/schema"]);
 });
 
 test("hydrateClaims applies a later release over an earlier claim", () => {
