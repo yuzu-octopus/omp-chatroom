@@ -1121,7 +1121,7 @@ test("recall: invalid regex returns error", async () => {
 test("recall: missing pattern returns error", async () => {
   const { ctx } = newTestStore();
   const result = await invokeRoom(ctx, { op: "recall" });
-  expect(result.details).toMatchObject({ ok: false });
+  expect(result.details).toMatchObject({ ok: false, error: "recall requires a pattern" });
 });
 
 test("recall: caps at 100 matches", async () => {
