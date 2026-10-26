@@ -254,6 +254,11 @@ test("R1: a displaced agent's late write is fenced out by its stale generation",
     gen,
   });
   expect(stalePost.details).toMatchObject({ ok: false });
+  // ...and the refusal names the resource AND both generations, so the
+  // zombie learns exactly how far behind it is.
+  const staleText = JSON.stringify(stalePost.content);
+  expect(staleText).toContain("build/step");
+  expect(staleText).toContain("generation 2, not 1");
 });
 
 test("R3: a claim whose dependency is still held is refused, and the refusal names the blocker", async () => {
