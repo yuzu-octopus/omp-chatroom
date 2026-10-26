@@ -1112,6 +1112,30 @@ test("read: every record kind renders its own model-facing line", async () => {
   expect(text).toContain("delivered seq 1");
 });
 
+test("a member leave record removes the roster entry", () => {
+  // Lines 124-125: the join arm registers, the leave arm deletes.
+  const { store } = newTestStore();
+  store.append({ kind: "member", from: "AgentC", action: "join" });
+  expect(store.members.has("AgentC")).toBe(true);
+  store.append({ kind: "member", from: "AgentC", action: "leave" });
+  expect(store.members.has("AgentC")).toBe(false);
+});
+
+test("a throwing listener does not break the append path", () => {
+  // Lines 209-210: listeners must not break appends — a throw is swallowed.
+  const { store } = newTestStore();
+  store.addListener(() => {
+    throw new Error("listener boom");
+  });
+  const seen: number[] = [];
+  store.addListener((r) => {
+    seen.push(r.seq);
+  });
+  const record = store.append({ kind: "msg", from: "A", topic: "t", body: "b" });
+  expect(record.seq).toBeGreaterThan(0);
+  expect(seen).toEqual([record.seq]);
+});
+
 // --- K1 content contract: what the MODEL sees ---
 // `details` never reaches the model — pi-agent-core's `coerceToolResult` (agent-loop.ts:540) keeps
 // only `content` on the wire. So an op whose content is a bare count is unanswerable to a model.
