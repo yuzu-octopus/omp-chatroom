@@ -1287,6 +1287,17 @@ test("a clean post carries no deliveryError envelope — only failures do", asyn
   expect(res.details).toMatchObject({ ok: true, op: "post" });
   expect("deliveryError" in (res.details ?? {})).toBe(false);
 });
+
+test("a clean release carries no deliveryError envelope — only failures do", async () => {
+  // room.ts release arm 1072-1119 via okWithDelivery: the same contract —
+  // a clean release's details has NO deliveryError key. The post arm is
+  // pinned above; the release arm must obey it too.
+  const { ctx } = newTestStore();
+  await invokeRoom(ctx, { op: "claim", topic: "build", key: "step", ttl: 60_000 });
+  const res = await invokeRoom(ctx, { op: "release", topic: "build", key: "step" });
+  expect(res.details).toMatchObject({ ok: true, op: "release" });
+  expect("deliveryError" in (res.details ?? {})).toBe(false);
+});
 test("release by a non-holder is denied naming the holder", async () => {
   // Release-denied arm (room.ts:1100-1104): a live lease held by someone
   // else is neither released nor reclaimed — the denial names the holder.
