@@ -128,6 +128,9 @@ function coerceSetting(key: string, raw: string): string | number | null {
   const current = (DEFAULT_ROOM_CONFIG as unknown as Record<string, unknown>)[key];
   if (current === undefined) return null;
   if (typeof current === "number") {
+    // A blank value is not zero: `Number("")` is 0, and a 0 cap (maxBodyBytes,
+    // claimTtlMs, …) silently breaks the room. Refuse it like garbage.
+    if (raw.trim() === "") return null;
     const parsed = Number(raw);
     return Number.isFinite(parsed) ? parsed : null;
   }

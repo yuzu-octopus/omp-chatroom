@@ -428,6 +428,21 @@ test("/room config set with an unparseable number is refused", async () => {
   expect(notified.join("\n")).toContain("unknown key or bad value");
   expect(loadRoomConfig(storeRoot)).toEqual(before);
 });
+test("/room config set with a blank number is refused, not coerced to 0", async () => {
+  // `Number("")` is 0: without the blank guard a bare `config set
+  // maxBodyBytes=` would write a 0 cap and refuse every post after it.
+  const notified: string[] = [];
+  const handler = captureHandler(notified);
+  const root = tempRoot();
+  const storeRoot = `${root}/.omp-room`;
+  roomStoreForCwd(root);
+  await handler("config", headlessCtx(root, notified));
+  notified.length = 0;
+  const before = loadRoomConfig(storeRoot);
+  await handler("config set maxBodyBytes=", headlessCtx(root, notified));
+  expect(notified.join("\n")).toContain("unknown key or bad value");
+  expect(loadRoomConfig(storeRoot)).toEqual(before);
+});
 
 // --- validation branches: warnings refuse and mutate nothing ------------------
 
