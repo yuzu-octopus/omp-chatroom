@@ -918,3 +918,33 @@ test("records with non-string array fields are quarantined as invalid", () => {
   expect(records.filter((r) => r.kind === "msg").map((r) => r.seq)).toEqual([3]);
   closeRoomLog(root, roomId);
 });
+
+test("replay admits a valid status ledger but quarantines bad wait/delivered shapes", () => {
+  // Lines 299 + 341-351: a msg whose status is five valid {reason, answer}
+  // pairs passes (isStatusObject true); a wait with a bad outcome and a
+  // delivered with a non-integer seq do not.
+  const root = tempRoot();
+  const roomId = roomIdFor(root);
+  const fd = roomLogFd(root, roomId);
+  const goodStatus = {
+    is_request_satisfied: { reason: "r", answer: "a" },
+    is_in_loop: { reason: "r", answer: "a" },
+    is_progress_being_made: { reason: "r", answer: "a" },
+    next_speaker: { reason: "r", answer: "a" },
+    instruction_or_question: { reason: "r", answer: "a" },
+  };
+  appendLine(fd, `${JSON.stringify({ ...msg(1), status: goodStatus })}\n`);
+  appendLine(
+    fd,
+    `${JSON.stringify({ v: 1, seq: 2, ts: 1002, kind: "wait", id: "w2", from: "A", waited: "claim", target: "t/k", outcome: "bogus", enqueuedAt: 1 })}\n`,
+  );
+  appendLine(
+    fd,
+    `${JSON.stringify({ v: 1, seq: 3, ts: 1003, kind: "delivered", id: "d3", from: "A", deliveredSeq: 1.5, tier: "T1" })}\n`,
+  );
+  appendLine(fd, `${JSON.stringify(msg(4))}\n`);
+  const { records, skipped } = replay(fd);
+  expect(skipped).toBe(2);
+  expect(records.filter((r) => r.kind === "msg").map((r) => r.seq)).toEqual([1, 4]);
+  closeRoomLog(root, roomId);
+});
