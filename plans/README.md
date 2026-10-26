@@ -6,7 +6,7 @@ Baseline at plan time: `tsc` 0 errors, `biome check` clean, `bun test tests/`
 reproduced — see plan 014). Execute in the order below unless dependencies say
 otherwise. Each executor: read the plan fully before starting, honor its STOP
 conditions, and update your row when done.
-Round-912337e (2026-10-26): tsc 0 errors, biome clean, 523 pass / 1 skip / 0 fail / 18 files; host pin 18.12.6. +1 lagFor clamp test (cursor past logEnd reports 0), mutation-checked.
+Round-250f78f (2026-10-26): tsc 0 errors, biome clean, 524 pass / 1 skip / 0 fail / 18 files; host pin 18.12.6. +1 carried-gap test (carry gate excludes gaps from owed set), mutation-checked.
 
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
