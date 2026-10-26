@@ -485,6 +485,29 @@ test("T0 is never dropped under its ceiling — it coalesces into one digest", (
   expect(over.injected.length + many.length).toBeGreaterThan(0);
 });
 
+test("a green T2 pass consumes: the cursor advances past what was told", async () => {
+  // room.ts deliverToTarget 567-572: a NON-coalesced T2 is cursor-only —
+  // never injected, and consumed on arrival. Slow follows nothing, so the
+  // record is T2: one green pass moves the cursor to its seq.
+  const root = tempRoot();
+  const ctx = fakeCtx(root, "Sender");
+  const store = roomStoreFor(ctx);
+  const { pi } = fakePi();
+  store.members.set("Slow", {
+    agentId: "Slow",
+    joinedAtSeq: 0,
+    topics: new Set(),
+    muted: new Set(),
+    threadRoots: new Set(),
+    heldTopics: new Set(),
+  });
+  registerSession("Slow", []);
+  const rec = store.append({ kind: "msg", from: "Sender", topic: "chat", body: "hello" });
+  const failure = await notifyRecipients(pi, ctx, store, [rec], "Sender");
+  expect(failure).toBeUndefined();
+  expect(store.cursors.get("Slow")).toBe(rec.seq);
+});
+
 // --- 7. kind-first dispatch (K2) ------------------------------------------
 
 test("deliver dispatches on kind and never reads .body on a kind that lacks it", () => {
