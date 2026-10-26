@@ -1154,6 +1154,17 @@ test("board content truncates the roster past ROSTER_CAP and discloses the remai
   expect(text).toContain("more member(s)");
   expect(text).toContain("+3 more member(s)");
 });
+test("room on a corrupt root returns ok:false + error, never throws", async () => {
+  // Tool-entry U6 arm (room.ts:786-787): a file where room/ must go → mkdir
+  // fails (ENOTDIR). Written before roomStoreFor ever opens the root.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "room-tool-"));
+  fs.mkdirSync(path.join(root, ".omp-room"), { recursive: true });
+  fs.writeFileSync(path.join(root, ".omp-room", "room"), "not a dir");
+  const res = await invokeRoom(fakeCtx(root, "AgentA"), { op: "board" });
+  expect(res.details).toMatchObject({ ok: false });
+  expect(typeof res.details?.error).toBe("string");
+  expect(Array.isArray(res.content)).toBe(true);
+});
 
 test("topics/recall content carries the rows, not a count", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "room-tool-"));
