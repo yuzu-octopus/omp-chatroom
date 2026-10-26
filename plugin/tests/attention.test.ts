@@ -837,6 +837,7 @@ test("deliver: T0 steers, T1 is an aside, T2 only bumps the cursor", async () =>
   await deliver(piT2.pi, ctx, "Sender", msg(1, { from: "Other", topic: "build" }), "T2");
   expect(piT2.sends.length).toBe(0);
   expect(store.cursors.get("Sender")).toBe(1);
+  expect(store.deliveries.T2).toBe(1);
 
   // T1 to the calling session → aside.
   const piT1 = fakePi();
@@ -844,6 +845,7 @@ test("deliver: T0 steers, T1 is an aside, T2 only bumps the cursor", async () =>
   expect(piT1.sends.length).toBe(1);
   expect(piT1.sends[0]!.options).toMatchObject({ deliverAs: "aside" });
   expect(piT1.sends[0]!.payload).toMatchObject({ display: true });
+  expect(store.deliveries.T1).toBe(1);
 
   // T0 to the calling session → steer.
   const piT0 = fakePi();
@@ -855,6 +857,8 @@ test("deliver: T0 steers, T1 is an aside, T2 only bumps the cursor", async () =>
   await deliver(piSelf.pi, ctx, "Sender", msg(4, { from: "Sender", topic: "build" }), "T1");
   expect(piSelf.sends.length).toBe(0);
   expect(store.cursors.get("Sender")).toBe(4);
+  // ...and each tier counted exactly once: T2 cursor-only, T1 aside, T0 steer.
+  expect(store.deliveries).toEqual({ T0: 1, T1: 1, T2: 1 });
 });
 
 test("an uncertain T0 is remembered as given — the next pass does not storm", async () => {
