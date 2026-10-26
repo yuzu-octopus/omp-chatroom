@@ -53,14 +53,12 @@ function coerceConfig(raw: unknown): RoomConfig {
   if (typeof raw !== "object" || raw === null) return config;
   // Each entry is type-checked against the default's type before it is written; the cast lets the
   // one loop write a mixed-type record.
-  const target = config as unknown as Record<string, string | number | boolean>;
+  const target = config as unknown as Record<string, string | number>;
   for (const [key, value] of Object.entries(raw)) {
     const current = target[key];
     if (typeof current === "string" && typeof value === "string") {
       target[key] = value;
     } else if (typeof current === "number" && typeof value === "number" && Number.isFinite(value)) {
-      target[key] = value;
-    } else if (typeof current === "boolean" && typeof value === "boolean") {
       target[key] = value;
     }
   }
