@@ -30,6 +30,7 @@ import {
 import type { RoomRecord } from "../src/store/schema";
 import {
   COVER_BUDGET_LINES,
+  invalidateTree,
   loadView,
   openTreeStore,
   RAW_MAX,
@@ -986,4 +987,20 @@ test("a degenerate merge reply is retried and the usable one is kept", async () 
   expect(await summarizeBlock(ctx, store, 0, N)).toBe(filler(200).trim());
   expect(llmCalls - before).toBe(2); // the degenerate attempt, then the usable one
   replyFor = undefined;
+});
+
+test("invalidateTree never throws, even when the filesystem refuses", () => {
+  // Lines 356, 361: both rmSync calls are best-effort — an unwritable
+  // parent makes them throw EACCES, which is swallowed (a stale cache
+  // is better than a broken prune).
+  const base = tmpTreePath();
+  fs.mkdirSync(path.join(base, "tree"), { recursive: true });
+  fs.writeFileSync(path.join(base, "tree", "64"), "level-bytes");
+  fs.mkdirSync(path.join(base, "view.json"));
+  fs.chmodSync(base, 0o555);
+  try {
+    expect(() => invalidateTree(path.join(base, "tree"))).not.toThrow();
+  } finally {
+    fs.chmodSync(base, 0o755);
+  }
 });
