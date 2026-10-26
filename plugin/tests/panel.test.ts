@@ -264,13 +264,17 @@ test("chat pane follows the selection above the tail window", () => {
   // selecting row 0 pulls the window up so the marker stays visible.
   const records: RoomRecord[] = Array.from({ length: 20 }, (_, i) => msg(i + 1, `line-${i + 1}`));
   const rows = projectChatRows(records, viewer(), 0);
-  const pane = createChatPane(() => rows, 5, theme, () => 0);
+  const pane = createChatPane(
+    () => rows,
+    5,
+    theme,
+    () => 0,
+  );
   const out = pane(60, 5);
   expect(out.length).toBe(5);
   expect(out.join("\n")).toContain("line-1");
   expect(out.join("\n")).not.toContain("line-20");
 });
-
 
 // --- 4. board pane claim row ---------------------------------------------
 

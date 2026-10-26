@@ -1430,7 +1430,11 @@ test(
       expect(res!.details).toMatchObject({ ok: true, outcome: "timeout" });
       expect(updates.length).toBeGreaterThanOrEqual(1);
       const texts = updates
-        .map((u) => ((u as { content?: Array<{ text?: string }> }).content ?? []).map((c) => c.text ?? "").join(" "))
+        .map((u) =>
+          ((u as { content?: Array<{ text?: string }> }).content ?? [])
+            .map((c) => c.text ?? "")
+            .join(" "),
+        )
         .join("\n");
       expect(texts).toContain("waiting");
     } finally {
