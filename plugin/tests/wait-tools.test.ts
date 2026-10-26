@@ -1477,7 +1477,9 @@ test(
       expect(res.isError).toBe(true);
       const details: Record<string, unknown> = res.details ?? {};
       expect(typeof details.error).toBe("string");
-      expect(Array.isArray(res.content)).toBe(true);
+      // ...and the model-facing text names the resource the wait was for,
+      // not just "corrupt" — the agent learns WHICH wait died.
+      expect(textOf(res)).toContain("x/y");
     } finally {
       await b.dispose();
     }
