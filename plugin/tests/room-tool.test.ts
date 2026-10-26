@@ -1515,8 +1515,8 @@ test("topics/recall content carries the rows, not a count", async () => {
 
   const recall =
     (await invokeRoom(ctx, { op: "recall", pattern: "needle" })).content[0]?.text ?? "";
+  expect(recall).toContain("room recall → 1 match(es)");
   expect(recall).toContain("needle in here");
-  expect(recall).toContain("1 match(es)");
 });
 
 test("post without a topic is refused", async () => {
