@@ -964,6 +964,7 @@ test("mute: topic mute adds to muted set", async () => {
   expect(result.details).toMatchObject({ ok: true, op: "mute" });
   const member = store.members.get("AgentA");
   expect(member?.muted.has("build")).toBe(true);
+  expect(result.content.map((c) => c.text ?? "").join("\n")).toContain("room mute → build");
   expect(result.content.map((c) => c.text ?? "").join("\n")).toContain("build");
 });
 
