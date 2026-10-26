@@ -826,6 +826,20 @@ test("acquire/release round-trips: the lock file appears and disappears", () => 
   expect(fs.existsSync(lockPathFor(root))).toBe(false);
 });
 
+test("an unreadable lock entry is treated as stale and reaped, not fatal", () => {
+  // Lines 56-57: a lock path that cannot be read (here a directory, so
+  // readFileSync throws EISDIR) degrades to owner 0 — stale — and the
+  // acquire proceeds instead of failing loudly on garbage.
+  const root = tempRoot();
+  const lockPath = lockPathFor(root);
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+  fs.mkdirSync(lockPath);
+  acquireRoomLock(root);
+  expect(fs.readFileSync(lockPath, "utf-8")).toBe(String(process.pid));
+  releaseRoomLock(root);
+  expect(fs.existsSync(lockPath)).toBe(false);
+});
+
 test("a second live holder fails loudly; openRoomLog reports the locked variant", () => {
   const root = tempRoot();
   const roomId = roomIdFor(root);

@@ -66,7 +66,7 @@ export function acquireRoomLock(root: string): void {
       // ESRCH: owner dead → stale lock, fall through and reap it.
     }
   }
-  fs.rmSync(lockPath, { force: true });
+  fs.rmSync(lockPath, { force: true, recursive: true });
   fs.writeFileSync(lockPath, String(process.pid), { flag: "wx" });
   const held = HOLDS.get(root);
   HOLDS.set(root, { count: (held?.count ?? 0) + 1, room: held?.room ?? false });
