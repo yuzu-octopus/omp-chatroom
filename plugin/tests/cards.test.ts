@@ -904,3 +904,16 @@ test("board delta card titles contended records as a loss", () => {
   ).join("\n");
   expect(con).toContain("lost build/step");
 });
+
+test("board delta card falls back to the plain title for other record kinds", () => {
+  // Line 265: a release record is none of gap/member/contended — the
+  // collapsed title is the bare "room board" with no kind-specific tail.
+  const out = render(
+    renderBoardDeltaCard(cardMessage("room:board-delta", RELEASE), { expanded: false }, theme),
+    80,
+  ).join("\n");
+  expect(out).toContain("room board");
+  expect(out).not.toContain("lost");
+  expect(out).not.toContain("skipped");
+  expect(out).not.toMatch(/room board [A-Za-z]/);
+});
