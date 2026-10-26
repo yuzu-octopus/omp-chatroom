@@ -1523,6 +1523,12 @@ test("post without a topic is refused", async () => {
   expect(res.details).toMatchObject({ ok: false, error: "post requires a topic" });
 });
 
+test("post without a body is refused", async () => {
+  const { ctx } = newTestStore();
+  const res = await invokeRoom(ctx, { op: "post", topic: "build" });
+  expect(res.details).toMatchObject({ ok: false, error: "post requires a body" });
+});
+
 // --- F1 security: recall pattern length limit ---
 
 test("recall: pattern over 200 chars is rejected", async () => {
