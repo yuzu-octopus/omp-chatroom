@@ -162,6 +162,27 @@ test("the digest backlog renders one line per record kind", () => {
   expect(digest).toContain("wait AgentD");
   expect(digest).toContain("delivered AgentB");
 });
+test("truncation cascades from backlog to claims to roster before the floor", () => {
+  // Digest lines 167-169: when the backlog alone cannot satisfy the budget,
+  // claims drop next (AgentB's lease vanishes) while the cursor/lag floor
+  // and caps survive.
+  for (let i = 0; i < 50; i++) post(i, `record-${i}-${"Z".repeat(600)}`);
+  store.claims.set("build/step", {
+    resource: "build/step",
+    holder: "AgentB",
+    ttlMs: 300_000,
+    acquiredAt: Date.now(),
+    seq: store.seq,
+    gen: 1,
+    dependsOn: [],
+  });
+  const full = buildDigest(store, viewer("AgentA"));
+  expect(full).toContain("build/step");
+  const tight = buildDigest(store, viewer("AgentA"), 50);
+  expect(tight).not.toContain("build/step");
+  expect(tight).toContain("Your cursor:");
+  expect(tight).toContain("Caps:");
+});
 
 // ---------------------------------------------------------------------------------------------
 // 3. K22 regression: room content cannot forge a harness tag or close the untrusted region.
