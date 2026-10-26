@@ -1071,6 +1071,25 @@ test("flag on: one JSONL line per hook run with the gauge fields (F6 harness)", 
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+test("flag on with an unwritable path: the turn still renders, recording degrades silently", () => {
+  // Line 261: a bad stats path must never break a turn — the harness
+  // swallows the write error and returns the render unchanged. A directory
+  // as the target makes appendFileSync throw EISDIR deterministically.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "room-digest-stats-"));
+  process.env[DIGEST_STATS_ENV] = "1";
+  process.env[DIGEST_STATS_PATH_ENV] = dir;
+  resetDigestTurns();
+  try {
+    post(0, "hello");
+    const expected = buildDigest(store, viewer("AgentA"));
+    expect(recordDigestTurn(store, expected)).toBe(expected);
+  } finally {
+    delete process.env[DIGEST_STATS_ENV];
+    delete process.env[DIGEST_STATS_PATH_ENV];
+    resetDigestTurns();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("flag on: a second consecutive identical render gauges zero churn (F6 harness)", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "room-digest-stats-"));
