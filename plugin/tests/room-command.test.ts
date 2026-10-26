@@ -411,7 +411,7 @@ test("/room config set with an unknown key is refused and changes nothing", asyn
   expect(loadRoomConfig(storeRoot)).toEqual(before);
 });
 
-test("/room config set with an unparseable number or boolean is refused", async () => {
+test("/room config set with an unparseable number is refused", async () => {
   const notified: string[] = [];
   const handler = captureHandler(notified);
   const root = tempRoot();

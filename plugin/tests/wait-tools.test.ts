@@ -881,10 +881,8 @@ test(
 /**
  * describeMatch is module-private, so the rendering is covered through the event
  * outcome: start a wait, produce the matching room activity, assert the
- * kind-specific one-line text in content. Only `msg` records satisfy the filter
- * (matches() line ~228), so the non-msg branches below are exercised only for
- * the shapes the wait can actually resolve on; the unreachable fallthroughs
- * stay uncovered by construction, not by omission.
+ * one-line text in content. The listener only resolves on `msg` records, so
+ * describeMatch takes the narrowed msg type — no unreachable arms remain.
  */
 test(
   "wait_for_message renders the matched msg as `from · topic:t · body`",

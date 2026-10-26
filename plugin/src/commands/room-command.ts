@@ -124,17 +124,12 @@ function boardLines(store: RoomStore, viewerId: string): string[] {
 }
 
 /** One `key=value` pair from `config set`; `null` = unknown key or unparseable value. */
-function coerceSetting(key: string, raw: string): string | number | boolean | null {
+function coerceSetting(key: string, raw: string): string | number | null {
   const current = (DEFAULT_ROOM_CONFIG as unknown as Record<string, unknown>)[key];
   if (current === undefined) return null;
   if (typeof current === "number") {
     const parsed = Number(raw);
     return Number.isFinite(parsed) ? parsed : null;
-  }
-  if (typeof current === "boolean") {
-    if (raw === "true") return true;
-    if (raw === "false") return false;
-    return null;
   }
   return raw;
 }

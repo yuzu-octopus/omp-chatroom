@@ -57,27 +57,9 @@ const safe = safeRoomText;
 const clamp = (value: number, lo: number, hi: number): number =>
   Math.min(hi, Math.max(lo, Math.trunc(value)));
 
-/** A one-line model-facing rendering of the matched record (kind-first; only msg/note carry `body`). */
-function describeMatch(record: RoomRecord): string {
-  switch (record.kind) {
-    case "msg":
-    case "note":
-      return `${safe(record.from)} · topic:${safe(record.topic)} · "${safe(record.body)}"`;
-    case "claim":
-      return `${safe(record.from)} claimed ${safe(record.resource)}`;
-    case "release":
-      return `${safe(record.from)} released ${safe(record.resource)} (${record.reason})`;
-    case "member":
-      return `${safe(record.from)} ${record.action === "join" ? "joined" : "left"} the room`;
-    case "gap":
-      return `${record.skipped} record(s) skipped (${record.reason})`;
-    case "contended":
-      return `${safe(record.from)} wanted ${safe(record.resource)} — held by ${safe(record.holder)}`;
-    case "wait":
-      return `${safe(record.from)} waited for ${safe(record.target)} — ${record.outcome}`;
-    case "delivered":
-      return `${safe(record.from)} got seq ${record.deliveredSeq} at ${record.tier}`;
-  }
+/** A one-line model-facing rendering of the matched msg. */
+function describeMatch(record: Extract<RoomRecord, { kind: "msg" }>): string {
+  return `${safe(record.from)} · topic:${safe(record.topic)} · "${safe(record.body)}"`;
 }
 
 function timeoutResult(timeoutMs: number): WaitForMessageResult {
@@ -224,15 +206,14 @@ async function waitForMessage(
 
   // A message matches on the two filters the params expose: the sender, and "mentions me". With
   // neither filter set, any new `msg` satisfies the wait.
-  const matches = (record: RoomRecord): boolean => {
-    if (record.kind !== "msg") return false;
+  const matches = (record: Extract<RoomRecord, { kind: "msg" }>): boolean => {
     if (from !== undefined && record.from !== from) return false;
     if (topic !== undefined && record.topic !== topic) return false;
     if (wantMention && !record.mention?.includes(agentId)) return false;
     return true;
   };
 
-  const eventResult = (record: RoomRecord): WaitForMessageResult => ({
+  const eventResult = (record: Extract<RoomRecord, { kind: "msg" }>): WaitForMessageResult => ({
     content: [{ type: "text", text: `wait_for_message ⟵ ${describeMatch(record)}` }],
     details: { ok: true, outcome: "event", message: record },
   });
@@ -241,7 +222,7 @@ async function waitForMessage(
   if (from !== undefined) setWaitEdges(store.root, agentId, [{ kind: "message", from }]);
 
   const unsubscribe = store.addListener((record) => {
-    if (matches(record)) finish(eventResult(record));
+    if (record.kind === "msg" && matches(record)) finish(eventResult(record));
   });
   const timer = ctx.setTimeout(() => finish(timeoutResult(timeoutMs)), timeoutMs);
   const onAbort = (): void => finish(abortResult());
