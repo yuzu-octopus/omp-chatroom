@@ -982,6 +982,7 @@ test("unmute: whole-room unmute removes sentinel", async () => {
   await invokeRoom(ctx, { op: "mute" });
   const result = await invokeRoom(ctx, { op: "unmute" });
   expect(result.details).toMatchObject({ ok: true, op: "unmute" });
+  expect(result.content.map((c) => c.text ?? "").join("\n")).toContain("whole room");
   const member = store.members.get("AgentA");
   expect(member?.muted.has("")).toBe(false);
 });
