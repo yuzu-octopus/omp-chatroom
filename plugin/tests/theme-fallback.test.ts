@@ -161,6 +161,23 @@ test("the host's symbol mirror is never left pointing at a fallback", () => {
   }
 });
 
+test("a fallback publish keeps the mirror on a symbol-bearing singleton", () => {
+  // Line 207 (isHostTheme's callable-symbol arm) through line 192's restore:
+  // a half-built singleton — `symbol` but no `fg`, so the publish proceeds —
+  // is still a host theme for mirror purposes, and the fallback publish
+  // hands the mirror back to it. A restore that always yields undefined
+  // leaves the mirror on the ascii preset instead.
+  const original = theme;
+  try {
+    setThemeInstance({ symbol: (_key: SymbolKey) => "»host«" } as unknown as Theme);
+    adoptHostTheme(fallback());
+    expect(activeThemeSymbol("status.info")).toBe("»host«");
+  } finally {
+    setThemeInstance(original);
+    setActiveSymbolTheme(original);
+  }
+});
+
 test("the fallback's own lookups never recurse, even with the mirror pointing at it", () => {
   const original = theme;
   const shim = fallback();
