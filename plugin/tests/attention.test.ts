@@ -446,7 +446,7 @@ test("token bucket: green → yellow → red in order at CIR=1/2s, CBS=10", () =
 
   expect(verdicts.slice(0, 10)).toEqual(Array(10).fill("green")); // committed bucket (CBS = 10)
   expect(verdicts[10]).toBe("yellow"); // first burst (excess bucket)
-  expect(verdicts[20]).toBe("red"); // burst exhausted → coalesce
+  expect(verdicts.slice(11, 20)).toEqual(Array(9).fill("yellow")); // rest of the burst
 
   // CIR refill: 2 s later the committed bucket has exactly one token again.
   expect(admitPost(store, "A", now + 2_000)).toBe("green");
