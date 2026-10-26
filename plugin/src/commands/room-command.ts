@@ -389,7 +389,7 @@ export function registerRoomCommand(pi: ExtensionAPI): void {
             return;
           }
           const next: RoomConfig = { ...loadRoomConfig(store.root) };
-          (next as unknown as Record<string, string | number | boolean>)[key] = coerced;
+          (next as unknown as Record<string, string | number>)[key] = coerced;
           saveRoomConfig(store.root, next);
           report(
             ctx,
