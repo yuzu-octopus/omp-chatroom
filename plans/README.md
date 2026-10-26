@@ -6,7 +6,7 @@ Baseline at plan time: `tsc` 0 errors, `biome check` clean, `bun test tests/`
 reproduced — see plan 014). Execute in the order below unless dependencies say
 otherwise. Each executor: read the plan fully before starting, honor its STOP
 conditions, and update your row when done.
-Round-84747ef (2026-10-26): tsc 0 errors, biome clean, 540 pass / 1 skip / 0 fail / 18 files; host pin 18.12.6. +1 baseline test (pre-changed peer times out; dropped baseline fires instant event), mutation-checked.
+Round-6d83886 (2026-10-26): tsc 0 errors, biome clean, 541 pass / 1 skip / 0 fail / 18 files; host pin 18.12.6. +1 claim pre-abort record test (wait t/k aborted; dropped recordWait fails), mutation-checked.
 
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
