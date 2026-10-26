@@ -423,6 +423,26 @@ test("persistOwnCursor / restoreOwnCursor round-trip through appendEntry('chatro
   expect(restoreOwnCursor(ctx, "other-room")).toBe(null);
 });
 
+test("restoreOwnCursor skips corrupt cursor entries and takes the newest valid one", () => {
+  // cursors.ts isCursorData 80-89: entries whose data is not a
+  // { roomId: string, seq: number } are skipped, and the scan runs
+  // newest-first — so a corrupt entry on top never shadows an older
+  // valid one.
+  const entries: Array<{ type: string; customType: string; data?: unknown }> = [
+    { type: "custom", customType: "chatroom:cursor", data: { roomId: "r123", seq: 7 } },
+    {
+      type: "custom",
+      customType: "chatroom:cursor",
+      data: { roomId: "r123", seq: "not-a-number" },
+    },
+    { type: "custom", customType: "other", data: { roomId: "r123", seq: 99 } },
+  ];
+  const ctx = {
+    sessionManager: { getEntries: () => entries },
+  } as unknown as ExtensionContext;
+  expect(restoreOwnCursor(ctx, "r123")).toBe(7);
+});
+
 // --- config: local://room/config.json + flags -----------------------------
 
 test("config: defaults when absent, save/load round-trip, and resolveRoomId persists once", () => {
