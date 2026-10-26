@@ -76,6 +76,94 @@ function msg(i: number): RoomRecord {
   };
 }
 
+/** One record of each non-msg kind, for the summarizer-input test below. */
+function everyKind(i: number): RoomRecord[] {
+  return [
+    {
+      v: 1,
+      seq: i + 1,
+      ts: 1000 + i,
+      kind: "note",
+      id: `n-${i}`,
+      from: "A",
+      topic: "t",
+      body: `nb${i}`,
+    },
+    {
+      v: 1,
+      seq: i + 2,
+      ts: 1001 + i,
+      kind: "claim",
+      id: `c-${i}`,
+      from: "B",
+      resource: "t/k",
+      ttlMs: 60_000,
+    },
+    {
+      v: 1,
+      seq: i + 3,
+      ts: 1002 + i,
+      kind: "release",
+      id: `r-${i}`,
+      from: "B",
+      resource: "t/k",
+      reason: "released",
+      prevHolder: "B",
+    },
+    {
+      v: 1,
+      seq: i + 4,
+      ts: 1003 + i,
+      kind: "member",
+      id: `m-${i}`,
+      from: "C",
+      action: "join" as const,
+    },
+    {
+      v: 1,
+      seq: i + 5,
+      ts: 1004 + i,
+      kind: "gap",
+      id: `g-${i}`,
+      from: "system",
+      skipped: 3,
+      reason: "retention" as const,
+    },
+    {
+      v: 1,
+      seq: i + 6,
+      ts: 1005 + i,
+      kind: "contended",
+      id: `w-${i}`,
+      from: "D",
+      resource: "t/k",
+      holder: "B",
+    },
+    {
+      v: 1,
+      seq: i + 7,
+      ts: 1006 + i,
+      kind: "wait",
+      id: `x-${i}`,
+      from: "D",
+      waited: "claim",
+      target: "t/k",
+      outcome: "timeout" as const,
+      enqueuedAt: 1,
+    },
+    {
+      v: 1,
+      seq: i + 8,
+      ts: 1007 + i,
+      kind: "delivered",
+      id: `d-${i}`,
+      from: "B",
+      deliveredSeq: i + 1,
+      tier: "T1" as const,
+    },
+  ];
+}
+
 afterAll(() => {
   for (const dir of TMP) fs.rmSync(dir, { recursive: true, force: true });
 });
@@ -717,6 +805,35 @@ test("a compaction reply within the limit is stored on the first attempt (no ret
 
   replyFor = undefined;
   __compactTest.resetSpend();
+});
+
+test("the summarizer sees every record kind as kind-first text", async () => {
+  // compactor.ts recordLine 131-148: kind-first, so no arm reads a field
+  // its kind lacks. The summarizer's input must carry ALL nine
+  // tool-visible kinds — a kind rendered as nothing would vanish from
+  // every summary built over it.
+  const { treePath } = tmpRootTree();
+  const store = fakeStore(treePath, [msg(0), ...everyKind(1)]);
+  const { ctx } = fakeCtx("main");
+  llmCalls = 0;
+  replyFor = () => "a usable summary of the block";
+  const got = await summarizeBlock(ctx, store, 0, 9);
+  expect(got).toBe("a usable summary of the block");
+  expect(llmCalls).toBe(1);
+  for (const needle of [
+    "[1] msg",
+    "[2] note",
+    "[3] claim",
+    "[4] release",
+    "[5] C join",
+    "[6] gap 3 skipped",
+    "[7] contended",
+    "[8] wait",
+    "[9] delivered",
+  ]) {
+    expect(lastPrompt).toContain(needle);
+  }
+  replyFor = undefined;
 });
 
 test("the compaction task carries a TREE_REC-dash ruler and sends no custom system prompt", async () => {
