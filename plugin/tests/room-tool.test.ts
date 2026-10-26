@@ -952,6 +952,7 @@ test("topics lists a note-only topic with its unread count", async () => {
   const text = result.content.map((c) => c.text ?? "").join("\n");
   expect(text).toContain("room topics → 1 topic(s)");
   expect(text).toContain("topic margin · 1 unread · last seq 1");
+  expect(text).toContain("1 unread");
   expect(result.details?.topics).toMatchObject([{ topic: "margin", unread: 1, lastSeq: 1 }]);
 });
 
