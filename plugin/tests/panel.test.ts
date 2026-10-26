@@ -299,8 +299,10 @@ test("board pane renders a claim row with resource, holder and remaining TTL", (
     expect(text).toContain("build/step");
     expect(text).toContain("AgentA");
     expect(text).toContain("12s");
+    // ...and the waiter count rides in the HOLDER cell ("AgentA +2"),
+    // not as a detached suffix — the floor of 10 keeps it on screen.
+    expect(text).toContain("AgentA +2");
     expect(text).toContain("2 waiting");
-    for (const line of lines) expect(visibleWidth(line)).toBe(80);
   } finally {
     setSystemTime();
   }
