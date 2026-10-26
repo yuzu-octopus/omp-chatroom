@@ -1273,6 +1273,7 @@ test("read: every record kind renders its own model-facing line", async () => {
   store.append({ kind: "delivered", from: "AgentB", deliveredSeq: 1, tier: "T1" });
   const result = await invokeRoom(ctx, { op: "read", limit: 50 });
   const text = result.content.map((c) => c.text ?? "").join("\n");
+  expect(text).toContain("room read →");
   expect(text).toContain('note build · "margin-note"');
   expect(text).toContain('build · "hello"');
   expect(text).toContain("claim build/step");
