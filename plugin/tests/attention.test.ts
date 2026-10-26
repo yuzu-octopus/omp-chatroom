@@ -406,6 +406,12 @@ test("T2 coalescing: 20 pending T2 records produce exactly one digest line", () 
   expect(line!).toContain('room{op:"read"');
 });
 
+test("T2 coalescing: lag fires without the count", () => {
+  const records = Array.from({ length: 19 }, (_, i) => msg(i + 1, { topic: "chat", ts: 1_000 }));
+  const store = miniStore(records, { A: 0 });
+  expect(coalescePending(store, viewer(), 1_000 + 300_000)).not.toBeNull();
+});
+
 test("T2 coalescing: 19 records under both thresholds produce no digest", () => {
   const records = Array.from({ length: 19 }, (_, i) => msg(i + 1, { topic: "chat" }));
   const store = miniStore(records, { A: 0 });
