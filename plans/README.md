@@ -6,7 +6,7 @@ Baseline at plan time: `tsc` 0 errors, `biome check` clean, `bun test tests/`
 reproduced — see plan 014). Execute in the order below unless dependencies say
 otherwise. Each executor: read the plan fully before starting, honor its STOP
 conditions, and update your row when done.
-Round-8353180 (2026-10-26): tsc 0 errors, biome clean, 527 pass / 1 skip / 0 fail / 18 files; host pin 18.12.6. +2 renew-gen assertions on the renew test (lease + returned claim keep gen), suite still 529 total. Honest: the append-time mint is dead weight (projection recomputes) — flagged for its own cleanup round.
+Round-092ca03 (2026-10-26): tsc 0 errors, biome clean, 527 pass / 1 skip / 0 fail / 18 files; host pin 18.12.6. REAL CLEANUP: dead gen mint removed from records (schema field + nextGen + mint call); projection+replay are the single minters, first grant now 1, fence unchanged; suite still 529 total.
 
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
