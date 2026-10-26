@@ -1710,6 +1710,7 @@ test("the registered description is prompt.render(ROOM_DESCRIPTION)", () => {
   registerRoomTool(pi as unknown as Parameters<typeof registerRoomTool>[0]);
   if (!captured) throw new Error("registerRoomTool registered no tool");
   expect(captured.description).toBe(prompt.render(ROOM_DESCRIPTION));
+  expect(captured.loadMode).toBe("essential");
 });
 
 // --- plan 002 — heldTopics liveness ------------------------------------------
