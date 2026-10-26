@@ -1443,3 +1443,40 @@ test(
   },
   WAIT_TIMEOUT_MS,
 );
+test(
+  "wait_for_agent emits heartbeat updates while blocked",
+  async () => {
+    // Mirrors the message heartbeat: the U5 arm fires every 500 ms via
+    // onUpdate while the wait is outstanding on a peer that never changes.
+    const root = freshRoot();
+    const bus = new EventBus();
+    const registry = new AgentRegistry();
+    const a = await newSession(bus, registry, root, "AgentA");
+    try {
+      const updates: unknown[] = [];
+      const pending = toolOf(a, "wait_for_agent").execute(
+        "c-agent-heartbeat",
+        { agents: ["NobodyEver"], timeout: 1_200 },
+        undefined,
+        (u: unknown) => {
+          updates.push(u);
+        },
+      );
+      const res = await Promise.race([pending, Bun.sleep(3_000).then(() => null)]);
+      expect(res).not.toBeNull();
+      expect(res!.details).toMatchObject({ ok: true, outcome: "timeout" });
+      expect(updates.length).toBeGreaterThanOrEqual(1);
+      const texts = updates
+        .map((u) =>
+          ((u as { content?: Array<{ text?: string }> }).content ?? [])
+            .map((c) => c.text ?? "")
+            .join(" "),
+        )
+        .join("\n");
+      expect(texts).toContain("waiting");
+    } finally {
+      await a.dispose();
+    }
+  },
+  WAIT_TIMEOUT_MS,
+);
