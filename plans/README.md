@@ -6,7 +6,7 @@ Baseline at plan time: `tsc` 0 errors, `biome check` clean, `bun test tests/`
 reproduced — see plan 014). Execute in the order below unless dependencies say
 otherwise. Each executor: read the plan fully before starting, honor its STOP
 conditions, and update your row when done.
-Round-ef0e54e (2026-10-26): tsc 0 errors, biome clean, 459 pass / 1 skip / 0 fail / 18 files; host pin 18.12.6. +1 trigger-table row (contended to T2), mutation-checked.
+Round-51ce112 (2026-10-26): tsc 0 errors, biome clean, 460 pass / 1 skip / 0 fail / 18 files; host pin 18.12.6. +1 expiry-promotion test (oldest waiter inherits lease ttl), mutation-checked.
 
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
