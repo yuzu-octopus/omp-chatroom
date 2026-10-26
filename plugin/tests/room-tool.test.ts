@@ -774,11 +774,14 @@ test("claim: claiming a resource you already hold renews it, it does not deny yo
   const first = await invokeRoom(ctx, { op: "claim", topic: "build", key: "step", ttl: 60_000 });
   expect(first.details).toMatchObject({ ok: true, op: "claim", holder: "AgentA" });
   expect(first.details?.renewed).toBeUndefined();
+  expect("deliveryError" in (first.details ?? {})).toBe(false);
   const expiryBefore = first.details?.expiresAt as number;
 
   const second = await invokeRoom(ctx, { op: "claim", topic: "build", key: "step", ttl: 120_000 });
   expect(second.details).toMatchObject({ ok: true, op: "claim", holder: "AgentA", renewed: true });
   expect(second.details?.expiresAt as number).toBeGreaterThan(expiryBefore);
+  // A clean renewal also carries no deliveryError envelope.
+  expect("deliveryError" in (second.details ?? {})).toBe(false);
   // the model-facing line says what happened
   const text = JSON.stringify(second.content);
   expect(text).toContain("renewed");
