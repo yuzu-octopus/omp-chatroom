@@ -1,6 +1,3 @@
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
 import type { AgentRef, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent";
 import {
@@ -136,10 +133,6 @@ export class RoomPanel implements Component {
   #lastRender: readonly string[] = [];
 
   constructor(options: RoomPanelOptions) {
-    trace(
-      `RoomPanel ctor: theme=${options.theme === undefined ? "undefined" : typeof options.theme}` +
-        ` fg=${options.theme !== undefined && options.theme !== null ? typeof (options.theme as { fg?: unknown }).fg : "n/a"}`,
-    );
     this.#options = options;
     this.#registry = options.registry ?? AgentRegistry.global();
     const registry = this.#registry;
@@ -503,49 +496,24 @@ const ACTIVE_PANEL = new WeakMap<ExtensionAPI, () => void>();
  * by making the host's initialiser fail. Everything else on the path is the real one.
  */
 export function resolveTheme(injected: Theme | undefined, init?: HostThemeInit): Theme {
-  // The kind of `fg` the injected theme carries, read BEFORE the narrowing below: a half-built
-  // theme is the whole reason this ladder exists, and the breadcrumb has to say which half.
-  const injectedFg = injected === undefined ? "n/a" : typeof injected.fg;
   if (isUsableTheme(injected)) {
     adoptHostTheme(injected);
     return injected;
   }
-  trace(`resolveTheme: injected theme unusable (fg=${injectedFg})`);
   // The host's own theme, built with the user's own settings. The binding is live, so the re-read
   // inside `hostRealTheme` sees what it just published.
   const real = hostRealTheme(init);
   if (real !== undefined) {
-    trace("resolveTheme: using the host's own theme from the pi-tui singleton");
     // The singleton IS the host's theme, so there is nothing to publish: `adoptHostTheme` leaves a
     // healthy singleton alone.
     adoptHostTheme(real);
     return real;
   }
-  trace("resolveTheme: no usable host theme — falling back to the uncoloured shim");
   // The fallback's own path is exception-safe: a snapshot that cannot be read degrades the
   // GLYPHS, never the members, and the publish swallows a listener that throws.
   const shim = uncolouredTheme();
   adoptHostTheme(shim);
   return shim as unknown as Theme;
-}
-
-/**
- * Debug breadcrumbs, written to a file so a failure inside `ctx.ui.custom` — where the host swallows
- * everything into a one-line notify — is diagnosable from outside the TUI. Never throws; a logger
- * that can break the feature it is logging is worse than no logger.
- */
-function trace(label: string, extra?: unknown): void {
-  try {
-    const file = path.join(os.tmpdir(), "omp-room-panel-debug.log");
-    const stamp = new Date().toISOString();
-    let body = `${stamp} ${label}`;
-    if (extra !== undefined) body += ` ${String(extra)}`;
-    const err = extra instanceof Error ? extra : undefined;
-    if (err !== undefined) body += `\n  stack: ${err.stack ?? "none"}`;
-    fs.appendFileSync(file, `${body}\n`);
-  } catch {
-    // A logger must never break the feature.
-  }
 }
 
 /**
@@ -570,17 +538,8 @@ export async function openRoomPanel(pi: ExtensionAPI, ctx: ExtensionContext): Pr
   }
 
   try {
-    trace("openRoomPanel: calling ctx.ui.custom");
     await ctx.ui.custom<void>(
       (tui, theme, _keybindings, done) => {
-        const t = theme as unknown as Record<string, unknown> | undefined;
-        trace(
-          `factory: tui=${tui === undefined ? "undefined" : typeof tui}` +
-            ` theme=${theme === undefined ? "undefined" : typeof theme}` +
-            ` fg=${typeof t?.fg} bold=${typeof t?.bold} sep=${typeof t?.sep}` +
-            ` status=${typeof t?.status} nav=${typeof t?.nav} tree=${typeof t?.tree}` +
-            ` boxRound=${typeof t?.boxRound} boxRoundTopLeft=${JSON.stringify(t?.boxRoundTopLeft)}`,
-        );
         let unsubscribe: () => void = () => {};
         let closed = false;
         // Idempotent: `handleInput` may fire `done` more than once (a second `esc`, a key arriving
@@ -592,7 +551,6 @@ export async function openRoomPanel(pi: ExtensionAPI, ctx: ExtensionContext): Pr
           unsubscribe();
           done();
         };
-        trace("factory: constructing RoomPanel");
         const panel = new RoomPanel({
           roomId: store.roomId,
           store,
@@ -659,7 +617,6 @@ export async function openRoomPanel(pi: ExtensionAPI, ctx: ExtensionContext): Pr
       },
     );
   } catch (error) {
-    trace("openRoomPanel FAILED", error);
     ctx.ui.notify(
       `Room panel unavailable: ${error instanceof Error ? error.message : "unknown"}`,
       "warning",
