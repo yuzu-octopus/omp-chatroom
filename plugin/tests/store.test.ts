@@ -707,6 +707,34 @@ test("roomTimers.start with no timer API schedules nothing and never throws", ()
   store.dispose();
 });
 
+test("roomTimers prune tick runs enforceRetention on the store", () => {
+  // Line 434: the prune handle calls enforceRetention with the live store.
+  // Captured (not fired by a real clock): invoking the handle prunes past
+  // the cap and appends the retention gap record.
+  const root = tempRoot();
+  const store = storeFor(root, roomIdFor(root));
+  store.config.logMaxRecords = 3;
+  const callbacks: Array<() => void> = [];
+  const ctx = {
+    setInterval: (fn: () => void) => {
+      callbacks.push(fn);
+      return callbacks.length as unknown as Timer;
+    },
+    clearTimer: () => {},
+  } as unknown as ExtensionContext;
+  for (let i = 0; i < 5; i++) store.append({ kind: "msg", from: "A", topic: "t", body: `m${i}` });
+  roomTimers.start(root, ctx);
+  try {
+    expect(callbacks.length).toBe(2);
+    callbacks[0]();
+    expect(store.records.filter((r) => r.kind !== "gap").length).toBe(3);
+    expect(store.records.some((r) => r.kind === "gap")).toBe(true);
+  } finally {
+    roomTimers.stop(root);
+    store.dispose();
+  }
+});
+
 // --- cross-process single-writer lock (plan 017 followup) --------------------
 
 test("acquire/release round-trips: the lock file appears and disappears", () => {
