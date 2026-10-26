@@ -174,6 +174,7 @@ test(
       const cycle = (refused!.details as { cycle?: string[] }).cycle ?? [];
       expect(cycle.length).toBeGreaterThan(1);
       expect(cycle[0]).toBe("AgentB");
+      expect(cycle).toContain("AgentA");
 
       // A's wait is still waiting (it was not the one that closed the cycle).
       const stillWaiting = await Promise.race([
