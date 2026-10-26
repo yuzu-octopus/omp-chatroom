@@ -1712,6 +1712,7 @@ test("the registered description is prompt.render(ROOM_DESCRIPTION)", () => {
   expect(captured.description).toBe(prompt.render(ROOM_DESCRIPTION));
   expect(captured.loadMode).toBe("essential");
   expect(captured.approval).toBe("read");
+  expect(captured.strict).toBe(true);
 });
 
 // --- plan 002 — heldTopics liveness ------------------------------------------
