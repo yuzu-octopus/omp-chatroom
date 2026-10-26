@@ -1165,6 +1165,19 @@ test("room on a corrupt root returns ok:false + error, never throws", async () =
   expect(typeof res.details?.error).toBe("string");
   expect(Array.isArray(res.content)).toBe(true);
 });
+test("post with a body over maxBodyBytes is refused and appends nothing", async () => {
+  // K19 arm (room.ts:860-862): the cap is enforced before the record is
+  // drafted — an oversized body never lands in the log, even truncated.
+  const { store, ctx } = newTestStore();
+  const before = store.records.length;
+  const res = await invokeRoom(ctx, { op: "post", topic: "build", body: "x".repeat(8193) });
+  expect(res.details).toMatchObject({ ok: false });
+  expect(JSON.stringify(res.content)).toContain("maxBodyBytes");
+  expect(store.records.length).toBe(before);
+  // A body exactly at the cap is admitted.
+  const ok = await invokeRoom(ctx, { op: "post", topic: "build", body: "y".repeat(8192) });
+  expect(ok.details).toMatchObject({ ok: true });
+});
 
 test("topics/recall content carries the rows, not a count", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "room-tool-"));
