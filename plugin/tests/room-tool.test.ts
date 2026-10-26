@@ -1517,6 +1517,12 @@ test("topics/recall content carries the rows, not a count", async () => {
   expect(recall).toContain("1 match(es)");
 });
 
+test("post without a topic is refused", async () => {
+  const { ctx } = newTestStore();
+  const res = await invokeRoom(ctx, { op: "post", body: "hello" });
+  expect(res.details).toMatchObject({ ok: false, error: "post requires a topic" });
+});
+
 // --- F1 security: recall pattern length limit ---
 
 test("recall: pattern over 200 chars is rejected", async () => {
