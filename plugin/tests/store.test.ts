@@ -19,9 +19,11 @@ import {
 import {
   bumpCursor,
   cursorFor,
+  deliveredT0s,
   initCursor,
   JOIN_BACKLOG,
   lagFor,
+  markDeliveredT0,
   persistOwnCursor,
   restoreOwnCursor,
 } from "../src/store/cursors";
@@ -941,6 +943,24 @@ test("disposeRoomSession evicts the room's wait edges with its other per-root st
   expect(
     findWaitCycle(store.root, "A", [{ kind: "agent", agentId: "B" }], () => undefined),
   ).toBeNull();
+});
+
+test("disposeRoomSession forgets delivered-T0 marks, so a later room re-sends owed steers", () => {
+  const root = tempRoot();
+  const ctx = {
+    cwd: root,
+    agent: { id: "A", kind: "main" },
+    localProtocolOptions: { root },
+    setInterval: () => 0,
+    clearInterval: () => {},
+  } as unknown as ExtensionContext;
+  const store = roomStoreFor(ctx);
+  markDeliveredT0(store.root, "B", 7);
+  expect(deliveredT0s(store.root, "B").has(7)).toBe(true);
+  disposeRoomSession(ctx);
+  // Forgotten with the rest of the per-root state: a later room on the
+  // same root must not inherit already-told steers.
+  expect(deliveredT0s(store.root, "B").size).toBe(0);
 });
 
 test("records with non-string array fields are quarantined as invalid", () => {
