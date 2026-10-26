@@ -33,7 +33,7 @@ import {
 } from "../src/attention/governor";
 import { classify, type Tier } from "../src/attention/tiers";
 import { enqueueWaiter } from "../src/store/claims";
-import { deliveredT0s } from "../src/store/cursors";
+import { deliveredT0s, forgetDeliveredT0, markDeliveredT0 } from "../src/store/cursors";
 import {
   type MemberState,
   type RoomStore,
@@ -1573,4 +1573,20 @@ test("a ctx without the timer API still does not wait for the target's turn (F8)
   await deliver(pi, ctx, b, record, "T0");
   expect(Date.now() - started).toBeLessThan(2_000);
   settle?.();
+});
+
+test("delivered-T0 registry evicts oldest entries past the cap instead of growing", () => {
+  // Lines 60-61: the registry is bounded at 256 — the oldest seqs drop so a
+  // long-lived room cannot accumulate an entry per delivered steer.
+  const root = `evict-${Date.now()}-${Math.random()}`;
+  try {
+    for (let seq = 1; seq <= 260; seq++) markDeliveredT0(root, "A", seq);
+    const kept = deliveredT0s(root, "A");
+    expect(kept.size).toBe(256);
+    expect(kept.has(1)).toBe(false);
+    expect(kept.has(5)).toBe(true);
+    expect(kept.has(260)).toBe(true);
+  } finally {
+    forgetDeliveredT0(root);
+  }
 });
