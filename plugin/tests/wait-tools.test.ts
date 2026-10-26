@@ -1528,6 +1528,9 @@ test(
       // ...and the text pins the per-second cadence `waiting Ns`, not a bare spinner —
       // matches wait_for_message's exact `waiting 1s` shape.
       expect(texts).toMatch(/waiting \d+s/);
+      // ...and the scope pins the count: a 1200 ms wait at a 500 ms cadence
+      // fires two heartbeats before the timeout settles it.
+      expect(updates.length).toBe(2);
     } finally {
       await a.dispose();
     }
