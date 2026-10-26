@@ -1081,6 +1081,12 @@ test("zoom: missing lo/hi returns error", async () => {
   expect(result.details).toMatchObject({ ok: false });
 });
 
+test("zoom: non-integer lo/hi is rejected before the bounds check", async () => {
+  const { ctx } = newTestStore();
+  const result = await invokeRoom(ctx, { op: "zoom", lo: 0.5, hi: 2 });
+  expect(result.details).toMatchObject({ ok: false, error: expect.stringContaining("integers") });
+});
+
 // --- recall ---
 
 test("recall: regex search returns matches newest first", async () => {
