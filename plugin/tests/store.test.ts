@@ -397,6 +397,16 @@ test("cursors are per-agent, start at logEnd - JOIN_BACKLOG, advance monotonical
   expect(initCursor(store, "A")).toBe(175); // a rejoin resumes the stored cursor
 });
 
+test("lagFor clamps a cursor past logEnd to zero — lag is never negative", () => {
+  // cursors.ts lagFor 28-31: cursor ahead of seq (a prune raced a read)
+  // reports 0, not a negative lag that would confuse the board math.
+  const store = cursorStore(100);
+  initCursor(store, "A");
+  bumpCursor(store, "A", 150);
+  store.seq = 120; // prune moved logEnd below the cursor
+  expect(lagFor(store, "A")).toBe(0);
+});
+
 test("initCursor clamps to 0 on a short log and cursorFor never mutates (read ≠ advance)", () => {
   const store = cursorStore(10);
   expect(initCursor(store, "A")).toBe(0);
