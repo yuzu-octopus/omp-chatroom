@@ -872,6 +872,19 @@ test("F5: the view never contains a block covering exactly one message", () => {
   }
 });
 
+test("viewTiling caps at the splittable floor instead of overshooting the budget", () => {
+  // T=64 with budget 50 cannot split past 32 size-2 blocks (MIN_LEVEL), so
+  // the tiling stops there: fewer lines than asked, every line whole and
+  // aligned, full coverage of the log.
+  const tiling = viewTiling(64, 50);
+  expect(tiling.length).toBe(32);
+  for (const [lo, hi] of tiling) {
+    expect(hi - lo).toBe(2);
+    expect(lo % 2).toBe(0);
+  }
+  expect(tiling[0][0]).toBe(0);
+  expect(tiling[tiling.length - 1][1]).toBe(64);
+});
 // --- retention invalidates the tree (plan 008 fix) ---------------------------
 
 test("retention prunes the head AND invalidates the tree built over it", () => {
