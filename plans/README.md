@@ -6,7 +6,7 @@ Baseline at plan time: `tsc` 0 errors, `biome check` clean, `bun test tests/`
 reproduced — see plan 014). Execute in the order below unless dependencies say
 otherwise. Each executor: read the plan fully before starting, honor its STOP
 conditions, and update your row when done.
-Round-fe09037 (2026-10-26): tsc 0 errors, biome clean, 510 pass / 1 skip / 0 fail / 18 files; host pin 18.12.6. +1 rooted-reset test (per-room spend isolation), mutation-checked.
+Round-23f7eaa (2026-10-26): tsc 0 errors, biome clean, 511 pass / 1 skip / 0 fail / 18 files; host pin 18.12.6. +1 mention-precedence test (T0 beats held-claim T1), mutation-checked.
 
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
