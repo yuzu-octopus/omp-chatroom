@@ -849,6 +849,17 @@ test("F3: the view is written on first use, then loaded instead of recomputed", 
   expect(readView(treePath, T)).toBeNull();
 });
 
+test("saveView on an unwritable path never throws — the view is recomputed", () => {
+  // Line 293: the write is a cache — a failure degrades to recompute.
+  // The view lives at dirname(treePath)/view.json, so a file at the
+  // parent makes mkdirSync throw (ENOTDIR).
+  const dir = tmpTreePath();
+  fs.mkdirSync(path.dirname(path.dirname(dir)), { recursive: true });
+  fs.writeFileSync(path.dirname(dir), "not a dir");
+  expect(() => saveView(dir, 64, [[0, 64]])).not.toThrow();
+  expect(readView(dir, 64)).toBeNull();
+});
+
 // --- 13. F5 — the view holds no whole message ------------------------------
 
 test("F5: the view never contains a block covering exactly one message", () => {
