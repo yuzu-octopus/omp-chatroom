@@ -1221,6 +1221,37 @@ test(
 );
 
 test(
+  "wait_for_agent with a pre-aborted signal records the aborted wait",
+  async () => {
+    AgentRegistry.resetGlobalForTests();
+    const root = freshRoot();
+    const bus = new EventBus();
+    const a = await newSession(bus, undefined, root, "AgentA");
+    try {
+      const ac = new AbortController();
+      ac.abort();
+      const res = await toolOf(a, "wait_for_agent").execute(
+        "c-agent-pre-abort",
+        { agents: ["AgentB"], timeout: 5_000 },
+        ac.signal,
+      );
+      expect(res.details).toMatchObject({ ok: true, outcome: "aborted" });
+      expect(res.details?.agents).toMatchObject([{ id: "AgentB", status: "parked" }]);
+      const read = await toolOf(a, "room").execute("c-read-agent-abort", {
+        op: "read",
+        since: 0,
+        limit: 50,
+      });
+      expect(textOf(read)).toContain("wait AgentB — aborted");
+    } finally {
+      await a.dispose();
+      AgentRegistry.resetGlobalForTests();
+    }
+  },
+  WAIT_TIMEOUT_MS,
+);
+
+test(
   "wait_for_message on a corrupt room root returns aborted + error, never throws",
   async () => {
     const root = freshRoot();
