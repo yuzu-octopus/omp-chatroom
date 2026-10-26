@@ -104,6 +104,19 @@ test("renew: the holder extends its own lease instead of being denied", () => {
   if (renewed.ok) expect(renewed.claim.gen).toBe(first.ok ? first.claim.gen : -1);
 });
 
+test("claim: the TTL is clamped to the mandatory [1s, 1d] window", async () => {
+  // room.ts claim 979: CLAIM_TTL_MIN/MAX_MS — a zero lease is not a lease
+  // (§3.4 TTL mandatory), and a century lease never expires. Both ends
+  // clamp instead of refusing.
+  const { store, ctx } = newTestStore();
+  const tiny = await invokeRoom(ctx, { op: "claim", topic: "build", key: "a", ttl: 0 });
+  expect(tiny.details).toMatchObject({ ok: true });
+  expect(store.claims.get("build/a")?.ttlMs).toBe(1_000);
+  const huge = await invokeRoom(ctx, { op: "claim", topic: "build", key: "b", ttl: 9_999_999_999 });
+  expect(huge.details).toMatchObject({ ok: true });
+  expect(store.claims.get("build/b")?.ttlMs).toBe(86_400_000);
+});
+
 test("renew: a non-holder cannot renew somebody else's lease", () => {
   const s = newStore();
   expect(grant(s, "build/step", "A", 60_000).ok).toBe(true);
