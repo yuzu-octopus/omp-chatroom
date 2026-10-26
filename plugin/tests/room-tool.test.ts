@@ -461,6 +461,9 @@ test("expireStale promotes the oldest waiter with the expired lease's ttl", () =
   expect(dropped[0].next).toBe("B");
   expect(s.claims.get("build/step")?.holder).toBe("B");
   expect(s.waiters.get("build/step")).toEqual(["C"]);
+  // ...and the promoted lease carries the EXPIRED lease's ttl (1000),
+  // not a fresh default — the waiter's window matches what expired.
+  expect(s.claims.get("build/step")?.ttlMs).toBe(1_000);
 });
 
 // --- test 5 — parked/aborted holder is reclaimable ------------------------------
