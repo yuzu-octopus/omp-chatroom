@@ -1598,7 +1598,7 @@ test("tree: the view is persisted beside the tree and carries no whole-message b
   const result = await invokeRoom(ctx, { op: "tree" });
   const blocks = result.details?.blocks as Array<{ lo: number; hi: number; size: number }>;
   expect(blocks.length).toBeGreaterThan(0);
-  expect(result.content.map((c) => c.text ?? "").join("\n")).toContain("room tree →");
+  expect(result.content.map((c) => c.text ?? "").join("\n")).toContain("room tree → 5 block(s)");
   expect(result.content.map((c) => c.text ?? "").join("\n")).toContain("[0,2)");
   // F5 — no block covers exactly one message (not even the newest).
   for (const b of blocks) expect(b.size).toBeGreaterThanOrEqual(2);
