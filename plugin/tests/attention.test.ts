@@ -80,6 +80,15 @@ function viewer(over: Partial<MemberState> = {}): MemberState {
   };
 }
 
+test("T0: an @mention beats a held claim — mention is checked first", () => {
+  // tiers.ts 17: the mention arm runs BEFORE the held-topic arm (29). A
+  // mentioned agent on a topic it also holds a claim on still gets T0
+  // (a steer), not T1 (an aside the turn boundary may delay).
+  const rec = msg(1, { topic: "build", mention: ["A"] });
+  const v = viewer({ heldTopics: new Set(["build"]) });
+  expect(classify(rec, v)).toBe("T0");
+});
+
 const base = { v: 1 as const, ts: 1_000 };
 function msg(seq: number, over: Partial<Extract<RoomRecord, { kind: "msg" }>> = {}): RoomRecord {
   return { ...base, seq, id: `m${seq}`, kind: "msg", from: "B", topic: "t", body: "hi", ...over };
