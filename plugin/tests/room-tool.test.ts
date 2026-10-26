@@ -1178,6 +1178,39 @@ test("post with a body over maxBodyBytes is refused and appends nothing", async 
   const ok = await invokeRoom(ctx, { op: "post", topic: "build", body: "y".repeat(8192) });
   expect(ok.details).toMatchObject({ ok: true });
 });
+test("post with a malformed status ledger is refused naming the missing keys", async () => {
+  // R6 validation arm 1 (room.ts:881-886): each of the five keys needs
+  // {reason, answer}; a partial ledger names what is missing.
+  const { store, ctx } = newTestStore();
+  const before = store.records.length;
+  const res = await invokeRoom(ctx, {
+    op: "post",
+    topic: "build",
+    body: "status update",
+    status: { is_request_satisfied: { reason: "done", answer: "yes" } },
+  });
+  expect(res.details).toMatchObject({ ok: false });
+  expect(JSON.stringify(res.content)).toContain("is_in_loop");
+  expect(store.records.length).toBe(before);
+});
+
+test("post with a full status ledger but no topic claim is refused", async () => {
+  // R6 validation arm 2 (room.ts:890-894): the ledger is written by the
+  // agent holding the topic's claim — no claim, no ledger write.
+  const { store, ctx } = newTestStore();
+  const full = {
+    is_request_satisfied: { reason: "r", answer: "a" },
+    is_in_loop: { reason: "r", answer: "a" },
+    is_progress_being_made: { reason: "r", answer: "a" },
+    next_speaker: { reason: "r", answer: "a" },
+    instruction_or_question: { reason: "r", answer: "a" },
+  };
+  const before = store.records.length;
+  const res = await invokeRoom(ctx, { op: "post", topic: "build", body: "x", status: full });
+  expect(res.details).toMatchObject({ ok: false });
+  expect(JSON.stringify(res.content)).toContain("claim build/");
+  expect(store.records.length).toBe(before);
+});
 
 test("topics/recall content carries the rows, not a count", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "room-tool-"));
