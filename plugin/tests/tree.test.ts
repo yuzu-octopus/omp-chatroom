@@ -897,6 +897,22 @@ test("viewTiling caps at the splittable floor instead of overshooting the budget
   expect(tiling[0][0]).toBe(0);
   expect(tiling[tiling.length - 1][1]).toBe(64);
 });
+
+test("viewTiling splits the LAST splittable block first", () => {
+  // Lines 261-264: the scan keeps the LAST block wider than MIN_LEVEL
+  // (pick is overwritten, never broken out of), so successive splits
+  // refine the tail, not the head. T=24/budget=6: the cover is
+  // [[0,8],[8,16],[16,24]] and BOTH refills split the tail block's
+  // descendants — a first-match scan would split [0,8] first.
+  expect(viewTiling(24, 6)).toEqual([
+    [0, 8],
+    [8, 16],
+    [16, 18],
+    [18, 20],
+    [20, 22],
+    [22, 24],
+  ]);
+});
 // --- retention invalidates the tree (plan 008 fix) ---------------------------
 
 test("retention prunes the head AND invalidates the tree built over it", () => {
