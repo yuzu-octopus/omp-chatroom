@@ -1586,6 +1586,23 @@ test("a T1 the K/B cap refused still stays above the cursor — the floor holds 
   expect(gap.seq).toBeGreaterThan(cursor);
 });
 
+test("a carried gap never counts as owed — the floor passes under it", async () => {
+  // delivery.ts owed-floor: a CARRIED gap (told) is filtered out of the
+  // owed set, so it never pins the floor; an UNCARRIED one stays owed
+  // but never lowers a refusal floor below it. A carried gap that still
+  // pinned would freeze the cursor behind an already-told record.
+  const root = tempRoot();
+  const b = `attn-carried-${Date.now()}`;
+  registerSession(b, []);
+  const h = roomHarness(root, "A");
+  memberFollowing(h, b);
+  const gap = noteGap(h.store, 5, "retention");
+  await h.execute({ op: "post", topic: "build", body: "after the gap" });
+  // The cursor moved past the gap: the gap was carried, told, and never
+  // pinned the floor.
+  expect(h.store.cursors.get(b) ?? 0).toBeGreaterThanOrEqual(gap.seq);
+});
+
 test("a T0 is not re-delivered while an older refused record pins the cursor", async () => {
   const root = tempRoot();
   const bCalls: Send[] = [];
