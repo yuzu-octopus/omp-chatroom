@@ -293,6 +293,8 @@ test("R7: a retried post with the same key returns the first one instead of post
   });
   expect(retry.details).toMatchObject({ ok: true, op: "post", idempotent: true });
   expect(retry.details?.seq).toBe(first.details?.seq);
+  // A retried post is still a clean post: no deliveryError envelope.
+  expect("deliveryError" in (retry.details ?? {})).toBe(false);
   // nothing was appended: a double post double-wakes every mentioned peer
   expect(store.seq).toBe(seqAfterFirst);
   expect(store.records.filter((r) => r.kind === "msg")).toHaveLength(1);
