@@ -1888,3 +1888,9 @@ test("release of a missing key is refused as unknown and appends nothing", async
   expect(res.details).toMatchObject({ ok: false, error: "unknown resource" });
   expect(store.records.length).toBe(before);
 });
+
+test("release without topic and key is refused", async () => {
+  const { ctx } = newTestStore();
+  const res = await invokeRoom(ctx, { op: "release" });
+  expect(res.details).toMatchObject({ ok: false, error: "release requires topic and key" });
+});
