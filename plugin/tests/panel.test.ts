@@ -374,6 +374,27 @@ test("a throw in the first refresh releases the age timer and both listeners", (
   expect(cleared).toBe(1);
 });
 
+test("the age timer fires a refresh across a listener unmount", () => {
+  // Lines 185-186: the timer callback refreshes the panel even when the
+  // store listener was dropped underneath it (a dispose that cleared the
+  // timer entry but left the orphan ticking). Drive it headlessly: drop
+  // the listener, append, fire — the row still projects.
+  const store = fixtureStore();
+  let tick: (() => void) | undefined;
+  const panel = makePanel(store, 30, {
+    setInterval: ((cb: () => void) => {
+      tick = cb;
+      return "timer-1";
+    }) as never,
+    clearTimer: (() => {}) as never,
+  });
+  expect(tick).toBeDefined();
+  store.listeners.clear();
+  store.append({ kind: "msg", from: "AgentA", topic: "build", body: "orphan-tick" });
+  tick!();
+  expect(panel.render(120).join("\n")).toContain("orphan-tick");
+  panel.dispose();
+});
 // --- 6. key map -----------------------------------------------------------
 
 test("key map resolves every documented key and an unknown key is a no-op", () => {
