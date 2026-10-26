@@ -6,7 +6,7 @@ Baseline at plan time: `tsc` 0 errors, `biome check` clean, `bun test tests/`
 reproduced — see plan 014). Execute in the order below unless dependencies say
 otherwise. Each executor: read the plan fully before starting, honor its STOP
 conditions, and update your row when done.
-Round-309f2ec (2026-10-26): tsc 0 errors, biome clean, 506 pass / 1 skip / 0 fail / 18 files; host pin 18.12.6. +1 note-topic board test (msg+note topic scan), mutation-checked.
+Round-bbeae96 (2026-10-26): tsc 0 errors, biome clean, 507 pass / 1 skip / 0 fail / 18 files; host pin 18.12.6. +1 digest-truncation test (3-topic slice), mutation-checked.
 
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
