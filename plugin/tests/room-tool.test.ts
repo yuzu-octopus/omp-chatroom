@@ -639,6 +639,32 @@ test("hydrateClaims rebuilds claim state by replaying the log", () => {
   expect(s.claims.get("build/step")?.ttlMs).toBe(60_000);
 });
 
+test("hydrateClaims restores the holder's heldTopics so the board stays correct", () => {
+  // room-store.ts projection 150: every grant funnels the holder's
+  // heldTopics through the projection — hydrateClaims must do the same,
+  // or a replayed lease is invisible to the board's topic filter.
+  const s = newStore();
+  s.members.set("A", {
+    agentId: "A",
+    joinedAtSeq: 0,
+    topics: new Set(),
+    muted: new Set(),
+    threadRoots: new Set(),
+    heldTopics: new Set(),
+  });
+  grant(s, "build/step", "A", 60_000);
+  const snapshot = s.records.slice();
+
+  s.claims.clear();
+  s.members.get("A")!.heldTopics.clear();
+  hydrateClaims(s, snapshot);
+
+  expect(s.claims.get("build/step")?.holder).toBe("A");
+  expect(s.members.get("A")?.heldTopics.has("build")).toBe(true);
+  // ...and the TTL travels too: the replayed lease carries the same window.
+  expect(s.claims.get("build/step")?.ttlMs).toBe(60_000);
+});
+
 test("hydrateClaims applies a later release over an earlier claim", () => {
   const s = newStore();
   grant(s, "build/step", "A", 60_000);

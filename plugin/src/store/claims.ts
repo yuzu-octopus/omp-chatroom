@@ -1,4 +1,5 @@
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent";
+import { topicOf } from "../ids";
 import type { RoomStore } from "./room-store"; // type-only — breaks the runtime cycle
 import type { RoomRecord } from "./schema";
 // §3.4 — verbatim
@@ -250,6 +251,7 @@ export function hydrateClaims(store: RoomStore, records: readonly RoomRecord[]):
         gen,
         dependsOn: record.dependsOn ?? [],
       });
+      store.members.get(record.from)?.heldTopics.add(topicOf(record.resource));
     } else if (record.kind === "release") {
       store.claims.delete(record.resource);
     }
