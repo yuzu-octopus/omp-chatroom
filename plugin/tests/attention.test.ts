@@ -1745,6 +1745,7 @@ test("delivered-T0 registry evicts oldest entries past the cap instead of growin
     const kept = deliveredT0s(root, "A");
     expect(kept.size).toBe(256);
     expect(kept.has(1)).toBe(false);
+    expect(kept.has(4)).toBe(false);
     expect(kept.has(5)).toBe(true);
     expect(kept.has(260)).toBe(true);
   } finally {
