@@ -1404,7 +1404,7 @@ test("post with a body over maxBodyBytes is refused and appends nothing", async 
   const before = store.records.length;
   const res = await invokeRoom(ctx, { op: "post", topic: "build", body: "x".repeat(8193) });
   expect(res.details).toMatchObject({ ok: false });
-  expect(JSON.stringify(res.content)).toContain("maxBodyBytes");
+  expect(JSON.stringify(res.content)).toContain("body exceeds maxBodyBytes");
   expect(store.records.length).toBe(before);
   // A body exactly at the cap is admitted.
   const ok = await invokeRoom(ctx, { op: "post", topic: "build", body: "y".repeat(8192) });
