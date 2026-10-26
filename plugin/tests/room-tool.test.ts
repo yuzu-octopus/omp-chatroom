@@ -374,6 +374,7 @@ test("R5: a lost claim is recorded, so contention is measurable", async () => {
 
   const denied = await invokeRoom(ctx, { op: "claim", topic: "build", key: "step" });
   expect(denied.details).toMatchObject({ ok: false });
+  expect(denied.details).toMatchObject({ holder: "AgentB" });
 
   const contended = store.records.filter((r) => r.kind === "contended");
   expect(contended).toHaveLength(1);
