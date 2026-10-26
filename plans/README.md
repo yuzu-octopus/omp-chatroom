@@ -6,7 +6,7 @@ Baseline at plan time: `tsc` 0 errors, `biome check` clean, `bun test tests/`
 reproduced — see plan 014). Execute in the order below unless dependencies say
 otherwise. Each executor: read the plan fully before starting, honor its STOP
 conditions, and update your row when done.
-Round-1736928 (2026-10-26): tsc 0 errors, biome clean, 529 pass / 1 skip / 0 fail / 18 files; host pin 18.12.6. REAL FIX: hydrateClaims restores heldTopics (restart left board topic filter blind); +1 replay test (holder+topics+TTL), mutation-checked.
+Round-b539f9d (2026-10-26): tsc 0 errors, biome clean, 530 pass / 1 skip / 0 fail / 18 files; host pin 18.12.6. +4 replay-dependsOn assertions (widened heldTopics test, empty-list mutation fails), mutation-checked.
 
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
