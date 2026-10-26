@@ -656,6 +656,19 @@ test("wait result card: undefined details renders the head with no meta body", (
   expect(out).not.toContain("acquired");
 });
 
+test("wait result card: a future outcome degrades to no meta, not a crash", () => {
+  // Lines 131-132: `outcome` is exhaustive today, so the default arm fires
+  // only when a future variant widens the union. A degraded card beats a
+  // thrown one. An empty wait card renders ONLY the head: the head says
+  // "Wait" and no meta row follows it.
+  const out = waitResultText({
+    ok: true,
+    outcome: "whatever-comes-next",
+  } as unknown as WaitDetails);
+  expect(out.trim().split("\n")).toHaveLength(1);
+  expect(out).toContain("Wait");
+});
+
 // --- the room RESULT card per op -------------------------------------------
 //
 // `roomResultSummary` maps each room op's result `details` to card meta lines (joined/cursor,
