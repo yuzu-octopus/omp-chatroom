@@ -1186,6 +1186,29 @@ test("a throwing listener does not break the append path", () => {
   expect(seen).toEqual([record.seq]);
 });
 
+test("removeListener drops exactly that listener — others keep firing", () => {
+  // room-store.ts removeListener 221-223: delete-one semantics. A removed
+  // listener never fires again, and its siblings are untouched.
+  const { store } = newTestStore();
+  const seenA: number[] = [];
+  const seenB: number[] = [];
+  const fnA = (r: RoomRecord): void => {
+    seenA.push(r.seq);
+  };
+  const fnB = (r: RoomRecord): void => {
+    seenB.push(r.seq);
+  };
+  store.addListener(fnA);
+  store.addListener(fnB);
+  store.append({ kind: "msg", from: "AgentA", topic: "build", body: "one" });
+  store.removeListener(fnA);
+  store.append({ kind: "msg", from: "AgentA", topic: "build", body: "two" });
+  expect(seenA).toEqual([1]);
+  expect(seenB).toEqual([1, 2]);
+  // Removing what was never added is a silent no-op.
+  expect(() => store.removeListener(fnA)).not.toThrow();
+});
+
 // --- K1 content contract: what the MODEL sees ---
 // `details` never reaches the model — pi-agent-core's `coerceToolResult` (agent-loop.ts:540) keeps
 // only `content` on the wire. So an op whose content is a bare count is unanswerable to a model.
