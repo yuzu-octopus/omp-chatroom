@@ -1093,7 +1093,7 @@ test(
         since: 0,
         limit: 50,
       });
-      expect(textOf(read)).toContain("wait");
+      expect(textOf(read)).toContain("wait * — aborted");
     } finally {
       await a.dispose();
     }
