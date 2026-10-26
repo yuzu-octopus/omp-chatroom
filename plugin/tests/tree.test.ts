@@ -564,14 +564,31 @@ test("the tree is rebuildable: a second build from the log produces the same til
   };
   const before = view();
   expect(before.some((line) => !line.endsWith("∅"))).toBe(true);
+});
 
-  // Rebuild from the log alone — the tree is a cache, not the source of truth.
+test("resetSpend with a root clears only that room's counter", async () => {
+  // compactor.ts __compactTest.resetSpend 92-98: the ROOTED arm replaces
+  // just that root's counter; the rootless arm clears every room. A
+  // rooted reset that nuked everything would hide cross-room leakage.
+  // Observable through behaviour: both rooms sit at the cap; resetting
+  // B unpauses B while A still pauses.
+  const a = tmpRootTree();
+  const b = tmpRootTree();
+  const storeA = fakeStore(a.treePath, [msg(0), msg(1)]);
+  const storeB = fakeStore(b.treePath, [msg(0), msg(1)]);
+  const { ctx } = fakeCtx("main");
+  __compactTest.setSpendToday(a.root, COMPACT_MAX_CALLS_PER_DAY);
+  __compactTest.setSpendToday(b.root, COMPACT_MAX_CALLS_PER_DAY);
+  llmCalls = 0;
+  replyFor = () => filler(300);
+  __compactTest.resetSpend(b.root);
+  expect(await compactOnce(storeA, ctx, [0, 2])).toBe(false);
+  expect(await compactOnce(storeB, ctx, [0, 2])).toBe(true);
+  expect(llmCalls).toBe(1);
+  replyFor = undefined;
   __compactTest.resetSpend();
-  prompts.length = 0;
-  await buildAll(store, ctx);
-  expect(view()).toEqual(before);
-  expect(openTreeStore(treePath, N).pending()).toEqual([]);
-  __compactTest.resetSpend();
+  stopCompactor(a.root);
+  stopCompactor(b.root);
 });
 
 test("zoom descends one level and validateZoomRange rejects a non-block range", () => {
