@@ -713,6 +713,55 @@ test("a send whose outcome is UNKNOWN does not advance the cursor either", async
   expect(deliveredT0s(store.root, "Slow").has(1)).toBe(true);
 });
 
+test("a T1 send the host DECLINED reports the failure AND leaves the record owed", async () => {
+  // The host resolves `false` when its preflight declines to start a
+  // turn — a resolution, not a rejection. The pass must REPORT it (the
+  // failure note names the decline) while the cursor stays put, so the
+  // record stays owed via `room{op:"read"}`.
+  const root = tempRoot();
+  const ctx = fakeCtx(root, "Sender");
+  const store = roomStoreFor(ctx);
+  const { pi } = fakePi();
+  store.members.set("Slow", {
+    agentId: "Slow",
+    joinedAtSeq: 0,
+    topics: new Set(["build"]),
+    muted: new Set(),
+    threadRoots: new Set(),
+    heldTopics: new Set(),
+  });
+  registerSession("Slow", [], false);
+  const record = store.append({ kind: "msg", from: "Sender", topic: "build", body: "hello" });
+  const failure = await notifyRecipients(pi, ctx, store, [record], "Sender");
+  expect(store.cursors.get("Slow") ?? 0).toBe(0);
+  expect(typeof failure).toBe("string");
+});
+
+test("a T1 send whose outcome is UNKNOWN leaves the cursor AND reports nothing", async () => {
+  // The bound expired before the host answered: the message may still
+  // queue, so the cursor must not claim it was read — and the pass cannot
+  // report a failure it does not have (the outcome is unknown, not
+  // failed). Silence is honest here: claiming a transport failure would
+  // be a lie, and advancing would lose the record.
+  const root = tempRoot();
+  const ctx = fakeCtx(root, "Sender");
+  const store = roomStoreFor(ctx);
+  const { pi } = fakePi();
+  store.members.set("Slow", {
+    agentId: "Slow",
+    joinedAtSeq: 0,
+    topics: new Set(["build"]),
+    muted: new Set(),
+    threadRoots: new Set(),
+    heldTopics: new Set(),
+  });
+  registerSession("Slow", [], "never");
+  const record = store.append({ kind: "msg", from: "Sender", topic: "build", body: "hello" });
+  const failure = await notifyRecipients(pi, ctx, store, [record], "Sender");
+  expect(store.cursors.get("Slow") ?? 0).toBe(0);
+  expect(failure).toBeUndefined();
+});
+
 test("a recipient whose T1 backlog exceeds the window is TOLD to read, not left deaf", async () => {
   // The window admits the OLDEST pending T1s, so a recipient whose backlog exceeds it never has
   // its own newer record admitted — and its cursor never moves, so the backlog grows forever.
