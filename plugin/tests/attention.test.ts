@@ -279,6 +279,8 @@ test("classify(): all six kinds and the §5.1 trigger table", () => {
     { name: "member join → T2", record: member(17), viewer: viewer(), tier: "T2" },
     // gap — always T1 (a promised notify, never T2)
     { name: "gap → T1", record: gap(18), viewer: viewer(), tier: "T1" },
+    // contended — always T2 (bookkeeping for the log, never an interrupt)
+    { name: "contended → T2", record: contended(19), viewer: viewer(), tier: "T2" },
   ];
   for (const c of cases) {
     expect(`${c.name} :: ${classify(c.record, c.viewer)}`).toBe(`${c.name} :: ${c.tier}`);
