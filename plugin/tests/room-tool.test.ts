@@ -392,6 +392,19 @@ test("expireStale is a no-op while the TTL is live", () => {
   expect(expireStale(s, Date.now()).length).toBe(0);
   expect(s.claims.get("build/step")?.holder).toBe("A");
 });
+test("expireStale promotes the oldest waiter with the expired lease's ttl", () => {
+  // Line 243: the `next` arm — expiry WITH a waiter queued hands the lease
+  // to the oldest waiter instead of freeing the resource.
+  const s = newStore();
+  grant(s, "build/step", "A", 1_000);
+  enqueueWaiter(s, "build/step", "B");
+  enqueueWaiter(s, "build/step", "C");
+  const dropped = expireStale(s, Date.now() + 5_000);
+  expect(dropped.length).toBe(1);
+  expect(dropped[0].next).toBe("B");
+  expect(s.claims.get("build/step")?.holder).toBe("B");
+  expect(s.waiters.get("build/step")).toEqual(["C"]);
+});
 
 // --- test 5 — parked/aborted holder is reclaimable ------------------------------
 
