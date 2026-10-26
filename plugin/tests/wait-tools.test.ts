@@ -1486,6 +1486,8 @@ test(
         )
         .join("\n");
       expect(texts).toContain("waiting");
+      // ...and the text pins the per-second cadence `waiting Ns`, not a bare spinner.
+      expect(texts).toMatch(/waiting \d+s/);
     } finally {
       await a.dispose();
     }
@@ -1523,6 +1525,9 @@ test(
         )
         .join("\n");
       expect(texts).toContain("waiting");
+      // ...and the text pins the per-second cadence `waiting Ns`, not a bare spinner —
+      // matches wait_for_message's exact `waiting 1s` shape.
+      expect(texts).toMatch(/waiting \d+s/);
     } finally {
       await a.dispose();
     }
