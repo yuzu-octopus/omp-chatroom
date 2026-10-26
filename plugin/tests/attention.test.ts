@@ -909,6 +909,12 @@ test("T0 also sets triggerTurn so a mention wakes an idle agent", async () => {
   await deliver(fakePi().pi, ctx, sib2, msg(2, { from: "Other", topic: "build" }), "T1");
   expect(calls2[0]!.options).toMatchObject({ deliverAs: "aside" });
   expect(calls2[0]!.options).not.toHaveProperty("triggerTurn");
+  // ...nor on a T2 cursor-only delivery to a live sibling: no send at all.
+  const sib3 = `attn-wake3-${Date.now()}`;
+  const calls3: Send[] = [];
+  registerSession(sib3, calls3);
+  await deliver(fakePi().pi, ctx, sib3, msg(3, { from: "Other", topic: "chat" }), "T2");
+  expect(calls3).toHaveLength(0);
 });
 
 // --- 9. mute, unread, gap, oversized --------------------------------------
