@@ -408,6 +408,27 @@ test("enforceRetention prunes to the config's logMaxRecords, not the default 500
   expect(store.records.filter((r) => r.kind !== "gap").length).toBe(5);
 });
 
+test("enforceRetention drops the idempotency key with its pruned post", () => {
+  // Line 389: the key's promise ("this post happened once") dies with the
+  // record it referred to — a repost after the prune is a new post.
+  const root = tempRoot();
+  const storeRoot = path.join(root, ".omp-room");
+  saveRoomConfig(storeRoot, { ...DEFAULT_ROOM_CONFIG, logMaxRecords: 3 });
+  const ctx = {
+    cwd: root,
+    agent: { id: "A", kind: "main" },
+    localProtocolOptions: { root: storeRoot },
+    setInterval: () => 0,
+    clearInterval: () => {},
+  } as unknown as ExtensionContext;
+  const store = roomStoreFor(ctx);
+  store.append({ kind: "msg", from: "A", topic: "t", body: "keyed", idemKey: "k1" });
+  for (let i = 0; i < 5; i++) store.append({ kind: "msg", from: "A", topic: "t", body: `f${i}` });
+  expect(store.idemKeys.size).toBe(1);
+  enforceRetention(store, Date.now());
+  expect(store.idemKeys.size).toBe(0);
+});
+
 // --- F1: room tool registers card renderers ---
 
 test("room tool registers renderCall/renderResult/describeCall/describeResult", () => {
