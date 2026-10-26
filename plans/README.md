@@ -6,7 +6,7 @@ Baseline at plan time: `tsc` 0 errors, `biome check` clean, `bun test tests/`
 reproduced — see plan 014). Execute in the order below unless dependencies say
 otherwise. Each executor: read the plan fully before starting, honor its STOP
 conditions, and update your row when done.
-Round-a52ee95 (2026-10-26): tsc 0 errors, biome clean, 466 pass / 1 skip / 0 fail / 18 files; host pin 18.12.6. +1 foreign-release denial test (names holder, keeps lease), mutation-checked.
+Round-a52ee95 (2026-10-26): tsc 0 errors, biome clean, 466 pass / 1 skip / 0 fail / 18 files; host pin 18.12.6. +1 foreign-release denial test (names holder, keeps lease), mutation-checked. Counts current at 468 (a8a79ab).
 
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
