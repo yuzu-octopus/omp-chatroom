@@ -1143,6 +1143,17 @@ test("board content stays capped on a large roster (no context blowout)", async 
   expect(rows.length).toBe(DIGEST_CLAIMS_CAP); // §5.4 cap
   expect(text).toContain("more claim(s)"); // the remainder is disclosed, not hidden
 });
+test("board content truncates the roster past ROSTER_CAP and discloses the remainder", async () => {
+  // boardLines line 278: the member loop caps at ROSTER_CAP (32); the
+  // overflow is a disclosed "+N more member(s)" line, not a silent cut.
+  const { store, ctx } = newTestStore();
+  for (let i = 0; i < 35; i++) {
+    store.append({ kind: "member", from: `Agent${i}`, action: "join" });
+  }
+  const text = (await invokeRoom(ctx, { op: "board" })).content[0]?.text ?? "";
+  expect(text).toContain("more member(s)");
+  expect(text).toContain("+3 more member(s)");
+});
 
 test("topics/recall content carries the rows, not a count", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "room-tool-"));
