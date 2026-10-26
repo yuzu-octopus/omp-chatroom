@@ -6,7 +6,7 @@ Baseline at plan time: `tsc` 0 errors, `biome check` clean, `bun test tests/`
 reproduced — see plan 014). Execute in the order below unless dependencies say
 otherwise. Each executor: read the plan fully before starting, honor its STOP
 conditions, and update your row when done.
-Round-3df1f7d (2026-10-26): tsc 0 errors, biome clean, 517 pass / 1 skip / 0 fail / 18 files; host pin 18.12.6. +1 idempotent-envelope assertion on the existing R7 test (retried post key-free), mutation-checked; suite still 519 total.
+Round-fbf5b25 (2026-10-26): tsc 0 errors, biome clean, 519 pass / 1 skip / 0 fail / 18 files; host pin 18.12.6. REAL FIX: self dropped from recorded dependsOn (block check already dropped it; record kept raw list, board misled) + pinning test, mutation-checked.
 
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
