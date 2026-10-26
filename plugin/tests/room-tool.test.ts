@@ -909,6 +909,7 @@ test("claim: claiming a resource you already hold renews it, it does not deny yo
   // the model-facing line says what happened
   const text = JSON.stringify(second.content);
   expect(text).toContain("renewed");
+  expect(text).toContain("expires in 120s");
 });
 
 test("topics: returns topic list with unread counts and lastSeq", async () => {
