@@ -1711,6 +1711,7 @@ test("the registered description is prompt.render(ROOM_DESCRIPTION)", () => {
   if (!captured) throw new Error("registerRoomTool registered no tool");
   expect(captured.description).toBe(prompt.render(ROOM_DESCRIPTION));
   expect(captured.loadMode).toBe("essential");
+  expect(captured.approval).toBe("read");
 });
 
 // --- plan 002 — heldTopics liveness ------------------------------------------
