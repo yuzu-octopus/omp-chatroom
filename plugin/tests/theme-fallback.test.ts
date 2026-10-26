@@ -474,6 +474,8 @@ test("the last-resort branch is reachable when the host's theme loader throws", 
     // And it is PUBLISHED, because the host's chrome helpers draw the panel's frame from the
     // singleton.
     expect(theme).toBe(resolved!);
+    // ...and the shim still answers a symbol (the "?" marker), so the board never draws blank.
+    expect((resolved as unknown as FallbackTheme).symbol("status.info")).toBe("?");
   } finally {
     setThemeInstance(original);
     setActiveSymbolTheme(original);
