@@ -455,6 +455,19 @@ test("token bucket: green → yellow → red in order at CIR=1/2s, CBS=10", () =
   expect(admitPost(store, "B", now)).toBe("green");
 });
 
+test("token bucket: an idle agent refills while a hot one stays red", () => {
+  // bucketsFor refill 92-97: refill is PER-AGENT, keyed by (store, agent).
+  // A posts 21 times (green×10 → yellow×10 → red); after a full window B
+  // still posts green on its own untouched bucket — no cross-agent leak.
+  const store = miniStore([], {});
+  const now = 1_000_000;
+  const a = Array.from({ length: 21 }, () => admitPost(store, "A", now));
+  expect(a[20]).toBe("red");
+  expect(admitPost(store, "A", now)).toBe("red"); // hot agent stays throttled
+  expect(admitPost(store, "B", now)).toBe("green"); // idle agent untouched
+  expect(admitPost(store, "C", now + 60_000)).toBe("green"); // a later joiner too
+});
+
 // --- 6. T0 is never dropped -----------------------------------------------
 
 test("T0 is never dropped under its ceiling — it coalesces into one digest", () => {
