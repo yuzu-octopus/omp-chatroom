@@ -1178,6 +1178,22 @@ test("post with a body over maxBodyBytes is refused and appends nothing", async 
   const ok = await invokeRoom(ctx, { op: "post", topic: "build", body: "y".repeat(8192) });
   expect(ok.details).toMatchObject({ ok: true });
 });
+test("release by a non-holder is denied naming the holder", async () => {
+  // Release-denied arm (room.ts:1100-1104): a live lease held by someone
+  // else is neither released nor reclaimed — the denial names the holder.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "room-tool-"));
+  const ctx = fakeCtx(root, "AgentA");
+  const store = roomStoreFor(ctx);
+  await invokeRoom(ctx, { op: "claim", topic: "build", key: "step", ttl: 300_000 });
+  const other = fakeCtx(root, "AgentB");
+  const before = store.records.length;
+  const res = await invokeRoom(other, { op: "release", topic: "build", key: "step" });
+  expect(res.details).toMatchObject({ ok: false });
+  expect(JSON.stringify(res.content)).toContain("AgentA");
+  expect(store.claims.get("build/step")?.holder).toBe("AgentA");
+  expect(store.records.length).toBe(before);
+});
+
 test("post with a malformed status ledger is refused naming the missing keys", async () => {
   // R6 validation arm 1 (room.ts:881-886): each of the five keys needs
   // {reason, answer}; a partial ledger names what is missing.
