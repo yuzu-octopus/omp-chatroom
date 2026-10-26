@@ -6,7 +6,7 @@ Baseline at plan time: `tsc` 0 errors, `biome check` clean, `bun test tests/`
 reproduced — see plan 014). Execute in the order below unless dependencies say
 otherwise. Each executor: read the plan fully before starting, honor its STOP
 conditions, and update your row when done.
-Round-22f13e6 (2026-10-26): tsc 0 errors, biome clean, 452 pass / 1 skip / 0 fail / 18 files; host pin 18.12.6. Refactors only (dead-branch cuts, debug-logger removal); counts corrected 455→453 measured. Biome schema drift (2.6.3 vs CLI 2.6.2) pre-exists on clean base.
+Round-e73dae3 (2026-10-26): tsc 0 errors, biome clean (pre-existing schema drift only), 454 pass / 1 skip / 0 fail / 18 files; host pin 18.12.6. Since round-6dfcb7e: +2 panel edge tests (roster zero-width, reply cycle), both mutation-checked.
 
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|

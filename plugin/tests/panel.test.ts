@@ -1636,8 +1636,6 @@ test("chat rows bound a cyclic replyTo chain instead of spinning", () => {
   expect(rows[1].threadDepth).toBe(2);
 });
 
-
-
 test("the panel's frame glyph and title separator come from the theme", () => {
   // The split's border was a hardcoded "│" and the title a hardcoded " · ". Both are theme
   // symbols (`boxRound.vertical`, `sep.dot`), and the panel is the one surface that must follow
