@@ -889,3 +889,18 @@ test("disposeRoomSession evicts the room's wait edges with its other per-root st
     findWaitCycle(store.root, "A", [{ kind: "agent", agentId: "B" }], () => undefined),
   ).toBeNull();
 });
+
+test("records with non-string array fields are quarantined as invalid", () => {
+  // Lines 287-288 via 320/323: mention/dependsOn must be string arrays —
+  // a number inside (or a bare string) fails validation and the line is skipped.
+  const root = tempRoot();
+  const roomId = roomIdFor(root);
+  const fd = roomLogFd(root, roomId);
+  appendLine(fd, `${JSON.stringify({ ...msg(1), mention: ["A", 42] })}\n`);
+  appendLine(fd, `${JSON.stringify({ ...msg(2), dependsOn: "build/step" })}\n`);
+  appendLine(fd, `${JSON.stringify(msg(3))}\n`);
+  const { records, skipped } = replay(fd);
+  expect(skipped).toBe(2);
+  expect(records.filter((r) => r.kind === "msg").map((r) => r.seq)).toEqual([3]);
+  closeRoomLog(root, roomId);
+});
