@@ -875,6 +875,7 @@ test("describeWaitResult carries outcome meta and error tone", () => {
     options,
   );
   expect(aborted?.tone).toBe("error");
+  expect(JSON.stringify(aborted?.body)).toContain("cycle");
 });
 
 // --- message card uncovered arms --------------------------------------------
