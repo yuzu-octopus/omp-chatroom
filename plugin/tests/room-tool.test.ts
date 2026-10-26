@@ -276,9 +276,11 @@ test("R3: a claim whose dependency is still held is refused, and the refusal nam
   const text = JSON.stringify(blocked.content);
   expect(text).toContain("build/schema");
   expect(text).toContain("AgentB");
+  // ...and the refusal names the wanted resource AND its blocker in one
+  // line — the agent learns WHAT is blocked, BY WHOM, in a single read.
+  expect(text).toContain("build/parser blocked — depends on build/schema (held by AgentB)");
   // and nothing was granted
   expect(store.claims.get("build/parser")).toBeUndefined();
-
   // once the dependency is released, the claim succeeds
   expect(release(store, "build/schema", "AgentB", "released")).toBe(true);
   const granted = await invokeRoom(ctx, {
