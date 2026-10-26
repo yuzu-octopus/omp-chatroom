@@ -1112,6 +1112,24 @@ test("read: every record kind renders its own model-facing line", async () => {
   expect(text).toContain("delivered seq 1");
 });
 
+test("reopening a store replays the log: records, seq and index survive", () => {
+  // Lines 253-256: first open rebuilds projection + claim state by replay.
+  // Evict the in-memory store, reopen the same root, and the log's records
+  // come back with their seqs and byId entries intact.
+  const { store, ctx } = newTestStore();
+  store.append({ kind: "msg", from: "A", topic: "t", body: "one" });
+  store.append({ kind: "msg", from: "A", topic: "t", body: "two" });
+  store.append({ kind: "claim", from: "A", resource: "t/k", ttlMs: 60_000 });
+  expect(store.records.length).toBe(3);
+  resetRoomStores();
+  const reopened = roomStoreFor(ctx);
+  expect(reopened.records.length).toBe(3);
+  expect(reopened.seq).toBe(store.seq);
+  expect(reopened.records.map((r) => r.seq)).toEqual([1, 2, 3]);
+  expect(reopened.byId.get(reopened.records[0].id)?.seq).toBe(1);
+  expect(reopened.claims.get("t/k")?.holder).toBe("A");
+});
+
 test("a member leave record removes the roster entry", () => {
   // Lines 124-125: the join arm registers, the leave arm deletes.
   const { store } = newTestStore();
