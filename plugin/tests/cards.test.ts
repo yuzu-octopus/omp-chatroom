@@ -566,6 +566,7 @@ test("the tool cards' icons come from the theme's symbol set", () => {
 
   const wait = render(renderWaitCall({ timeout: 1000 }, options, marked), 120).join("\n");
   expect(wait).toContain("<status.pending>");
+  expect(wait).toContain("timeout 1s");
 });
 
 // --- the wait RESULT card per mechanism × outcome ---------------------------
