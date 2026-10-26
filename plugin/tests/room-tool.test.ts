@@ -1075,6 +1075,42 @@ test("read: the budget is per turn — a repeat read is throttled and the turn b
   const third = await invokeRoom(ctx, { op: "read", limit: 200 });
   expect(((third.details?.records ?? []) as unknown[]).length).toBeGreaterThan(0);
 });
+test("read: every record kind renders its own model-facing line", async () => {
+  // recordLine arms (room.ts:228-245): one of each kind in the log, then a
+  // read asserts each shape. `note` has no producer so its arm stays uncovered.
+  const { store, ctx } = newTestStore();
+  store.append({ kind: "msg", from: "AgentB", topic: "build", body: "hello" });
+  store.append({ kind: "claim", from: "AgentB", resource: "build/step", ttlMs: 60_000 });
+  store.append({
+    kind: "release",
+    from: "AgentB",
+    resource: "build/step",
+    reason: "released",
+    prevHolder: "AgentB",
+  });
+  store.append({ kind: "member", from: "AgentC", action: "join" });
+  store.append({ kind: "gap", from: "system", skipped: 3, reason: "retention" });
+  store.append({ kind: "contended", from: "AgentD", resource: "build/step", holder: "AgentB" });
+  store.append({
+    kind: "wait",
+    from: "AgentD",
+    waited: "claim",
+    target: "build/step",
+    outcome: "timeout",
+    enqueuedAt: 1,
+  });
+  store.append({ kind: "delivered", from: "AgentB", deliveredSeq: 1, tier: "T1" });
+  const result = await invokeRoom(ctx, { op: "read", limit: 50 });
+  const text = result.content.map((c) => c.text ?? "").join("\n");
+  expect(text).toContain('build · "hello"');
+  expect(text).toContain("claim build/step");
+  expect(text).toContain("release build/step · released");
+  expect(text).toContain("join");
+  expect(text).toContain("gap · 3 skipped");
+  expect(text).toContain("contended build/step");
+  expect(text).toContain("wait build/step");
+  expect(text).toContain("delivered seq 1");
+});
 
 // --- K1 content contract: what the MODEL sees ---
 // `details` never reaches the model — pi-agent-core's `coerceToolResult` (agent-loop.ts:540) keeps
