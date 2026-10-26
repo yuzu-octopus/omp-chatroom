@@ -6,7 +6,7 @@ Baseline at plan time: `tsc` 0 errors, `biome check` clean, `bun test tests/`
 reproduced — see plan 014). Execute in the order below unless dependencies say
 otherwise. Each executor: read the plan fully before starting, honor its STOP
 conditions, and update your row when done.
-Round-a081581 (2026-10-26): tsc 0 errors, biome clean, 454 pass / 1 skip / 0 fail / 18 files; host pin 18.12.3. Since round-8abc3bf: suite counts 453 (no new tests).
+Round-d4c8ee0 (2026-10-26): tsc 0 errors, biome clean, 455 pass / 1 skip / 0 fail / 18 files; host pin 18.12.3. Since round-a081581: suite counts 454 (no new tests).
 
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
