@@ -1529,6 +1529,12 @@ test("post without a body is refused", async () => {
   expect(res.details).toMatchObject({ ok: false, error: "post requires a body" });
 });
 
+test("claim without topic and key is refused", async () => {
+  const { ctx } = newTestStore();
+  const res = await invokeRoom(ctx, { op: "claim" });
+  expect(res.details).toMatchObject({ ok: false, error: "claim requires topic and key" });
+});
+
 // --- F1 security: recall pattern length limit ---
 
 test("recall: pattern over 200 chars is rejected", async () => {
