@@ -432,6 +432,9 @@ test("expireStale releases a TTL-expired claim and appends release{reason:'expir
   if (rel.kind === "release") {
     expect(rel.reason).toBe("expired");
     expect(rel.prevHolder).toBe("A");
+    // ...and the releaser is the arbiter ("system"), never the displaced
+    // holder — M11: `from` is the releaser, `prevHolder` the displaced.
+    expect(rel.from).toBe("system");
   }
 
   // the resource is free again
