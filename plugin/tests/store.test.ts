@@ -37,6 +37,7 @@ import {
   validateRecord,
 } from "../src/store/log";
 import {
+  disposeRoomSession,
   enforceRetention,
   type RoomStore,
   roomStoreFor,
@@ -44,6 +45,7 @@ import {
   storeFor,
 } from "../src/store/room-store";
 import type { RoomRecord } from "../src/store/schema";
+import { findWaitCycle, setWaitEdges } from "../src/store/wait-graph";
 import { registerRoomTool } from "../src/tools/room";
 import { zodStub } from "./zod-stub";
 
@@ -729,4 +731,32 @@ test("releaseRoomLock never unlinks another owner's lock", () => {
   fs.writeFileSync(lockPathFor(root), "999999999");
   releaseRoomLock(root); // not our pid → must not unlink
   expect(fs.existsSync(lockPathFor(root))).toBe(true);
+});
+
+// --- wait-edge eviction on dispose (the graph is per-root global state) -------
+
+test("disposeRoomSession evicts the room's wait edges with its other per-root state", () => {
+  // forgetWaitEdges was dead code: nothing called it, so a disposed room's
+  // wait graph lived in the global map for the life of the process. A stale
+  // edge makes a LATER room on the same root see a phantom cycle.
+  const root = tempRoot();
+  const ctx = {
+    cwd: root,
+    agent: { id: "A", kind: "main" },
+    localProtocolOptions: { root },
+    setInterval: () => 0,
+    clearInterval: () => {},
+  } as unknown as ExtensionContext;
+  const store = roomStoreFor(ctx);
+  // A waits B, B waits A: a real cycle while both edges are live.
+  setWaitEdges(store.root, "A", [{ kind: "agent", agentId: "B" }]);
+  setWaitEdges(store.root, "B", [{ kind: "agent", agentId: "A" }]);
+  expect(
+    findWaitCycle(store.root, "A", [{ kind: "agent", agentId: "B" }], () => undefined),
+  ).not.toBeNull();
+  disposeRoomSession(ctx);
+  // After dispose the graph is gone: the same query finds no cycle.
+  expect(
+    findWaitCycle(store.root, "A", [{ kind: "agent", agentId: "B" }], () => undefined),
+  ).toBeNull();
 });

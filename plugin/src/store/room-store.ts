@@ -11,6 +11,7 @@ import { appendLine, closeRoomLog, openRoomLog, replay } from "./log";
 import { legacyRoomRoot, openMigratedRoom, roomRootFor } from "./room-root";
 import type { RoomRecord, RoomRecordDraft } from "./schema";
 import { invalidateTree } from "./tree-store";
+import { forgetWaitEdges } from "./wait-graph";
 
 // K11 — MemberState is declared ONCE, here (the store owns it); imported by tiers, governor,
 // digest, chat-pane, delivery.
@@ -319,8 +320,9 @@ export function disposeRoomSession(ctx: ExtensionContext): void {
   if (set.size === 0) SESSIONS.delete(root);
   STORES.get(root)?.dispose();
   // The delivered-T0 registry lives in a globalThis map keyed by root: without this it grew a
-  // key per project for the life of the process.
+  // key per project for the life of the process. The wait-edge graph is the same shape.
   forgetDeliveredT0(root);
+  forgetWaitEdges(root);
 }
 
 export function resetRoomStores(): void {
@@ -330,6 +332,7 @@ export function resetRoomStores(): void {
     stopCompactor(root);
     closeRoomLog(root, store.roomId);
     forgetDeliveredT0(root);
+    forgetWaitEdges(root);
   }
   STORES.clear();
   REFS.clear();
