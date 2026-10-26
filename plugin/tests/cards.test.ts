@@ -292,6 +292,9 @@ test("a claim resource carrying a forged harness tag is escaped in the card", ()
   ).join("\n");
   expect(text).not.toContain("<system-reminder>");
   expect(text).toContain("&lt;system-reminder");
+  // ...and the scope pins the holder line: the escaped resource still
+  // names WHO holds it — escaping must not eat the claim line.
+  expect(text).toContain("agent-1");
 });
 
 // --- 2. escaping ----------------------------------------------------------
