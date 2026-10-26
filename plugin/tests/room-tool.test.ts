@@ -439,6 +439,7 @@ test("re-queue: two waiters, a third agent grabs the resource first → the firs
 test("expireStale releases a TTL-expired claim and appends release{reason:'expired', prevHolder}", () => {
   const s = newStore();
   grant(s, "build/step", "A", 1_000);
+  grant(s, "build/live", "A", 60_000);
 
   const dropped = expireStale(s, Date.now() + 5_000);
   expect(dropped.length).toBe(1);
@@ -447,6 +448,9 @@ test("expireStale releases a TTL-expired claim and appends release{reason:'expir
   expect(dropped[0].next).toBeUndefined(); // timer path: no successor
 
   expect(s.claims.has("build/step")).toBe(false);
+  // ...and the live lease survives the same sweep untouched — staleness
+  // is per-claim, not per-sweep.
+  expect(s.claims.get("build/live")?.holder).toBe("A");
 
   const rel = s.records.at(-1)!;
   expect(rel.kind).toBe("release");
@@ -460,8 +464,9 @@ test("expireStale releases a TTL-expired claim and appends release{reason:'expir
 
   // the resource is free again
   expect(grant(s, "build/step", "B", 1_000).ok).toBe(true);
-  // a second sweep drops B's fresh (now stale) claim too
-  expect(expireStale(s, Date.now() + 60_000).length).toBe(1);
+  // a second sweep drops B's fresh (now stale) claim too — plus the
+  // untouched live lease from above, which is also stale by now.
+  expect(expireStale(s, Date.now() + 60_000).length).toBe(2);
 });
 
 test("expireStale is a no-op while the TTL is live", () => {
