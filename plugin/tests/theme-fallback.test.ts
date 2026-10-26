@@ -525,3 +525,23 @@ test("the fallback reports the preset its snapshot was taken under", async () =>
     expect(getSymbolPresetOverride()).toBe(originalOverride);
   }
 });
+
+test("the fallback degrades to ascii when the singleton's preset getter throws", () => {
+  // Lines 621, 625: a half-built singleton whose getSymbolPreset THROWS —
+  // caught, falling through to "ascii". A compromise is unavoidable: the
+  // snapshot took the host's own ascii set, so the preset IS ascii.
+  const original = theme;
+  try {
+    setThemeInstance({
+      ...original,
+      getSymbolPreset: () => {
+        throw new Error("half-built theme");
+      },
+    } as unknown as Theme);
+    const shim = uncolouredTheme() as unknown as FallbackTheme;
+    expect(shim.getSymbolPreset()).toBe("ascii");
+  } finally {
+    setThemeInstance(original);
+    setActiveSymbolTheme(original);
+  }
+});
