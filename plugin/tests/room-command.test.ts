@@ -588,6 +588,21 @@ test("/room board with claim+waiter+members+posts shows TTL, waiting, cursor/lag
   }
 });
 
+test("/room board lists a note-only topic with its last seq and unread math", async () => {
+  // boardLines 110: the topic scan admits BOTH msg and note records — a
+  // note-only topic still appears with its own last seq and unread count.
+  const notified: string[] = [];
+  const handler = captureHandler(notified);
+  const root = tempRoot();
+  const store = roomStoreForCwd(root);
+  store.append({ kind: "note", from: "Alice", topic: "margin", body: "margin note" });
+  store.cursors.set("Main", 0);
+
+  await handler("board", headlessCtx(root, notified));
+  const text = notified.join("\n");
+  expect(text).toContain(`topic margin · last seq ${store.seq} · unread 1`);
+});
+
 // --- entry guards: unknown subcommand, corrupt store, claim-no-args, post member update ---
 
 test("/room unknown subcommand warns with usage and appends nothing", async () => {
