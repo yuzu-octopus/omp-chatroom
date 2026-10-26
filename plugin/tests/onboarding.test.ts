@@ -1127,3 +1127,30 @@ test("flag on: a second consecutive identical render gauges zero churn (F6 harne
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------------------------
+// 14. §3.5 — resume from the persisted cursor when it is higher than the fresh init.
+// ---------------------------------------------------------------------------------------------
+
+test("before_agent_start resumes a higher persisted cursor instead of starting at zero", async () => {
+  // Hook line 106: a session whose entries carry chatroom:cursor seq 5 for
+  // this room opens with cursor 0 — the hook bumps to the persisted 5, so
+  // the digest reads "Your cursor: 5", not 0.
+  for (let i = 0; i < 10; i++) post(i, `record-${i}`);
+  const entries = [
+    { type: "custom", customType: "chatroom:cursor", data: { roomId: store.roomId, seq: 5 } },
+  ];
+  const { pi, fire } = fakePi();
+  registerHooks(pi);
+  const base = fakeCtx("AgentA");
+  const ctx = {
+    ...base,
+    sessionManager: { ...base.sessionManager, getEntries: () => entries },
+  } as unknown as ExtensionContext;
+  const result = (await fire(
+    "before_agent_start",
+    { type: "before_agent_start", prompt: "hi", systemPrompt: ["BASE"] },
+    ctx,
+  )) as { message?: { content?: string } } | undefined;
+  expect(result?.message?.content).toContain("Your cursor: 5");
+});
