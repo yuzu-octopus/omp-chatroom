@@ -289,6 +289,21 @@ test("a summary exceeding TREE_REC bytes is truncated, not fatal", () => {
   expect(tree.getNode(2, 4)).not.toContain("\uFFFD");
 });
 
+test("a torn trailing record is truncated on next write, not read as data", () => {
+  // Lines 77-81: a crash between open and write leaves a partial record.
+  // putNode repairs the level first: the torn tail is cut, the count
+  // reflects whole records only, and the new write lands at the seam.
+  const dir = tmpTreePath();
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "2"), Buffer.alloc(TREE_REC + 10, 0x78));
+  const tree = openTreeStore(dir);
+  expect(tree.putNode(2, 4, "seam")).toBe(true);
+  expect(tree.getNode(0, 2)).not.toBeNull();
+  expect(tree.getNode(0, 2)).not.toContain("seam");
+  expect(tree.getNode(2, 4)).toBe("seam");
+  expect(fs.statSync(path.join(dir, "2")).size).toBe(TREE_REC * 2);
+});
+
 // --- 5. the write mutex ----------------------------------------------------
 
 test("the write mutex serialises two concurrent compactions (no interleaved write)", async () => {
