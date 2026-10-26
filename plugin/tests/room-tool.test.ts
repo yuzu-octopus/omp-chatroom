@@ -631,6 +631,11 @@ test("contended lists the waiters for a resource, oldest first", () => {
   enqueueWaiter(s, "build/step", "B"); // duplicate ignored
   expect(contended(s, "build/step")).toEqual(["B", "C"]);
   expect(contended(s, "other/thing")).toEqual([]);
+  // ...as a COPY: mutating the return never touches the store's list.
+  const listed = contended(s, "build/step");
+  listed.push("MUTANT");
+  listed.length = 0;
+  expect(contended(s, "build/step")).toEqual(["B", "C"]);
 });
 
 // --- session refcount + main-only timers (K9, R11/R28) --------------------------
