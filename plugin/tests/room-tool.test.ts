@@ -1459,6 +1459,7 @@ test("release by a non-holder is denied naming the holder", async () => {
   expect(JSON.stringify(res.content)).toContain("denied — not holder");
   expect(JSON.stringify(res.content)).toContain("AgentA");
   expect(store.claims.get("build/step")?.holder).toBe("AgentA");
+  expect(store.records.length).toBe(before);
 });
 
 test("post with a malformed status ledger is refused naming the missing keys", async () => {
@@ -1507,6 +1508,7 @@ test("topics/recall content carries the rows, not a count", async () => {
   const recall =
     (await invokeRoom(ctx, { op: "recall", pattern: "needle" })).content[0]?.text ?? "";
   expect(recall).toContain("needle in here");
+  expect(recall).toContain("1 match(es)");
 });
 
 // --- F1 security: recall pattern length limit ---
