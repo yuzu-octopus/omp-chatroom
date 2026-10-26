@@ -948,3 +948,34 @@ test("replay admits a valid status ledger but quarantines bad wait/delivered sha
   expect(records.filter((r) => r.kind === "msg").map((r) => r.seq)).toEqual([1, 4]);
   closeRoomLog(root, roomId);
 });
+
+test("a wait record with a non-finite enqueue time is quarantined as invalid", () => {
+  // Line 343: enqueuedAt must be finite — NaN serialises to null, which fails.
+  const root = tempRoot();
+  const roomId = roomIdFor(root);
+  const fd = roomLogFd(root, roomId);
+  appendLine(
+    fd,
+    `${JSON.stringify({ v: 1, seq: 1, ts: 1001, kind: "wait", id: "w1", from: "A", waited: "claim", target: "t/k", outcome: "timeout", enqueuedAt: "soon" })}\n`,
+  );
+  appendLine(fd, `${JSON.stringify(msg(2))}\n`);
+  const { records, skipped } = replay(fd);
+  expect(skipped).toBe(1);
+  expect(records.filter((r) => r.kind === "msg").map((r) => r.seq)).toEqual([2]);
+  closeRoomLog(root, roomId);
+});
+
+test("openRoomLog on an unwritable location reports unwritable, never throws", () => {
+  // Line 404: EACCES/EPERM/EROFS maps to "room file unwritable".
+  const dir = tempRoot();
+  const ro = path.join(dir, "ro");
+  fs.mkdirSync(ro, { recursive: true });
+  fs.chmodSync(ro, 0o555);
+  try {
+    const res = openRoomLog(path.join(ro, "sub"), "r1234567890abcdef");
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error).toBe("room file unwritable");
+  } finally {
+    fs.chmodSync(ro, 0o755);
+  }
+});
