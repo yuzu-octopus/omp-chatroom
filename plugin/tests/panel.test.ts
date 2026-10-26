@@ -1607,6 +1607,36 @@ test("the roster strip drops whole groups when the title is narrow, and says wha
   expect(full).toContain("1 aborted");
   expect(full).not.toContain("more");
 });
+test("the roster strip returns empty when even one group cannot fit", () => {
+  // Line 102-103: a width narrower than the narrowest single group (no tail to
+  // shed, nothing to drop) yields "" rather than a cut-mid-group strip.
+  const refs = [{ id: "A", status: "running" }] as unknown as AgentRef[];
+  expect(renderRosterStrip(refs, theme, 1).replace(ANSI, "")).toBe("");
+  // Zero or negative budgets short-circuit at the guard.
+  expect(renderRosterStrip(refs, theme, 0)).toBe("");
+});
+test("chat rows bound a cyclic replyTo chain instead of spinning", () => {
+  // threadDepthOf's `seen` set: A replies to B, B replies to A. Without the
+  // guard the walk never terminates; with it the depth stops at the cycle.
+  const viewer = {
+    agentId: "me",
+    status: "running",
+    topics: new Set<string>(),
+    heldTopics: new Set<string>(),
+  } as unknown as MemberState;
+  const records = [
+    { kind: "msg", id: "a", seq: 1, ts: 1, from: "x", topic: "t", body: "A", replyTo: "b" },
+    { kind: "msg", id: "b", seq: 2, ts: 2, from: "y", topic: "t", body: "B", replyTo: "a" },
+  ] as unknown as RoomRecord[];
+  const rows = projectChatRows(records, viewer, 0);
+  expect(rows).toHaveLength(2);
+  // A→B→A resolves in 2 steps via the `seen` set; without it the walk runs
+  // to the depth-8 cap.
+  expect(rows[0].threadDepth).toBe(2);
+  expect(rows[1].threadDepth).toBe(2);
+});
+
+
 
 test("the panel's frame glyph and title separator come from the theme", () => {
   // The split's border was a hardcoded "│" and the title a hardcoded " · ". Both are theme
