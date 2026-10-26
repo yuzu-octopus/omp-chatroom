@@ -273,6 +273,23 @@ test("R3: a claim whose dependency is still held is refused, and the refusal nam
   expect(granted.details).toMatchObject({ ok: true, op: "claim", holder: "AgentA" });
 });
 
+test("R3: a self-dependency is dropped from the lease's recorded dependsOn", async () => {
+  // claims.ts grant 65 vs 83: the BLOCK check drops self (`dep ===
+  // resource`) but the RECORD keeps the raw list — including self. A
+  // lease recording itself as a dependency misleads the board ("needs
+  // build/step" while holding build/step). The two must agree: self is
+  // dropped from BOTH, so the recorded lease is clean.
+  const { store, ctx } = newTestStore();
+  const res = await invokeRoom(ctx, {
+    op: "claim",
+    topic: "build",
+    key: "step",
+    dependsOn: ["build/step"],
+  });
+  expect(res.details).toMatchObject({ ok: true, op: "claim", holder: "AgentA" });
+  expect(store.claims.get("build/step")?.dependsOn).toEqual([]);
+});
+
 test("R7: a retried post with the same key returns the first one instead of posting twice", async () => {
   const { store, ctx } = newTestStore();
 

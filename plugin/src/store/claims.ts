@@ -80,7 +80,11 @@ export function grant(
     resource,
     ttlMs,
     gen: nextGen(store, resource, holder),
-    ...(dependsOn !== undefined && dependsOn.length > 0 ? { dependsOn: [...dependsOn] } : {}),
+    // Self is not a dependency (the block check above drops it): recording
+    // it would mislead the board ("needs X" while holding X).
+    ...(dependsOn !== undefined && dependsOn.length > 0
+      ? { dependsOn: dependsOn.filter((dep) => dep !== resource) }
+      : {}),
   });
   return { ok: true, claim: store.claims.get(resource)! };
 }
