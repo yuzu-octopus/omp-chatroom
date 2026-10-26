@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import type {
+  AgentToolResult,
   ExtensionAPI,
   MessageRenderer,
   ToolRenderResultOptions,
@@ -23,6 +24,10 @@ import {
   renderMessageCard,
 } from "../src/cards/message-cards";
 import {
+  describeRoomCall,
+  describeRoomResult,
+  describeWaitCall,
+  describeWaitResult,
   renderRoomCall,
   renderRoomResult,
   renderWaitCall,
@@ -794,4 +799,63 @@ test("room result card: an ok:false with a non-string error shows the failed fal
   const out = roomResultText({ ok: false, error: 42 } as unknown as RoomToolDetails);
   expect(out).toContain("failed");
   expect(out).not.toContain("42");
+});
+
+// --- native tool views (the host's renderer path) --------------------------
+
+test("describeRoomCall names the op and its target", () => {
+  const options = {} as ToolRenderResultOptions;
+  const call = describeRoomCall({ op: "claim", topic: "build", key: "step" }, options);
+  expect(call?.tool?.title).toBe("Room");
+  expect(call?.tool?.target).toBe("claim build/step");
+  const post = describeRoomCall({ op: "post", topic: "build", limit: 10 }, options);
+  expect(post?.tool?.target).toBe("post build limit 10");
+});
+
+test("describeRoomResult carries meta and error tone", () => {
+  const options = {} as ToolRenderResultOptions;
+  const ok = describeRoomResult(
+    {
+      details: { ok: true, op: "join", member: "AgentA" },
+    } as unknown as AgentToolResult<RoomToolDetails>,
+    options,
+    { op: "join" },
+  );
+  expect(ok?.tone).toBe("neutral");
+  expect(ok?.head?.length).toBeGreaterThan(0);
+  const err = describeRoomResult(
+    { details: { ok: false, error: "not holder" } } as unknown as AgentToolResult<RoomToolDetails>,
+    options,
+  );
+  expect(err?.tone).toBe("error");
+  expect(JSON.stringify(err?.body)).toContain("not holder");
+});
+
+test("describeWaitCall names the wait and its target", () => {
+  const options = {} as ToolRenderResultOptions;
+  const agent = describeWaitCall({ agents: ["AgentB"], timeout: 5_000 }, options);
+  expect(JSON.stringify(agent?.head)).toContain("wait_for_agent");
+  expect(JSON.stringify(agent?.head)).toContain("AgentB");
+  const claim = describeWaitCall({ resource: "build/step" }, options);
+  expect(JSON.stringify(claim?.head)).toContain("wait_for_claim");
+  const msg = describeWaitCall({ from: "AgentB", mention: true }, options);
+  expect(JSON.stringify(msg?.head)).toContain("wait_for_message");
+});
+
+test("describeWaitResult carries outcome meta and error tone", () => {
+  const options = {} as ToolRenderResultOptions;
+  const event = describeWaitResult(
+    { details: { ok: true, outcome: "event" } } as unknown as AgentToolResult<WaitDetails>,
+    options,
+    { timeout: 1_000 },
+  );
+  expect(event?.tone).toBe("neutral");
+  expect(JSON.stringify(event?.head)).toContain("event");
+  const aborted = describeWaitResult(
+    {
+      details: { ok: false, outcome: "aborted", error: "cycle" },
+    } as unknown as AgentToolResult<WaitDetails>,
+    options,
+  );
+  expect(aborted?.tone).toBe("error");
 });
