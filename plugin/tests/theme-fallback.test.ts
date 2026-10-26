@@ -132,6 +132,25 @@ test("the publish never throws: the host's own theme-change listener runs to the
   }
 });
 
+test("a throwing theme-change listener cannot kill the publish", () => {
+  // Line 183: the host's listener runs SYNCHRONOUSLY inside `setThemeInstance`,
+  // so its throw propagates out of the publish. adoptHostTheme swallows it —
+  // the theme IS assigned before the notify — and the panel still renders.
+  const original = theme;
+  setThemeInstance({} as unknown as Theme);
+  const unsubscribe = onThemeChange(() => {
+    throw new Error("host listener blew up");
+  });
+  try {
+    const shim = fallback();
+    expect(() => adoptHostTheme(shim)).not.toThrow();
+  } finally {
+    unsubscribe();
+    setThemeInstance(original);
+    setActiveSymbolTheme(original);
+  }
+});
+
 test("the host's symbol mirror is never left pointing at a fallback", () => {
   const original = theme;
   try {
