@@ -1192,6 +1192,35 @@ test(
 );
 
 test(
+  "wait_for_claim with a pre-aborted signal records the aborted wait",
+  async () => {
+    const root = freshRoot();
+    const bus = new EventBus();
+    const registry = new AgentRegistry();
+    const a = await newSession(bus, registry, root, "AgentA");
+    try {
+      const ac = new AbortController();
+      ac.abort();
+      const res = await toolOf(a, "wait_for_claim").execute(
+        "c-claim-pre-abort",
+        { resource: "t/k", timeout: 5_000 },
+        ac.signal,
+      );
+      expect(res.details).toMatchObject({ ok: true, outcome: "aborted", acquired: false });
+      const read = await toolOf(a, "room").execute("c-read-claim-abort", {
+        op: "read",
+        since: 0,
+        limit: 50,
+      });
+      expect(textOf(read)).toContain("wait t/k — aborted");
+    } finally {
+      await a.dispose();
+    }
+  },
+  WAIT_TIMEOUT_MS,
+);
+
+test(
   "wait_for_message on a corrupt room root returns aborted + error, never throws",
   async () => {
     const root = freshRoot();
