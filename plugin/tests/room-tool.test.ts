@@ -810,6 +810,19 @@ test("topics: empty room returns empty array", async () => {
   expect(result.details).toMatchObject({ ok: true, op: "topics", topics: [] });
 });
 
+test("topics lists a note-only topic with its unread count", async () => {
+  // tools/room.ts topics 1138: the scan admits both msg and note — a
+  // note-only topic appears with its own last seq and unread math, not
+  // silence.
+  const { store, ctx } = newTestStore();
+  store.append({ kind: "note", from: "AgentA", topic: "margin", body: "margin note" });
+  store.cursors.set("AgentA", 0);
+  const result = await invokeRoom(ctx, { op: "topics" });
+  const text = result.content.map((c) => c.text ?? "").join("\n");
+  expect(text).toContain("room topics → 1 topic(s)");
+  expect(text).toContain("topic margin · 1 unread");
+});
+
 // --- mute / unmute ---
 
 test("mute: topic mute adds to muted set", async () => {
