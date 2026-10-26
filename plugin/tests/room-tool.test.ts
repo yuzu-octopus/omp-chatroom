@@ -309,6 +309,7 @@ test("R3: a claim whose dependency is still held is refused, and the refusal nam
     dependsOn: ["build/schema"],
   });
   expect(granted.details).toMatchObject({ ok: true, op: "claim", holder: "AgentA" });
+  expect(JSON.stringify(granted.content)).toContain("granted, expires in 300s");
 });
 
 test("R3: a self-dependency is dropped from the lease's recorded dependsOn", async () => {
