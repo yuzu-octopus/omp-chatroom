@@ -385,6 +385,25 @@ test("an interrupted copy leaves the target with NO log, so the next attempt ret
   expect(fs.existsSync(legacy)).toBe(false);
 });
 
+test("migration carries a leftover log under its own name instead of dropping it", () => {
+  // Lines 374-381: a second legacy log (an earlier room id) travels too —
+  // the migration never silently drops history.
+  const legacy = tempRoot();
+  const target = tempRoot();
+  const legacyRoomDir = path.join(legacy, "room");
+  fs.mkdirSync(legacyRoomDir, { recursive: true });
+  const legacyId = roomIdFor(legacy);
+  fs.writeFileSync(path.join(legacyRoomDir, `${legacyId}.jsonl`), '{"seq":1}\n');
+  fs.writeFileSync(path.join(legacyRoomDir, "r-old.jsonl"), '{"seq":9}\n');
+  fs.writeFileSync(
+    path.join(legacyRoomDir, "config.json"),
+    `${JSON.stringify({ roomId: legacyId })}\n`,
+  );
+  expect(migrateLegacyRoom(legacy, target)).toBe(true);
+  expect(fs.readFileSync(path.join(target, "room", "r-old.jsonl"), "utf-8")).toBe('{"seq":9}\n');
+  expect(fs.existsSync(path.join(target, "room", `${legacyId}.jsonl`))).toBe(true);
+});
+
 // --- the lock hand-off: no window between the migration and the open -------------
 
 test("the room's lock covers the migration and the open: a second writer is refused", () => {
