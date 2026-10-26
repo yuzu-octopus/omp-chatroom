@@ -1890,6 +1890,7 @@ test("a release of a stale claim held by someone else reports the reclaim, not a
   const res = await invokeRoom(ctx, { op: "release", topic: "build", key: "step" });
   expect(res.details).toMatchObject({ ok: true, op: "release" });
   expect(String(res.content[0]?.text)).toContain("reclaimed");
+  expect(String(res.content[0]?.text)).toContain("lease dropped");
   expect(String(res.content[0]?.text)).not.toContain("denied");
 });
 
