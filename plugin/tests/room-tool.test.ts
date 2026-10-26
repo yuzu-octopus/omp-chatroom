@@ -1646,6 +1646,7 @@ test("zoom: a pair of messages opens to two raw singletons (zoom reaches one mes
   expect(result.content.map((c) => c.text ?? "").join("\n")).toContain(
     "room zoom \u2192 2 child(ren)",
   );
+  expect(result.content.map((c) => c.text ?? "").join("\n")).toContain("[0,1) size 1 raw");
 });
 
 /** The schema the tool registered, by param name — so tests can assert on its descriptions. */
