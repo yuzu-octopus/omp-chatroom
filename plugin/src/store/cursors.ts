@@ -57,8 +57,13 @@ export function markDeliveredT0(root: string, agentId: string, seq: number): voi
   seqs.add(seq);
   if (seqs.size > DELIVERED_T0_MAX) {
     // Drop the oldest entries: they are the ones a long-passed floor can no longer revive.
-    const oldest = [...seqs].sort((a, b) => a - b).slice(0, seqs.size - DELIVERED_T0_MAX);
-    for (const entry of oldest) seqs.delete(entry);
+    // Insertion-ordered: the Set iterates oldest-first, so slice the head — no sort needed.
+    let drop = seqs.size - DELIVERED_T0_MAX;
+    for (const entry of seqs) {
+      if (drop <= 0) break;
+      seqs.delete(entry);
+      drop -= 1;
+    }
   }
 }
 
