@@ -115,6 +115,11 @@ test("claim: the TTL is clamped to the mandatory [1s, 1d] window", async () => {
   const huge = await invokeRoom(ctx, { op: "claim", topic: "build", key: "b", ttl: 9_999_999_999 });
   expect(huge.details).toMatchObject({ ok: true });
   expect(store.claims.get("build/b")?.ttlMs).toBe(86_400_000);
+  // ...and a renewal re-clamps the same way: a renewed zero lease lands
+  // on the floor, not on zero.
+  const renewed = await invokeRoom(ctx, { op: "claim", topic: "build", key: "a", ttl: 0 });
+  expect(renewed.details).toMatchObject({ ok: true, renewed: true });
+  expect(store.claims.get("build/a")?.ttlMs).toBe(1_000);
 });
 
 test("renew: a non-holder cannot renew somebody else's lease", () => {
