@@ -486,6 +486,25 @@ test("an aborted holder's claim is reclaimable and a fresh claim is not", () => 
   expect(s.claims.has("build/step")).toBe(false);
 });
 
+test("a reclaim with no waiter records from=system — never the displaced holder", () => {
+  // claims.ts reclaimIfStale 169-176: with no waiter the releaser is the
+  // arbiter ("system"), never the displaced holder. M11: `from` is the
+  // releaser, `prevHolder` is the displaced — conflating them makes the
+  // eviction notice classify the release as the holder's own act.
+  const s = newStore();
+  grant(s, "build/step", "A", 3_600_000);
+  registerAgent("A", "parked");
+  const outcome = reclaimIfStale(s, "build/step", Date.now());
+  expect(outcome.reclaimed).toBe(true);
+  expect(outcome.holder).toBe(null);
+  const rel = s.records.filter((r) => r.kind === "release").at(-1)!;
+  expect(rel.kind).toBe("release");
+  if (rel.kind === "release") {
+    expect(rel.from).toBe("system");
+    expect(rel.prevHolder).toBe("A");
+  }
+});
+
 // --- test 6 — append is the only writer, monotonic seq --------------------------
 
 test("append is the only writer and mints monotonically increasing seq", () => {
