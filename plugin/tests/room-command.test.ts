@@ -470,6 +470,7 @@ test("/room release of an unknown resource warns and appends nothing", async () 
   await handler("release build missing", headlessCtx(root, notified));
 
   expect(notified.join("\n")).toContain("unknown resource");
+  expect(notified.join("\n")).toContain("build/missing");
   expect(store.records.length).toBe(before);
   expect(store.claims.has("build/missing")).toBe(false);
 });
