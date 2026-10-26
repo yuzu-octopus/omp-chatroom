@@ -6,7 +6,7 @@ Baseline at plan time: `tsc` 0 errors, `biome check` clean, `bun test tests/`
 reproduced — see plan 014). Execute in the order below unless dependencies say
 otherwise. Each executor: read the plan fully before starting, honor its STOP
 conditions, and update your row when done.
-Round-dfb6096 (2026-10-26): tsc 0 errors, biome clean, 528 pass / 1 skip / 0 fail / 18 files; host pin 18.12.6. +4 mismatch-key assertions on the R7 test (names collided key), mutation-checked; suite still 530 total.
+Round-cdc4391 (2026-10-26): tsc 0 errors, biome clean, suite green modulo one KNOWN-FLAKY wait test (maxWaitMs livelock guard, timing-sensitive under full-suite load; passes alone, fails intermittently in-suite with and without this round). +5 renew-clamp assertions (renewal reuses clamped window), mutation-checked.
 
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
