@@ -1273,7 +1273,9 @@ test(
       expect(res.isError).toBe(true);
       const details: Record<string, unknown> = res.details ?? {};
       expect(typeof details.error).toBe("string");
-      expect(Array.isArray(res.content)).toBe(true);
+      // ...and the model-facing text says what died waiting — the wait's
+      // target (* = any), not just "corrupt" — so the agent knows.
+      expect(textOf(res)).toContain("wait_for_message");
     } finally {
       await b.dispose();
     }
