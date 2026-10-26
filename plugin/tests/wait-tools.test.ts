@@ -779,6 +779,32 @@ test(
 );
 
 test(
+  "wait_for_agent resolves when a named peer leaves (removal is a change)",
+  async () => {
+    AgentRegistry.resetGlobalForTests();
+    const root = freshRoot();
+    const bus = new EventBus();
+    const a = await newSession(bus, undefined, root, "AgentA");
+    const peer = await newSession(bus, undefined, root, "AgentB");
+    try {
+      const waitP = toolOf(a, "wait_for_agent").execute("c-agent-leave", {
+        agents: ["AgentB"],
+        timeout: 120_000,
+      });
+      await Bun.sleep(80);
+      await peer.dispose();
+      const res = await Promise.race([waitP, Bun.sleep(5_000).then(() => null)]);
+      expect(res).not.toBeNull();
+      expect(res!.details).toMatchObject({ ok: true, outcome: "event" });
+    } finally {
+      await a.dispose();
+      AgentRegistry.resetGlobalForTests();
+    }
+  },
+  WAIT_TIMEOUT_MS,
+);
+
+test(
   "wait_for_message times out normally: {outcome:'timeout'}, useless:true, content array, no throw",
   async () => {
     const root = freshRoot();
