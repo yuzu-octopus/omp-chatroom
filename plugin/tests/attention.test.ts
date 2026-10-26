@@ -822,8 +822,11 @@ test("a recipient whose T1 backlog exceeds the window is TOLD to read, not left 
   // the hint the recipient is deaf and never learns why.
   const texts = recipientCalls.map((c) => JSON.stringify(c.payload));
   expect(texts.some((t) => t.includes("read with"))).toBe(true);
+  // And the hint is NOT a failure: the pass reports nothing — the
+  // overflow notice is guidance, not a transport error.
+  const failure = await notifyRecipients(fakePi().pi, ctx, store, [fresh], "Sender");
+  expect(failure).toBeUndefined();
 });
-
 test("deliver: T0 steers, T1 is an aside, T2 only bumps the cursor", async () => {
   const root = tempRoot();
   const ctx = fakeCtx(root, "Sender");
