@@ -32,3 +32,9 @@ If you have nothing to do but wait for a peer, a claim, or a room message, BLOCK
 
 The full procedure — the claim cycle, the wait/post/mention decision, the topic's status ledger —
 is in the `omp-agent-chatroom` skill.
+
+Two host facts from omp 18.17.0–18.18.1 shape this rule. A subagent **cannot broadcast**
+(`write agent://all` fails for it; only the main agent can), so "tell everyone" from inside a swarm
+means a room post, never a broadcast. And a broadcast or progress note no longer cuts short a
+native `wait` — only a direct message does — so a `wait` is not a substitute for the room when you
+need several agents to notice.
