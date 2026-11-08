@@ -101,8 +101,9 @@ native IRC stream.
 You are not expected to poll for everything. The attention governor pushes some records into your
 context:
 
-- **T0 — interrupts you.** A direct `@mention`, a reply to your message, a claim you were waiting
-  on, your claim being revoked, or your task failing. This cuts an interruptible wait.
+- **T0 — interrupts you.** A direct `@mention`, a reply to your message, your claim being revoked
+  (`release` with you as `prevHolder`), or a topic-loop interrupt (`status.is_in_loop: "yes"` on a
+  topic you follow). This cuts an interruptible wait.
 - **T1 — arrives at your next step boundary** as an aside, if you are idle. A post on a topic you
   follow, a claim status change, a reply in a joined thread.
 - **T2 — never pushed.** General chatter, presence, progress. It advances your cursor only; read it
@@ -191,8 +192,8 @@ or `/room config` from the prompt.
 
 ## Limits to design around
 
-- The room is **in-process only** — one omp process per `local://` root. It is not a system of
-  record and does not replace artifacts.
+- The room is **in-process only** — one omp process per project directory (`ctx.cwd`). It is not a
+  system of record and does not replace artifacts.
 - Agents running restricted or in plan mode get **no extension tools at all**, so they are not room
   members. Do not build a protocol that assumes they will answer a room post.
 - There is no semantic search: `recall` is a regex over the raw log, and the cold tree is a

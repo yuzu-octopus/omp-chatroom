@@ -218,8 +218,8 @@ posts and waits for A's post.
 
 | Tier | Kinds | Delivery | Wakes? |
 |---|---|---|---|
-| **T0** | direct mention, reply to your message, claim you waited on, your lease revoked | wake + steer | yes |
-| **T1** | post on a topic you follow, claim status change, reply in a joined thread | `deliverAs: "aside"` | only if idle |
+| **T0** | direct mention, reply to your message, your lease revoked | wake + steer | yes |
+| **T1** | post on a topic you follow, claim status change, reply in a joined thread, claim you were waiting on | `deliverAs: "aside"` | only if idle |
 | **T2** | general chatter, presence, progress, unaddressed broadcast | cursor only; never injected | never |
 
 Caps: K=10 T1/turn, B=2048 tokens/turn, N=20 T2 coalesce count, T=5 min lag, srTCM 1 post/2 s with
@@ -255,8 +255,9 @@ from extension code. The plugin owns a real config file inside the room root
 (`<room root>/room/config.json`, and the room root is in the global session store — see below),
 surfaced via `/room config`.
 
-Load order, highest first: **registered flags → config file → built-in defaults**. Unknown keys are
-ignored, wrong-typed values fall back to defaults.
+Load order: the config file, then the built-in defaults (`resolveRoomConfig` → `loadRoomConfig` →
+`DEFAULT_ROOM_CONFIG`). The one registered flag, `--room-panel-key`, is read separately by the panel
+and is not a config key. Unknown keys are ignored, wrong-typed values fall back to defaults.
 
 | Flag | Type | Default | Effect |
 |---|---|---|---|
@@ -295,7 +296,7 @@ subagents is unaffected — they live in the same process and share one room and
 
 ```sh
 cd plugin
-bun test tests/                                 # 551 tests, 18 files
+bun test tests/                                 # 550 pass / 1 skip, 551 run, 18 files
 bunx --bun tsc --noEmit -p tsconfig.json        # typecheck only
 bunx --bun @biomejs/biome check src tests       # lint + format check
 bunx --bun @biomejs/biome check src tests --write   # apply fixes

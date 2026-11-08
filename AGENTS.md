@@ -9,8 +9,8 @@ entry point (gates, verified-live evidence, known limits); `PLAN-build.md` is th
 document. This file is the practical guide for working in the repo.
 
 > **Authority order when documents disagree:** `plugin/src/**` > dated addenda in `PLAN-build.md` >
-> plan body > `SCAFFOLD.md` > reviews > reports. `PLAN-build.md:60-62` declares its own body a
-> historical record whose superseded prose was left untouched on purpose.
+> plan body > `SCAFFOLD.md` > reviews > reports. `PLAN-build.md:211` declares its own body a
+> historical record; :60-62 record that the superseded numbers were left untouched on purpose.
 
 ## Architecture & Data Flow
 
@@ -109,19 +109,19 @@ yourself. The human has the machine and will run it.
 
 |#|Rule|Enforced at|
 |---|---|---|
-|I1|mutations are synchronous — no `await` between mint, write, project, notify|`store/room-store.ts:149-168`|
-|I2|no session-scoped module state; key by root/agent in `globalThis` maps|`store/room-store.ts:60-67`, `store/compactor.ts:43`, `store/compactor.ts:111`, `store/tree-store.ts:133`|
-|I3|key every shared structure by `ctx.agent.id`|`store/room-store.ts:243-250`, `panel/panel.ts:29`|
-|I4|timers via `ctx.setInterval` only — never a raw timer (a throw is process-fatal)|`store/compactor.ts:303-317`, `store/room-store.ts:345-380`|
-|I5|synchronous append survives a crash — `fsyncSync` in the one `appendLine` path|`store/log.ts:81-95`|
-|I6|every wait promise settles — signal, timeout and promotion all `finish()`|`tools/wait-for-claim.ts:147-190` and both siblings|
+|I1|mutations are synchronous — no `await` between mint, write, project, notify|`store/room-store.ts:204-211`|
+|I2|no session-scoped module state; key by root/agent in `globalThis` maps|`store/room-store.ts:87-95`, `store/compactor.ts:43`, `store/compactor.ts:111`, `store/tree-store.ts:152`|
+|I3|key every shared structure by `ctx.agent.id`|`store/room-store.ts:94-95`, `panel/panel.ts:460`|
+|I4|timers via `ctx.setInterval` only — never a raw timer (a throw is process-fatal)|`store/compactor.ts:353`, `store/room-store.ts:432-448`|
+|I5|synchronous append survives a crash — `fsyncSync` in the one `appendLine` path|`store/log.ts:194-208`|
+|I6|every wait promise settles — signal, timeout and promotion all `finish()`|`tools/wait-for-claim.ts:195-205`, `:247-252` (and the siblings' equivalents)|
 |I7|the compactor's daily spend cap **and** its write mutex are per room root — never process-global, or a busy room starves the other|`store/compactor.ts:36-52`, `store/compactor.ts:106-122`|
-|I8|delivery is serialised per room root — two concurrent posts reach a recipient in seq order|`tools/room.ts:357-376`|
-|I9|a recipient's cursor never advances past a record it has not seen — the owed floor is applied to **every** cursor bump in `deliver()` (the T0/T1 path included, not only the T2 one)|`attention/delivery.ts:78-83`, `tools/room.ts:450-457`|
+|I8|delivery is serialised per room root — two concurrent posts reach a recipient in seq order|`tools/room.ts:408-424`|
+|I9|a recipient's cursor never advances past a record it has not seen — the owed floor is applied to **every** cursor bump in `deliver()` (the T0/T1 path included, not only the T2 one)|`attention/delivery.ts:160-165`, `tools/room.ts:536-545`|
 |I10|the load-time host-drift check **warns**, it never throws — a working room beats a plugin that refuses to load|`index.ts:31-47`|
 |I11|a delivery never waits for the recipient's whole turn — the host's send resolves at the end of the **target's** turn, so every send is bounded (250 ms); a rejection inside the bound still surfaces as `deliveryError`, and the per-recipient deliveries run concurrently so one slow recipient cannot hold up the others|`attention/delivery.ts:25`, `attention/delivery.ts:38-63`, `attention/delivery.ts:145-153`, `tools/room.ts:333-337`|
 |I12|a delivered T0 is delivered ONCE — while an older record is still owed the cursor cannot advance past it, so the T0 would be re-selected and re-sent (a wake+steer storm); the delivered T0s are remembered per room root and per recipient|`store/cursors.ts:32-72`, `attention/delivery.ts:144-158`, `tools/room.ts:449-456`|
-|I13|the retention `gap` record is CARRIED by the next pass — it is T1 for every viewer but is appended outside any op's batch, so left uncarried it pinned every cursor and froze the room|`tools/room.ts:462-480`, `attention/tiers.ts:36`|
+|I13|the retention `gap` record is CARRIED by the next pass — it is T1 for every viewer but is appended outside any op's batch, so left uncarried it pinned every cursor and froze the room|`tools/room.ts:511-536`, `attention/tiers.ts:46-47`|
 
 **The room lives in the global omp session store, not in the project tree.** The room root is
 `getSessionsDir()/rooms/<16 hex chars of the project path>` — i.e. `~/.omp/agent/sessions/rooms/<hash>`
@@ -262,7 +262,7 @@ rather than tested.
   looks authoritative (a reproducible counterexample plus a "481 of 20 001" match rate), but that
   figure describes its greedy most-due-pair loop, not our bisection. Measured on our procedure, the
   rejected change matches Taelin's `push` **worse** (8/400 vs 140/400).
-  `docs/research/optmem-2026-10-08/A-merge-age-verification.md`.
+  `docs/research/optmem-2026-10-08/A-merge-order-verification.md`.
 
 ## Room vs direct message — routing rule
 

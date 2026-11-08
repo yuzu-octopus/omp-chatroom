@@ -119,7 +119,7 @@ Gates, all green:
 | `bunx --bun @biomejs/biome check src tests` | **0 errors, 0 warnings** |
 | Remaining `not implemented` stubs | **0** |
 
-Verified **live** against host 18.12.6 (and re-gated on 18.18.1 — see below) — every surface was exercised by a real model in a real
+Verified **live** against host 18.12.3 (and re-gated on 18.18.1 — see below) — every surface was exercised by a real model in a real
 terminal or a real session: the `/room` panel and its keys in a real terminal (raw pty, 120x40),
 the inline cards in a real transcript, the claim board (a second claim refused, naming the holder),
 mention delivery (a subagent's post arriving as a real T0 steer), all three wait tools'

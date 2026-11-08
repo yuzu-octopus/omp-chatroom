@@ -6,7 +6,7 @@ Baseline at plan time: `tsc` 0 errors, `biome check` clean, `bun test tests/`
 reproduced — see plan 014). Execute in the order below unless dependencies say
 otherwise. Each executor: read the plan fully before starting, honor its STOP
 conditions, and update your row when done.
-Round-bd69c15 (2026-11-08): bun check 0 errors (native, ~90 ms), tsc 0 errors, biome clean, 550 pass / 1 skip / 0 fail / 551 run / 18 files; host pin 18.18.1, Bun 1.4.4. Host bump re-audit: +3 theme members the host reads (ansiFg, faint, icon.cacheWarm/Cold), +deliverIrcMessage for worker-thread peers, +handlesToolInterrupt on both observer waits, +worker-thread topology refusal, +panel chord-conflict warning; 7 new tests, each mutation-checked.
+Round-bd69c15 (2026-11-08): bun check 0 errors (native, ~90 ms), tsc 0 errors, biome clean, 550 pass / 1 skip / 0 fail / 551 run / 18 files; host pin 18.18.1, Bun 1.4.4. Host bump re-audit: +4 theme members the host reads (ansiFg, faint, icon.cacheWarm, icon.cacheCold), +deliverIrcMessage for worker-thread peers, +handlesToolInterrupt on both observer waits, +worker-thread topology refusal, +panel chord-conflict warning; 7 new tests, each mutation-checked.
 
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
