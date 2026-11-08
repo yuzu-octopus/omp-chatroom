@@ -610,6 +610,32 @@ test("registerPanel stays quiet when the chord is free or the check still throws
   ).toEqual({ warnings: [], notified: [] });
 });
 
+test("registerPanel names the holder for every conflict kind", async () => {
+  // Three kinds, three sentences: `reserved` (omp keeps the chord), `extension` (another plugin
+  // has it), `keybinding` (the user's own keymap). The keybinding arm is pinned above; these two
+  // are the rest of the same ternary, and a wrong sentence here sends the user to the wrong fix.
+  const run = (conflict: unknown): string => {
+    const warnings: string[] = [];
+    const starts: Array<(event: unknown, ctx: ExtensionContext) => void> = [];
+    const pi = {
+      on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => void) => {
+        if (event === "session_start") starts.push(handler);
+      },
+      getFlag: () => "ctrl-r",
+      registerShortcut: () => {},
+      getShortcutConflict: () => conflict,
+      logger: { warn: (message: string) => warnings.push(message) },
+    } as unknown as ExtensionAPI;
+    registerPanel(pi);
+    starts[0]!({}, { ui: { notify: () => {} } } as unknown as ExtensionContext);
+    return warnings[0] ?? "";
+  };
+  expect(run({ kind: "reserved" })).toContain("omp reserves it");
+  expect(run({ kind: "extension", extensionPath: "/ext/other.ts" })).toContain(
+    "/ext/other.ts already uses it",
+  );
+});
+
 // --- /room command wiring -------------------------------------------------
 /** The command's registered handler, captured from a structural `pi`. */
 function captureRoomHandler(): (args: string, ctx: ExtensionContext) => Promise<void> {
