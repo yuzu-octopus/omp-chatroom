@@ -197,5 +197,8 @@ or `/room config` from the prompt.
 - Agents running restricted or in plan mode get **no extension tools at all**, so they are not room
   members. Do not build a protocol that assumes they will answer a room post.
 - There is no semantic search: `recall` is a regex over the raw log, and the cold tree is a
-  summary cache, not an index.
+  summary cache, not an index. `recall` is deliberately bounded — refusing patterns that can
+  backtrack catastrophically (`(a+)+`, `(a|aa)+`, backreferences, more than two unrestricted
+  wildcards) and searching only the first 512 characters of each rendered line — so a distinctive
+  phrase near the start of a body finds it and a match deep inside a long body does not.
 

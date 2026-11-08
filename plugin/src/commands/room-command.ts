@@ -14,6 +14,9 @@ import {
   saveRoomConfig,
 } from "../store/config";
 import { cursorFor, initCursor, lagFor } from "../store/cursors";
+// §3.4 — the canonical lease bounds, shared with the tool and with replay, so a widened command
+// cannot mint a lease the log validator would quarantine on the next open.
+import { CLAIM_TTL_MAX_MS, CLAIM_TTL_MIN_MS } from "../store/log";
 import { type RoomStore, roomStoreFor } from "../store/room-store";
 import { appendedSince, notifyRecipients } from "../tools/room";
 
@@ -41,10 +44,6 @@ const SUBCOMMAND_HELP: Readonly<Record<RoomSubcommand, string>> = {
 };
 
 const USAGE = `usage: /room [<${ROOM_SUBCOMMANDS.join("|")}>]`;
-
-// §3.4 — the `room` tool clamps with these bounds; the command must not accept a wider lease.
-const CLAIM_TTL_MIN_MS = 1_000;
-const CLAIM_TTL_MAX_MS = 86_400_000;
 
 /** K22/S1 — the same escaping pair the tool uses; room text is untrusted wherever it is rendered. */
 function safe(text: string): string {

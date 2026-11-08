@@ -199,9 +199,12 @@ reused for different parameters is an error, not a silent second post.
 
 Failures are normal results, not exceptions: `details:{ ok:false, error }` with a `content` line.
 `claim` losing a race returns the holder and its expiry; `release` by a non-holder returns
-`not holder`. A `recall` pattern longer than 200 chars, or one with a quantifier over a quantified
-group (`(a+)+` — exponential on a non-matching input), returns `{ ok:false, error }` rather than
-hanging the process.
+`not holder`. `recall` is a bounded search, not a regex engine: a pattern longer than 200 chars, one
+that repeats a group containing a quantifier or alternation (`(a+)+`, `(a|aa)+`), a backreference, or
+more than two unrestricted wildcards is refused with `{ ok:false, error }` — the measured cost of
+one such test was 2222 ms on the host's own thread, which freezes the whole session. Each record is
+searched over the first 512 characters of its rendered line, and the scan stops at a 1 s budget, so a
+match past character 512 of a long record is not found: trim the body or search a distinctive head.
 
 ### Delivery — posting actually notifies
 
