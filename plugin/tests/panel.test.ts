@@ -29,9 +29,11 @@ import {
   projectClaims,
 } from "../src/panel/board-pane";
 import {
+  __chatPaneTest,
   type ChatRow,
   createChatPane,
   projectChatRows,
+  projectChatRowsIncremental,
   renderChatRows,
 } from "../src/panel/chat-pane";
 import { frameBottomRow, frameDividerRow, frameHintRow, frameTopRow } from "../src/panel/chrome";
@@ -45,7 +47,7 @@ import {
   registerPanel,
 } from "../src/panel/panel";
 import { renderRosterStrip, statusCounts } from "../src/panel/roster-strip";
-import { enqueueWaiter, grant } from "../src/store/claims";
+import { enqueueWaiter, grant, release } from "../src/store/claims";
 import { type MemberState, type RoomStore, roomStoreFor, storeFor } from "../src/store/room-store";
 import type { RoomRecord } from "../src/store/schema";
 
@@ -298,11 +300,12 @@ test("board pane renders a claim row with resource, holder and remaining TTL", (
     const text = lines.join("\n");
     expect(text).toContain("build/step");
     expect(text).toContain("AgentA");
-    expect(text).toContain("12s");
-    // ...and the waiter count rides in the HOLDER cell ("AgentA +2"),
-    // not as a detached suffix — the floor of 10 keeps it on screen.
-    expect(text).toContain("AgentA +2");
-    expect(text).toContain("2 waiting");
+    // The countdown is the host's own `formatDuration` (`pi-utils/src/format.ts:10`): 12 000 ms is
+    // "12.0s", not the old raw "12s".
+    expect(text).toContain("12.0s");
+    // ...and the waiter count LEADS the holder cell ("+2 AgentA"), where tail truncation cannot
+    // take it — the floor of 8 keeps the count and a stub of the name on screen.
+    expect(text).toContain("+2 AgentA");
   } finally {
     setSystemTime();
   }
@@ -1677,7 +1680,7 @@ test("the board row reads in a real pane: the dependency, the waiters and the st
   const text = lines.join("\n");
   // The dependency reads in full — the arrow is the theme's own `nav.back`.
   expect(text).toContain(`build/parser ${theme.nav.back} build/schema`);
-  // The waiters survive (the holder cell's floor is 8 cells: "AgentA +2").
+  // The waiters survive: the count leads the holder cell, so the floor of 8 keeps it ("+2 Agen…").
   expect(text).toContain("+2");
   // The state word is never chopped.
   expect(text).toContain("expired");
@@ -2219,4 +2222,211 @@ test("openRoomPanel with a corrupt store reports unavailable instead of throwing
   expect(customCalls).toEqual([]);
   expect(notified.length).toBe(1);
   expect(notified[0]).toContain("room unavailable:");
+});
+
+// --- tail-follow, focus coupling, board anchor, incremental projection -----
+
+/** A reply message: `replyTo` names an EARLIER id, so the depth resolves inside the window. */
+function reply(seq: number, body: string, replyTo: string): RoomRecord {
+  return {
+    v: 1,
+    seq,
+    ts: 1_000_000 + seq,
+    kind: "msg",
+    id: `m${seq}`,
+    from: "AgentA",
+    topic: "build",
+    body,
+    replyTo,
+  };
+}
+
+test("the chat pane keeps following the tail after more rows arrive than it can show", () => {
+  // The panel starts `#chatSelected` at MAX_SAFE_INTEGER and the FIRST clamp pins it to the then
+  // last row. The old window logic followed the tail for exactly `size` new rows and then took the
+  // `selected < start` branch, pinning the window to that stale row: a live room looked dead.
+  const store = fixtureStore(); // one message ("hello-chat") and one claim
+  const panel = makePanel(store, 12); // 12 terminal rows − 4 chrome rows = an 8-row chat pane
+  try {
+    panel.render(120);
+    for (let i = 0; i < 20; i += 1) {
+      store.append({ kind: "msg", from: "AgentA", topic: "build", body: `live-${i}` });
+    }
+    const text = panel.render(120).join("\n");
+    // The NEWEST row is on screen...
+    expect(text).toContain("live-19");
+    // ...and the window really is the tail: the first row is long gone.
+    expect(text).not.toContain("hello-chat");
+
+    // Scrolling away from the tail drops follow mode, and the marker lands on the selected row.
+    // The marker is the ACCENT-styled glyph; the bare glyph also ends every head as its separator,
+    // so the styled form is the one that identifies the cursor.
+    panel.handleInput("k");
+    const afterK = panel.render(120);
+    const marker = theme.fg("accent", theme.nav.selected);
+    const selected = afterK.find((line) => line.includes("live-18"))!;
+    const newest = afterK.find((line) => line.includes("live-19"))!;
+    expect(selected).toContain(marker);
+    expect(newest).not.toContain(marker);
+  } finally {
+    panel.dispose();
+    store.reset();
+  }
+});
+
+test("narrow: tab moves the focus WITH the visible pane, so `r` acts on what is rendered", () => {
+  const store = fixtureStore();
+  const released: string[] = [];
+  const panel = makePanel(store, 30, { onReleaseClaim: (resource) => released.push(resource) });
+  const narrow = PANEL_SPLIT_AT - 8;
+  try {
+    // Tab to the board: the board is what the user sees, so it is what `r` addresses. The old
+    // `#narrowOpen` moved only the pane on screen, so `r` did nothing on the visible board.
+    panel.render(narrow);
+    panel.handleInput("\t");
+    expect(panel.render(narrow).join("\n")).toContain("build/step");
+    panel.handleInput("r");
+    expect(released).toEqual(["build/step"]);
+
+    // `2` then tab: the chat is visible again, so `r` must NOT act on the hidden board. The old
+    // focus stayed on the board while the chat was rendered, so `r` released a claim nobody saw.
+    panel.render(narrow);
+    panel.handleInput("2");
+    panel.handleInput("\t");
+    expect(panel.render(narrow).join("\n")).toContain("hello-chat");
+    panel.handleInput("r");
+    expect(released).toEqual(["build/step"]);
+  } finally {
+    panel.dispose();
+    store.reset();
+  }
+});
+
+test("wide: tab never moves a hidden pane under the board-only keys", () => {
+  const store = fixtureStore();
+  const released: string[] = [];
+  const panel = makePanel(store, 30, { onReleaseClaim: (resource) => released.push(resource) });
+  try {
+    // At/above the split both panes are rendered and `tab` is not bound at all (`actionFor` returns
+    // null outside the narrow layout), so `2` then tab leaves the board — the pane whose rows are
+    // visible — as the one `r` addresses.
+    panel.render(120);
+    panel.handleInput("2");
+    panel.handleInput("\t");
+    const wide = panel.render(120).join("\n");
+    expect(wide).toContain("hello-chat");
+    expect(wide).toContain("build/step");
+    // The focus did not move: `tab` outside the narrow layout is not bound at all.
+    expect(wide).toContain("chat|[board]");
+    expect(wide).not.toContain("[chat]|board");
+    panel.handleInput("r");
+    expect(released).toEqual(["build/step"]);
+
+    // And `1` + tab in the wide layout leaves `r` addressing nothing: the chat is focused, so no
+    // claim is selected even though the board is still on screen.
+    panel.handleInput("1");
+    panel.handleInput("\t");
+    expect(panel.render(120).join("\n")).toContain("[chat]|board");
+    panel.handleInput("r");
+    expect(released).toEqual(["build/step"]);
+  } finally {
+    panel.dispose();
+    store.reset();
+  }
+});
+
+test("the board selection is anchored to the claim's resource, not its index", () => {
+  const store = fixtureStore();
+  store.append({ kind: "claim", from: "Main", resource: "build/mine", ttlMs: 600_000 });
+  store.append({ kind: "claim", from: "AgentC", resource: "build/other", ttlMs: 600_000 });
+  const focused: string[] = [];
+  const panel = makePanel(store, 30, {
+    // The production path (`openRoomPanel`): a release goes through the arbiter, and the store
+    // append refreshes the panel before the key handler returns.
+    onReleaseClaim: (resource) => {
+      release(store, resource, "Main", "released");
+    },
+    onFocusAgent: (agentId) => focused.push(agentId),
+  });
+  try {
+    // Rows, display order: build/step (AgentB), build/mine (Main), build/other (AgentC).
+    panel.handleInput("2");
+    panel.handleInput("j"); // select build/mine — the row this session can release
+    panel.handleInput("r");
+    // The released row moved to the BOTTOM; the index it held now points at build/other, the claim
+    // that slid up. The cursor must still be on the claim the user selected.
+    panel.handleInput("o");
+    expect(focused).toEqual(["Main"]);
+  } finally {
+    panel.dispose();
+    store.reset();
+  }
+});
+
+test("a long topic cannot eat the status ledger", () => {
+  // The head (author + topic) is room-authored and unbounded. It used to be measured as-is, so a
+  // topic wider than the row left `bodyWidth` 0 and the row was truncated from the tail — taking
+  // the ledger, the part a human acts on.
+  const row: ChatRow = { ...ledgerRow(1, Date.now(), "body"), topic: "t".repeat(200) };
+  const line = renderChatRows([row], 70, theme)[0]!;
+  const plainLine = line.replace(ANSI, "");
+  expect(visibleWidth(line)).toBe(70);
+  expect(plainLine).toContain(`looping${theme.sep.dot}next AgentB${theme.sep.dot}publish it`);
+});
+
+test("a refresh after one append does not re-project the whole log", () => {
+  const store = fixtureStore();
+  const before = __chatPaneTest.fullProjections;
+  const panel = makePanel(store);
+  try {
+    // The constructor's first projection is the full one (there is nothing to extend).
+    expect(__chatPaneTest.fullProjections).toBe(before + 1);
+    const afterOpen = __chatPaneTest.fullProjections;
+    store.append({ kind: "msg", from: "AgentA", topic: "build", body: "next" });
+    // The append's listener already refreshed; this second refresh must stay incremental too.
+    panel.refresh();
+    expect(__chatPaneTest.fullProjections).toBe(afterOpen);
+  } finally {
+    panel.dispose();
+    store.reset();
+  }
+});
+
+test("the incremental projection matches a from-scratch projection across appends and a shrink", () => {
+  const records: RoomRecord[] = [];
+  let projection = projectChatRowsIncremental(records, viewer(), 0);
+  records.push(msg(1, "line-1"));
+  projection = projectChatRowsIncremental(records, viewer(), 0, projection);
+  const stable = projection.rows[0]!;
+  for (let seq = 2; seq <= 5; seq += 1) {
+    records.push(seq === 2 ? reply(2, "line-2", "m1") : msg(seq, `line-${seq}`));
+    projection = projectChatRowsIncremental(records, viewer(), 0, projection);
+  }
+  expect(projection.rows).toEqual(projectChatRows(records, viewer(), 0));
+  // The rows already built are the SAME objects: the append projected only the new records.
+  expect(projection.rows[0]).toBe(stable);
+  // Retention (`store.records.shift()`) invalidates the watermark: a full rebuild, same answer.
+  records.shift();
+  const rebuilt = projectChatRowsIncremental(records, viewer(), 0, projection);
+  expect(rebuilt.rows).toEqual(projectChatRows(records, viewer(), 0));
+  // A prune followed by an append leaves `records.length` UNCHANGED. The length alone would miss
+  // the appended record and keep the pruned one, so the tail seq invalidates the projection too.
+  records.shift();
+  records.push(msg(6, "line-6"));
+  const afterPruneAppend = projectChatRowsIncremental(records, viewer(), 0, rebuilt);
+  expect(afterPruneAppend.rows).toEqual(projectChatRows(records, viewer(), 0));
+});
+
+test("the incremental projection re-derives only the unread flags the cursor reached", () => {
+  const records: RoomRecord[] = [msg(1, "a"), msg(2, "b"), msg(3, "c")];
+  const first = projectChatRowsIncremental(records, viewer(), 0);
+  expect(first.rows.map((row) => row.unread)).toEqual([true, true, true]);
+  const read = projectChatRowsIncremental(records, viewer(), 2, first);
+  expect(read.rows.map((row) => row.unread)).toEqual([false, false, true]);
+  expect(read.rows[0]).toBe(first.rows[0]);
+  // A viewer change re-tiers the rows, so it IS a rebuild: the rows are classified for a viewer.
+  const followed = { ...viewer(), topics: new Set(["build"]) };
+  const retiered = projectChatRowsIncremental(records, followed, 2, read);
+  expect(retiered.rows).toEqual(projectChatRows(records, followed, 2));
+  expect(retiered.rows[0]!.tier).toBe("T1");
 });

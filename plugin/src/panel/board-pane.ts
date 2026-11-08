@@ -7,7 +7,7 @@ import {
   type Theme,
   visibleWidth,
 } from "@oh-my-pi/pi-tui";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatDuration, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { ClaimRow } from "../store/schema";
 import { fitWidth } from "./chrome";
 
@@ -23,45 +23,47 @@ export type BoardRow = ClaimRow & { state: "held" | "expired" | "released" }; //
 const RESOURCE_WIDTH = 30;
 
 /**
- * The holder cell's natural width: "AgentA +2 waiting" is 17 cells.
+ * The holder cell's desired width: 17 cells. A real holder id ("AdverseLocust", 12 cells) plus its
+ * count ("+2 ", 3) is 15, and the cell is the first content column to shrink (priority 1), so a
+ * little slack costs nothing while a wider id still gets its own cells at a wide pane.
  */
 const HOLDER_WIDTH = 17;
 
 /**
- * The holder cell's FLOOR: ten cells — the shortest holder plus its waiter count AND the host's
- * ellipsis ("AgentA +2…"). The count is the part a reader acts on, and it sits at the END of the
- * cell, so the floor is what keeps it from being cut away with the word "waiting".
+ * The holder cell's FLOOR: EIGHT cells — the waiter COUNT plus a readable stub of the holder
+ * ("+2 Adve…").
+ *
+ * The count now LEADS the cell, so `alignCell`'s tail truncation cannot take it: it is the part a
+ * reader acts on (who is waiting), and the old trailing form ("AdverseLocust +2 waiting") lost it
+ * at the ten-cell floor, which is where this column sits at every real pane width. The two cells
+ * the floor gave up are the countdown's — see `COUNTDOWN_FLOOR`.
  */
-const HOLDER_FLOOR = 10;
+const HOLDER_FLOOR = 8;
 
 /**
- * The countdown cell's FLOOR: FOUR cells — "300s" is four, and 300 s is the DEFAULT lease
- * (`store/config.ts`: `claimTtlMs: 300_000`).
+ * The countdown cell's FLOOR: SIX cells — the widest string the host's own `formatDuration`
+ * (`@oh-my-pi/pi-utils`, `pi-utils/src/format.ts:10`) emits for a lease the room can hold. The
+ * host's wait card formats its remaining lease the same way (`in ${formatDuration(remainingMs)}`,
+ * `pi-tui/src/tools/task.ts:817`).
  *
- * The floor is not a nicety: the board pane is 40–55 cells wide in practice (the panel gives the
- * board 48 % of an 88–120 column terminal), while the table's natural width is ~65 — so the table
- * is ALWAYS narrower than the pane, the host's `fitWidths` ALWAYS shrinks the countdown, and the
- * countdown therefore ALWAYS sits at its floor. A floor of three renders the default lease as
- * "30…" — the host's own ellipsis — which reads about ten times too small: the user sees a 300 s
- * lease as 30 s and a claim about to expire as one with plenty of time left.
+ * A lease is capped at one day (`CLAIM_TTL_MAX_MS`, `tools/room.ts:182`), so the remaining time is
+ * at most "23h59m" — six cells; "59m59s" is the other six-cell case. The old raw-seconds form in a
+ * four-cell floor rendered 1800 s as "180…" and 86400 s as "8640…": a long lease read about ten
+ * times too small, which is exactly the misread the floor exists to prevent.
  *
- * The urgency is ALSO in the tone (warning under 25 % remaining, error once expired), so the tone
- * is not the number: the tone says "hurry", the number says how long is left, and a lease that
- * reads "30…" says the wrong thing about both.
+ * The two cells the floor grew by come out of the holder cell's floor (10 → 8), whose count now
+ * leads and so no longer needs the width that kept a tail count on screen.
  *
  * Where the ascii set's extra cells come from: the cursor column is two cells wide under ascii
  * ("->" against "➤") and the resource arrow is two cells wide too ("<-" against "⟵"). The arrow's
  * extra cell is already paid for — the resource column's natural width scales with it
  * (`RESOURCE_WIDTH + max(0, visibleWidth(theme.nav.back) - 1)`) — and the cursor's extra cell is
  * paid for by the RESOURCE column, which is the last content column to shrink (priority 3) and is
- * already being cut at these widths: at 55 cells the ascii board gives the dependency 27 of the 28
- * it needs ("build/parser <- build/schema"), the unicode board 28 of 27. So the ascii board is
- * ONE cell tighter in the resource cell than the unicode one, and the countdown keeps the digit
- * that says how long the lease has left. The holder's floor (10) is not available: it is what
- * keeps the waiter COUNT ("AgentA +2…") on screen. The state's floor (8) is not available either:
- * "released" is eight cells.
+ * already being cut at these widths: at 40 cells the ascii board gives the resource 12 of the 31
+ * it asks for, the unicode one 13 of 30. The countdown keeps its six cells at every real width,
+ * and the state's eight ("released") and the holder's eight are untouched.
  */
-const COUNTDOWN_FLOOR = 4;
+const COUNTDOWN_FLOOR = 6;
 
 /**
  * §6.4 — `cursor · resource · holder · TTL · state`, for a THEME: the widths follow the GLYPHS the
@@ -103,7 +105,8 @@ export function boardColumns(theme: Theme): readonly TableColumn[] {
     // content columns (priority 3): the dependency is the first thing a reader looks for, and it
     // is the newest thing on the board.
     { width: resourceWidth, minWidth: 12, align: "left", overflow: "truncate", priority: 3 },
-    // The holder cell carries the holder AND the waiters. Its floor keeps the COUNT.
+    // The holder cell carries the waiter count and the holder. The count LEADS, so the floor keeps
+    // it plus a stub of the name; a trailing count would be the first thing truncation ate.
     {
       width: HOLDER_WIDTH,
       minWidth: HOLDER_FLOOR,
@@ -111,10 +114,11 @@ export function boardColumns(theme: Theme): readonly TableColumn[] {
       overflow: "truncate",
       priority: 1,
     },
-    // The countdown goes first (priority 0) — but it stops at four cells, which is where "300s"
-    // still fits. Below that the TONE carries the urgency (warning under 25% remaining, error
-    // once expired), and the number would be a lie rather than a loss.
-    { width: 5, minWidth: COUNTDOWN_FLOOR, align: "right", overflow: "truncate", priority: 0 },
+    // The countdown goes first (priority 0) — but it stops at six cells, the widest string the
+    // host's duration formatter emits for a lease the room can hold ("23h59m"/"59m59s"). Below
+    // that the TONE carries the urgency (warning under 25% remaining, error once expired), and the
+    // number would be a lie rather than a loss.
+    { width: 6, minWidth: COUNTDOWN_FLOOR, align: "right", overflow: "truncate", priority: 0 },
     // The state word is never chopped: "expired" is 7 cells, "released" is 8.
     { width: 8, minWidth: 8, align: "left", overflow: "truncate", priority: 2 },
   ];
@@ -144,13 +148,23 @@ function ttlCell(
   if (leftMs <= 0) return { text: theme.format.dash, tone: "error" };
   const remaining = leftMs / Math.max(1, row.ttlMs);
   return {
-    text: `${Math.max(1, Math.round(leftMs / 1000))}s`,
+    // The host's own duration formatter, the one its wait card uses for a remaining lease
+    // (`pi-tui/src/tools/task.ts:817`; `pi-utils/src/format.ts:10`). Raw seconds rendered 1800 s
+    // as "180…" and 86400 s as "8640…" — the ten-times-too-small misread the floor prevents.
+    text: formatDuration(leftMs),
     tone: remaining < 0.25 ? "warning" : "muted", // §6.4 — escalate under 25% remaining
   };
 }
 
+/**
+ * The holder cell: the waiter COUNT leads, so the host's tail truncation cannot take it.
+ *
+ * The old form put the count at the end ("AdverseLocust +2 waiting"), and this column sits at its
+ * floor at every real pane width, so a real agent name lost the "+2" — the board's whole point is
+ * showing WHO is waiting, and the name's tail is the part that can afford to be cut.
+ */
 function holderText(row: BoardRow): string {
-  return row.waiting.length > 0 ? `${row.holder} +${row.waiting.length} waiting` : row.holder;
+  return row.waiting.length > 0 ? `+${row.waiting.length} ${row.holder}` : row.holder;
 }
 
 /**

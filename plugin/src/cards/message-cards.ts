@@ -69,22 +69,38 @@ function ageOf(timestamp: number): string {
 }
 
 /**
+ * The one-line form of a room-authored card FIELD.
+ *
+ * `safeRoomText` strips ESC and the rest of C0, but it keeps LF on purpose: a body needs its lines.
+ * A field is a single row — `from` in a status line, `prevHolder`/`reason` in detail rows these
+ * cards build themselves, where there is no `flattenForHeader` to fold a newline — so the fold
+ * happens here. The log line is untrusted (a peer, a prompt-injected model, or a repo-committed
+ * legacy `.omp-room` log wrote it), and `validateRecord` accepts any string for `from`/
+ * `prevHolder`, so a raw field would paint a real OSC sequence or split the card's frame.
+ */
+function cardField(text: string): string {
+  return safeRoomText(text).replace(/\n+/g, " ");
+}
+
+/**
  * The topic, escaped and capped. The card header is truncated to the render width, so an unbounded
  * topic would push the author and the age off the line; the cap keeps them visible. The topic is
  * free-form room text — `renderStatusLine` does not escape — so it is escaped here like every
  * other room string that reaches a surface, or a topic named `<system-reminder>…` would render raw
  * in the transcript (which a resumed session replays into an agent's context).
+ *
+ * The cap is CELLS, via the host's own truncation (`pi-tui/src/utils.ts:176`): `safe.length`
+ * counted UTF-16 units, so a 24-character CJK topic passed the cap at 48 cells and pushed the
+ * performative/reply/age off the header, and a `.slice` could cut a surrogate pair in half.
+ * `Ellipsis.Omit` is "cut, no marker" — the header is already ellipsized at the render width, and
+ * the marker would have to be paid for out of the 24 cells.
  */
 const TOPIC_MAX = 24;
 function topicOf(record: RoomRecord | undefined): string | undefined {
   if (!record || (record.kind !== "msg" && record.kind !== "note")) return undefined;
   const topic = record.topic;
   if (!topic) return undefined;
-  const safe = safeRoomText(topic);
-  // The cut marker is TEXT: a literal "…", the same character the host's own truncation paints
-  // (`Ellipsis.Unicode` is a numeric STRATEGY enum in the host, not a string, so it cannot be
-  // interpolated here).
-  return safe.length > TOPIC_MAX ? `${safe.slice(0, TOPIC_MAX - 1)}…` : safe;
+  return truncateToWidth(cardField(topic), TOPIC_MAX, Ellipsis.Omit);
 }
 
 /**
@@ -93,7 +109,7 @@ function topicOf(record: RoomRecord | undefined): string | undefined {
  */
 function performativeOf(record: RoomRecord | undefined): string | undefined {
   if (record?.kind !== "msg") return undefined;
-  return record.performative;
+  return record.performative && cardField(record.performative);
 }
 
 /**
@@ -130,7 +146,7 @@ export function renderMessageCard(
   theme: Theme,
 ): Component {
   return frameComponent(message, options, theme, (_width, expanded, record, body) => {
-    const from = record && "from" in record ? record.from : "?";
+    const from = record && "from" in record ? cardField(record.from) : "?";
     const replyTo = record?.kind === "msg" ? record.replyTo : undefined;
     const meta = [
       topicOf(record),
@@ -166,7 +182,7 @@ export function renderMentionCard(
   theme: Theme,
 ): Component {
   return frameComponent(message, options, theme, (_width, expanded, record, body) => {
-    const from = record && "from" in record ? record.from : "?";
+    const from = record && "from" in record ? cardField(record.from) : "?";
     const meta = [
       // The addressing marker is the host's own "selected" glyph (the theme's active symbol set:
       // unicode / nerd / ascii), not a hardcoded one.
@@ -204,14 +220,16 @@ export function renderClaimCard(
   theme: Theme,
 ): Component {
   return frameComponent(message, options, theme, (_width, expanded, record) => {
-    const from = record && "from" in record ? record.from : "?";
+    const from = record && "from" in record ? cardField(record.from) : "?";
     const lines = [
       renderStatusLine(
         {
           // The card's flag. The host has no "claim" symbol, so the card borrows the theme's
           // PENDING glyph — a lease in flight — and drops the hardcoded "⚑" that ignored the
-          // user's symbol set (ascii, nerd or unicode).
-          iconOverride: theme.symbol("status.pending"),
+          // user's symbol set (ascii, nerd or unicode). Styled like every other card icon:
+          // `renderStatusLine` paints `iconOverride` verbatim and only tones the `icon` enum
+          // (`pi-tui/src/render/status-line.ts:34-35`).
+          iconOverride: theme.styledSymbol("status.pending", "accent"),
           title: `room claim ${from}`,
           meta: [ageOf(message.timestamp)],
         },
@@ -221,11 +239,12 @@ export function renderClaimCard(
     if (!record || (record.kind !== "claim" && record.kind !== "release")) return lines;
     if (record.kind === "claim") {
       // The resource is "<topic>/<key>" — both free-form room text, and the status line does not
-      // escape, so it is escaped here rather than rendered raw.
+      // escape, so it is escaped here rather than rendered raw; this row is built by hand, so it
+      // also needs the newline fold `flattenForHeader` would have done.
       // The pointer is the theme's own `nav.selected` (the host has no forward-arrow key; this is
       // its pointer glyph) rather than a hardcoded "→".
       lines.push(
-        `  ${theme.fg("toolOutput", `${theme.nav.selected} ${safeRoomText(record.resource)}`)}`,
+        `  ${theme.fg("toolOutput", `${theme.nav.selected} ${cardField(record.resource)}`)}`,
       );
       if (expanded) {
         lines.push(
@@ -237,11 +256,13 @@ export function renderClaimCard(
     // The release marker is the theme's ERROR glyph (the host's "✘") — a lease that ended — and the
     // dash joining the two clauses is the theme's own `format.dash`.
     lines.push(
-      `  ${theme.fg("toolOutput", `${theme.symbol("status.error")} ${safeRoomText(record.resource)} ${theme.format.dash} ${safeRoomText(record.reason)}`)}`,
+      `  ${theme.fg("toolOutput", `${theme.symbol("status.error")} ${cardField(record.resource)} ${theme.format.dash} ${cardField(record.reason)}`)}`,
     );
     if (expanded) {
+      // `prevHolder` is free-form room text like `from` — `validateRecord` accepts any string —
+      // and this row is built by hand, so it takes the same escaping + newline fold.
       lines.push(
-        `  ${theme.fg("dim", `prev holder ${record.prevHolder}${theme.sep.dot}seq ${record.seq}`)}`,
+        `  ${theme.fg("dim", `prev holder ${cardField(record.prevHolder)}${theme.sep.dot}seq ${record.seq}`)}`,
       );
     }
     return lines;
@@ -254,25 +275,51 @@ export function renderBoardDeltaCard(
   options: MessageRenderOptions,
   theme: Theme,
 ): Component {
-  return frameComponent(message, options, theme, (_width, expanded, record) => {
+  return frameComponent(message, options, theme, (_width, expanded, record, body) => {
+    // Every name in this title is room-authored (`from`, `resource`, `holder`), so each goes
+    // through `cardField`: `renderStatusLine` escapes nothing, and it only folds CR/LF.
     const title =
       record?.kind === "gap"
         ? `room board: ${record.skipped} record(s) skipped`
         : record?.kind === "member"
-          ? `room board: ${record.from} ${record.action === "join" ? "joined" : "left"}`
+          ? `room board: ${cardField(record.from)} ${record.action === "join" ? "joined" : "left"}`
           : record?.kind === "contended"
-            ? `room board: ${record.from} lost ${record.resource} to ${record.holder}`
+            ? `room board: ${cardField(record.from)} lost ${cardField(record.resource)} to ${cardField(record.holder)}`
             : "room board";
     const lines = [
       renderStatusLine(
-        { iconOverride: theme.symbol("status.info"), title, meta: [ageOf(message.timestamp)] },
+        {
+          // Styled, for the reason the claim card's flag documents: a bare `theme.symbol` glyph is
+          // the one thing `renderStatusLine` will not tone.
+          iconOverride: theme.styledSymbol("status.info", "accent"),
+          title,
+          meta: [ageOf(message.timestamp)],
+        },
         theme,
       ),
     ];
+    // The payload's OWN lines. `notice()` sends the T0-ceiling / T1-overflow summary as
+    // `{customType:"room:board-delta", content}` with NO `details` (`tools/room.ts:376`), so there
+    // is no record to derive a title from: the card drew a bare "▦ room board" row and the notice
+    // was invisible in the TUI while the model still saw the content. Quoted and escaped through
+    // the same path a room body takes, so a payload can neither forge a harness block nor close
+    // the region it is rendered inside. A record-bearing payload is left alone: its own title
+    // already names the delta, and the content repeats it (`attention/delivery.ts:319`).
+    if (!record && body.trim())
+      lines.push(
+        ...bodyLines(body, expanded, theme, {
+          indent: "  ",
+          collapsedLines: COLLAPSED_QUOTE_LINES,
+        }),
+      );
     if (expanded && record) {
-      lines.push(`  ${theme.fg("dim", `seq ${record.seq}${theme.sep.dot}${record.kind}`)}`);
+      // `details` is cast by `recordOf` and never re-validated on resume, so the discriminant and
+      // the closed-set reason are still runtime strings here — they take the same fold as the rest.
+      lines.push(
+        `  ${theme.fg("dim", `seq ${record.seq}${theme.sep.dot}${cardField(record.kind)}`)}`,
+      );
       if (record.kind === "gap")
-        lines.push(`  ${theme.fg("toolOutput", `reason: ${record.reason}`)}`);
+        lines.push(`  ${theme.fg("toolOutput", `reason: ${cardField(record.reason)}`)}`);
     }
     return lines;
   });

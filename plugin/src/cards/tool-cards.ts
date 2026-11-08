@@ -1,7 +1,6 @@
 import type { AgentToolResult, ToolRenderResultOptions } from "@oh-my-pi/pi-coding-agent";
 import {
   type Component,
-  compact,
   Ellipsis,
   type SymbolKey,
   span,
@@ -11,7 +10,7 @@ import {
 } from "@oh-my-pi/pi-tui"; // TSP builders (native/describe)
 import { createCachedComponent } from "@oh-my-pi/pi-tui/render/render-utils";
 import { renderStatusLine } from "@oh-my-pi/pi-tui/render/status-line";
-import type { NativeToolView } from "@oh-my-pi/pi-tui/tools/renderer";
+import type { NativeToolHead, NativeToolView } from "@oh-my-pi/pi-tui/tools/renderer";
 import type { RoomParams, RoomToolDetails } from "../tools/room";
 import type { WaitForAgentDetails } from "../tools/wait-for-agent";
 import type { WaitForClaimDetails } from "../tools/wait-for-claim";
@@ -38,6 +37,19 @@ const SYMBOL_KEY = { room: "status.info", wait: "status.pending" } as const sati
   string,
   SymbolKey
 >;
+
+/**
+ * The card icon, STYLED — every host tool passes an already-styled override.
+ *
+ * `renderStatusLine` paints `iconOverride` verbatim; it only applies a tone on the `icon` ENUM
+ * path (`pi-tui/src/render/status-line.ts:34-35`). So `theme.symbol(key)` put a bare glyph on the
+ * row, and the room/wait cards were the only tool icons in the transcript with no colour at all.
+ * `theme.styledSymbol` is the host's own lookup-then-paint (`pi-tui/src/theme/theme-class.ts:527`),
+ * the one `pi-tui/src/tools/ask.ts:682` and its siblings use.
+ */
+function styledIcon(key: SymbolKey, theme: Theme): string {
+  return theme.styledSymbol(key, "accent");
+}
 
 /** One-line, ANSI-free summary of the arguments — shared by both backends. */
 function roomCallSummary(raw: unknown): string {
@@ -161,7 +173,7 @@ export function renderRoomCall(
   return card([
     renderStatusLine(
       {
-        iconOverride: theme.symbol(SYMBOL_KEY.room),
+        iconOverride: styledIcon(SYMBOL_KEY.room, theme),
         title: "Room",
         description: roomCallSummary(args),
       },
@@ -177,27 +189,55 @@ export function renderRoomResult(
   args?: unknown,
 ): Component {
   const { meta, error } = roomResultSummary(result);
-  const head = renderStatusLine(
-    {
-      iconOverride: theme.symbol(SYMBOL_KEY.room),
-      title: "Room",
-      description: args ? roomCallSummary(args) : undefined,
-      ...(error ? { badge: { label: error, color: "error" as const } } : { meta }),
-    },
-    theme,
-  );
-  const body = meta.length > 0 ? [`  ${theme.fg("dim", meta.join(theme.sep.dot))}`] : [];
-  return card([head, ...body]);
+  // ONE row: the head carries the facts, a body row carries CONTENT. The status line is the only
+  // place this card's meta is painted (`pi-tui/src/render/status-line.ts:50`), and the card used
+  // to pass `meta` there AND join the same list into a second row — so every settled card printed
+  // its facts twice.
+  return card([
+    renderStatusLine(
+      {
+        iconOverride: styledIcon(SYMBOL_KEY.room, theme),
+        title: "Room",
+        description: args ? roomCallSummary(args) : undefined,
+        ...(error ? { badge: { label: error, color: "error" as const } } : { meta }),
+      },
+      theme,
+    ),
+  ]);
+}
+
+/**
+ * The native (TSP) head data — and the ONE place a result's facts may live.
+ *
+ * The host merges a call with its result by keeping the CALL's `head` and spreading only the
+ * RESULT's `tool` over the call's (`pi-tui/src/chat/tool-execution.ts:1555-1564`, the `head:` line
+ * at `:1557` and the `tool:` spread at `:1556`). A count put in `head` — where these describe hooks
+ * used to put it — was discarded the moment the result landed, so the settled card read exactly
+ * like the pending one. `tool.meta` survives the spread, and the fallback card derives its spans
+ * from `tool` when `head` is absent (`:1440-1451`), so the facts reach both native hosts.
+ */
+function nativeTool(
+  title: string,
+  target: string | undefined,
+  meta: readonly string[] = [],
+  error?: string,
+): NativeToolHead {
+  return {
+    title,
+    ...(target !== undefined ? { target } : {}),
+    targetKind: "command",
+    ...(meta.length > 0 ? { meta } : {}),
+    // A one-word state note: the host draws it beside the head in BOTH native layouts
+    // (`pi-tui/src/chat/tool-execution.ts:1422`, `:1454-1459`).
+    ...(error ? { note: error } : {}),
+  };
 }
 
 export function describeRoomCall(
   args: unknown,
   _options: ToolRenderResultOptions,
 ): NativeToolView | undefined {
-  return {
-    tool: { title: "Room", target: roomCallSummary(args), targetKind: "command" },
-    head: toolHeadSpans("Room", roomCallSummary(args)),
-  };
+  return { tool: nativeTool("Room", roomCallSummary(args)) };
 }
 
 export function describeRoomResult(
@@ -207,7 +247,7 @@ export function describeRoomResult(
 ): NativeToolView | undefined {
   const { meta, error } = roomResultSummary(result);
   return {
-    head: toolHeadSpans("Room", args ? roomCallSummary(args) : undefined, ...meta),
+    tool: nativeTool("Room", args ? roomCallSummary(args) : undefined, meta, error),
     tone: error ? "error" : "neutral",
     body: error ? [text([span(error, "error")], { wrap: "word" })] : [],
   };
@@ -225,7 +265,7 @@ export function renderWaitCall(
   return card([
     renderStatusLine(
       {
-        iconOverride: theme.symbol(SYMBOL_KEY.wait),
+        iconOverride: styledIcon(SYMBOL_KEY.wait, theme),
         title: "Wait",
         description: waitCallSummary(args),
       },
@@ -241,24 +281,25 @@ export function renderWaitResult(
   args?: unknown,
 ): Component {
   const { meta, error } = waitResultSummary(result.details);
-  const head = renderStatusLine(
-    {
-      iconOverride: theme.symbol(SYMBOL_KEY.wait),
-      title: "Wait",
-      description: args ? waitCallSummary(args) : undefined,
-      ...(error ? { badge: { label: error, color: "error" as const } } : { meta }),
-    },
-    theme,
-  );
-  const body = meta.length > 0 ? [`  ${theme.fg("dim", meta.join(theme.sep.dot))}`] : [];
-  return card([head, ...body]);
+  // One row, for the reason renderRoomResult documents: head-only meta, never a second copy.
+  return card([
+    renderStatusLine(
+      {
+        iconOverride: styledIcon(SYMBOL_KEY.wait, theme),
+        title: "Wait",
+        description: args ? waitCallSummary(args) : undefined,
+        ...(error ? { badge: { label: error, color: "error" as const } } : { meta }),
+      },
+      theme,
+    ),
+  ]);
 }
 
 export function describeWaitCall(
   args: unknown,
   _options: ToolRenderResultOptions,
 ): NativeToolView | undefined {
-  return { head: toolHeadSpans("Wait", waitCallSummary(args)) };
+  return { tool: nativeTool("Wait", waitCallSummary(args)) };
 }
 
 export function describeWaitResult(
@@ -268,18 +309,8 @@ export function describeWaitResult(
 ): NativeToolView | undefined {
   const { meta, error } = waitResultSummary(result.details);
   return {
-    head: toolHeadSpans("Wait", args ? waitCallSummary(args) : undefined, ...meta),
+    tool: nativeTool("Wait", args ? waitCallSummary(args) : undefined, meta, error),
     tone: error ? "error" : "neutral",
     body: error ? [text([span(error, "error")], { wrap: "word" })] : [],
   };
-}
-
-/** The card head spans: a bold title plus dim details (`compact` drops the empty ones). */
-function toolHeadSpans(title: string, ...details: readonly (string | undefined)[]) {
-  return compact([
-    span(title, "toolTitle strong"),
-    ...details
-      .filter((detail): detail is string => !!detail)
-      .map((detail) => span(` ${detail}`, "muted")),
-  ]);
 }

@@ -20,7 +20,12 @@ import { type MemberState, type RoomStore, roomStoreFor } from "../store/room-st
 import type { ClaimRow } from "../store/schema";
 import { appendedSince, notifyRecipients } from "../tools/room";
 import { type BoardRow, createBoardPane, sortBoardRows } from "./board-pane";
-import { type ChatRow, createChatPane, projectChatRows } from "./chat-pane";
+import {
+  type ChatProjection,
+  type ChatRow,
+  createChatPane,
+  projectChatRowsIncremental,
+} from "./chat-pane";
 import { FrameChrome } from "./chrome";
 import {
   adoptHostTheme,
@@ -63,7 +68,7 @@ export const PANEL_SPLIT_AT = 88; // §6.2
  *
  * The two panes have different natural widths, and the ratio has to respect them: the chat row's
  * head is ~30 cells (cursor, unread, badge, clock, author, topic) before its body starts, and the
- * board's row wants ~55 (cursor + "build/parser ⟵ build/schema" + "AgentA +2 waiting" + the
+ * board's row wants ~62 (cursor + "build/parser ⟵ build/schema" + "+2 AdverseLocust" + the
  * countdown + the state). At the old 0.62 the board got 38% of the split — 31–43 cells at 88–120
  * columns — so every one of its columns was shrunk on every frame and the dependency the board
  * exists to show was cut to a stub. 0.52 gives the board its 55 cells at 120 columns, and still
@@ -125,9 +130,26 @@ export class RoomPanel implements Component {
   // The chat cursor starts on the NEWEST row (the pane shows the tail of the log, so row 0 would
   // be off-window and the marker invisible).
   #chatSelected = Number.MAX_SAFE_INTEGER;
+  /**
+   * §6.3 — the pane is FOLLOWING the tail: set on open, on `G`/bottom, and whenever the cursor is
+   * moved back onto the newest row; cleared by `k`/`up`/`g`/top. While it is set the window is
+   * always `rows.length - size` and the selection tracks the newest row. Without it the first
+   * clamp pinned the selection to the then-last row, which fell `size` rows behind the log, the
+   * pane's `selected < start` branch pinned the window to that stale row, and a live room stopped
+   * moving after exactly `size` new records.
+   */
+  #chatFollow = true;
   #boardSelected = 0;
+  /**
+   * The RESOURCE of the board row under the cursor, so the selection survives a re-sort. The board
+   * is rebuilt and re-sorted on every refresh (a release moves its row to the bottom, and a
+   * release above the cursor slides every row below it up), so an index kept across a refresh
+   * pointed at a different claim — and a second `r` released a claim the user never selected.
+   */
+  #boardAnchor: string | undefined;
   #focus: "chat" | "board" = "chat";
-  #narrowOpen = false;
+  /** §6.8 — the incremental chat projection; `undefined` forces the first full one. */
+  #projection: ChatProjection | undefined;
   #disposed = false;
   #offStore: (() => void) | undefined;
   #offRegistry: (() => void) | undefined;
@@ -151,6 +173,7 @@ export class RoomPanel implements Component {
         0,
         this.#options.theme,
         () => this.#chatSelected,
+        () => this.#chatFollow,
       ),
       right: createBoardPane(
         () => this.#board,
@@ -205,11 +228,16 @@ export class RoomPanel implements Component {
   refresh(): void {
     if (this.#disposed) return;
     const store = this.#options.store;
-    this.#rows = projectChatRows(
+    // §6.8 — incremental: an append projects only the appended records, and a cursor advance only
+    // re-flags the rows it reached. A full rebuild is the retention/viewer-change path inside.
+    const projection = projectChatRowsIncremental(
       store.records,
       this.#viewer(store),
       cursorFor(store, this.#options.selfId),
+      this.#projection,
     );
+    this.#projection = projection;
+    this.#rows = projection.rows;
     this.#board = this.#projectBoard(store);
     this.#roster = this.#registry.list();
     this.#clampSelection();
@@ -224,7 +252,10 @@ export class RoomPanel implements Component {
     // use the previous width's mode).
     const geometry = this.#split.measure(width);
     const narrow = geometry.mode !== "split";
-    this.#split.setNarrowPane(this.#narrowOpen && narrow ? "right" : "left");
+    // One source of truth: the narrow layout renders the FOCUSED pane. `tab` moves the focus (see
+    // `handleInput`), so the pane the keys act on and the pane on screen can never disagree — the
+    // old separate `#narrowOpen` let `tab` show the board while `r` still addressed the chat.
+    this.#split.setNarrowPane(narrow && this.#focus === "board" ? "right" : "left");
     const chatWidth = narrow ? 0 : (geometry.left?.width ?? 0);
     const title = this.#titleFor(narrow, width, chatWidth);
     this.#chrome.update(width, title, chatWidth, HINTS, this.#options.theme);
@@ -247,7 +278,12 @@ export class RoomPanel implements Component {
         this.#options.done();
         return true;
       case "toggle-narrow":
-        this.#narrowOpen = !this.#narrowOpen;
+        // One source of truth: the narrow layout renders the FOCUSED pane, so `tab` moves the
+        // focus — and with it the visible pane. A separate `#narrowOpen` let the two disagree: tab
+        // to the board left the focus on chat, so `r` did nothing on the visible board; and `2`
+        // then tab left the focus on board while the chat was rendered, so `r` released a claim
+        // the user could not see.
+        this.#focus = this.#focus === "chat" ? "board" : "chat";
         break;
       case "down":
         this.#moveSelection(1);
@@ -256,9 +292,13 @@ export class RoomPanel implements Component {
         this.#moveSelection(-1);
         break;
       case "top":
+        // Scrolling away from the tail drops follow mode; the window then follows the selection.
+        if (this.#focus === "chat") this.#chatFollow = false;
         this.#setSelection(0);
         break;
       case "bottom":
+        // `G`/bottom re-enters follow mode: the newest row is where the tail lives.
+        if (this.#focus === "chat") this.#chatFollow = true;
         this.#setSelection(Number.MAX_SAFE_INTEGER);
         break;
       case "focus-chat":
@@ -270,7 +310,9 @@ export class RoomPanel implements Component {
       case "release-claim": {
         // The board is the only pane with claims: `r` acts on the BOARD's own selection, and only
         // while the board has the focus. In chat focus it releases nothing — the user has not
-        // selected a claim, and the old shared index released an arbitrary one.
+        // selected a claim, and the old shared index released an arbitrary one. In the narrow
+        // layout the rendered pane IS the focused one (`render`/`toggle-narrow`), so "focused"
+        // and "visible" cannot disagree here.
         if (this.#focus !== "board") break;
         const row = this.#boardAt(this.#boardSelected);
         // An ended claim (expired or already released) is on the board for context, not to be
@@ -373,8 +415,31 @@ export class RoomPanel implements Component {
   }
 
   #clampSelection(): void {
+    // While following, the selection IS the newest row: clamping alone never moves it forward, so
+    // the cursor would fall behind the log and take the window with it.
+    if (this.#chatFollow) this.#chatSelected = Number.MAX_SAFE_INTEGER;
     this.#chatSelected = this.#clamp(this.#chatSelected, this.#rows.length);
-    this.#boardSelected = this.#clamp(this.#boardSelected, this.#board.length);
+    this.#settleBoardSelection();
+  }
+
+  /**
+   * §6.4 — the board selection is anchored to the row's RESOURCE and its INDEX is re-derived after
+   * every projection.
+   *
+   * A release (by anyone) re-sorts the board: the released row moves to the bottom and every row
+   * below the cursor slides up, so an index kept across the refresh pointed at a claim the user
+   * never selected — and a second `r` released it.
+   */
+  #settleBoardSelection(): void {
+    const ordered = sortBoardRows(this.#board);
+    if (this.#boardAnchor !== undefined) {
+      const index = ordered.findIndex((row) => row.resource === this.#boardAnchor);
+      if (index >= 0) this.#boardSelected = index;
+    }
+    // The resource is gone (older than the released tail, or a reset): the clamped index is the
+    // documented fallback, and the anchor becomes whatever row is under it now.
+    this.#boardSelected = this.#clamp(this.#boardSelected, ordered.length);
+    this.#boardAnchor = ordered[this.#boardSelected]?.resource;
   }
 
   #clamp(value: number, count: number): number {
@@ -386,13 +451,27 @@ export class RoomPanel implements Component {
 
   /** The focused pane's selection moves; the other pane keeps its own. */
   #moveSelection(delta: number): void {
-    if (this.#focus === "chat") this.#chatSelected += delta;
-    else this.#boardSelected += delta;
+    if (this.#focus === "board") {
+      this.#boardSelected += delta;
+      // The INDEX is authoritative while the user moves: clearing the anchor keeps the settle from
+      // pulling the cursor back to the row it was anchored to before the move.
+      this.#boardAnchor = undefined;
+      return;
+    }
+    this.#chatSelected = this.#clamp(this.#chatSelected + delta, this.#rows.length);
+    // Follow mode IS "the cursor sits on the newest row": moving up leaves it, and moving back
+    // down onto the newest row re-enters it. Without the re-entry, `k` then `j` back to the tail
+    // would leave follow off and the view would freeze again on the next append.
+    this.#chatFollow = this.#chatSelected >= this.#rows.length - 1;
   }
 
   #setSelection(value: number): void {
-    if (this.#focus === "chat") this.#chatSelected = value;
-    else this.#boardSelected = value;
+    if (this.#focus === "chat") {
+      this.#chatSelected = value;
+      return;
+    }
+    this.#boardSelected = value;
+    this.#boardAnchor = undefined;
   }
 
   /**
@@ -420,14 +499,15 @@ export class RoomPanel implements Component {
    */
   #titleFor(narrow: boolean, width: number, chatWidth: number): string {
     // The focused pane is marked: `1`/`2` used to change nothing on screen, so the key looked
-    // broken. In the narrow layout only one pane is visible, so the mark names the visible one.
+    // broken. In the narrow layout only one pane is visible, and it is the FOCUSED one (`tab`
+    // moves the focus), so the mark names the pane on screen.
     //
     // The "|" between the two pane names is TEXT, not a glyph: it is a literal ASCII pipe inside a
     // bracketed label, and the theme's own pipe separator (`sep.pipe`) carries flanking spaces
     // (" │ "), which would change the label's shape and the title's cell budget. Everything else
     // in the title — the dots, the roster's status glyphs, the "…" — comes from the theme.
     const pane = narrow
-      ? this.#narrowOpen
+      ? this.#focus === "board"
         ? "[board]"
         : "[chat]"
       : this.#focus === "chat"
