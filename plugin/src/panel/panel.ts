@@ -1,4 +1,9 @@
-import type { AgentRef, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import type {
+  AgentRef,
+  ExtensionAPI,
+  ExtensionContext,
+  ShortcutConflict,
+} from "@oh-my-pi/pi-coding-agent";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent";
 import {
   type Component,
@@ -643,5 +648,29 @@ export function registerPanel(pi: ExtensionAPI): void {
     handler: async (ctx: ExtensionContext) => {
       await openRoomPanel(pi, ctx);
     },
+  });
+  // 18.17.0 — a chord's LAST registration wins and a reserved chord is dropped entirely, so a
+  // `--room-panel-key` that collides with the user's own keymap never opens this panel. The host
+  // cannot tell us at factory time (`getShortcutConflict` throws while extensions load, host doc
+  // at types.ts:2011), so the check runs on the first turn and says so instead of leaving the user
+  // with a shortcut that silently does nothing.
+  pi.on("session_start", (_event, ctx: ExtensionContext) => {
+    let conflict: ShortcutConflict | undefined;
+    try {
+      conflict = pi.getShortcutConflict(key as Parameters<typeof pi.getShortcutConflict>[0]);
+    } catch {
+      return; // still loading: nothing meaningful to report yet
+    }
+    if (conflict === undefined) return;
+    const holder =
+      conflict.kind === "reserved"
+        ? "omp reserves it"
+        : conflict.kind === "extension"
+          ? `${conflict.extensionPath} already uses it`
+          : `${conflict.keybindings.join(", ")} is bound to it`;
+    const message = `room panel shortcut ${key} is unavailable (${holder}) — set another --room-panel-key`;
+    // Both surfaces: the log for a later `/debug`, the UI for the person who set the flag.
+    pi.logger.warn(message);
+    ctx.ui?.notify?.(message, "warning");
   });
 }

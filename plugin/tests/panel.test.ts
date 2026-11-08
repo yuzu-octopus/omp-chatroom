@@ -550,8 +550,67 @@ test("registerPanel registers the shortcut only when the flag is set", async () 
   for (const close of closers) close();
 });
 
-// --- /room command wiring -------------------------------------------------
+test("registerPanel warns when the configured chord is already held", async () => {
+  // 18.17.0 — the host binds the LAST registration of a chord and DROPS a reserved one, so a
+  // `--room-panel-key` the user's keymap already uses can never open the panel. `getShortcutConflict`
+  // throws while extensions load (host doc, types.ts:2011), so the check runs in the session_start
+  // handler — and it must REPORT, in both surfaces, instead of leaving a dead shortcut.
+  const starts: Array<(event: unknown, ctx: ExtensionContext) => void> = [];
+  const warnings: string[] = [];
+  const notified: string[] = [];
+  const pi = {
+    on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => void) => {
+      if (event === "session_start") starts.push(handler);
+    },
+    getFlag: () => "ctrl-r",
+    registerShortcut: () => {},
+    getShortcutConflict: () => ({ kind: "keybinding", keybindings: ["app.message.followUp"] }),
+    logger: { warn: (message: string) => warnings.push(message) },
+  } as unknown as ExtensionAPI;
+  registerPanel(pi);
+  expect(starts).toHaveLength(1);
+  const ctx = {
+    ui: { notify: (message: string) => notified.push(message) },
+  } as unknown as ExtensionContext;
+  starts[0]!({}, ctx);
+  expect(warnings).toHaveLength(1);
+  expect(warnings[0]).toContain("ctrl-r");
+  expect(warnings[0]).toContain("app.message.followUp");
+  expect(warnings[0]).toContain("--room-panel-key");
+  expect(notified).toEqual(warnings);
+});
 
+test("registerPanel stays quiet when the chord is free or the check still throws", () => {
+  const run = (conflict: () => unknown): { warnings: string[]; notified: string[] } => {
+    const warnings: string[] = [];
+    const notified: string[] = [];
+    const starts: Array<(event: unknown, ctx: ExtensionContext) => void> = [];
+    const pi = {
+      on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => void) => {
+        if (event === "session_start") starts.push(handler);
+      },
+      getFlag: () => "ctrl-r",
+      registerShortcut: () => {},
+      getShortcutConflict: conflict,
+      logger: { warn: (message: string) => warnings.push(message) },
+    } as unknown as ExtensionAPI;
+    registerPanel(pi);
+    starts[0]!({}, {
+      ui: { notify: (m: string) => notified.push(m) },
+    } as unknown as ExtensionContext);
+    return { warnings, notified };
+  };
+  // Free chord.
+  expect(run(() => undefined)).toEqual({ warnings: [], notified: [] });
+  // The host throws while extensions are loading: silence, not a crash in the handler.
+  expect(
+    run(() => {
+      throw new Error("still loading");
+    }),
+  ).toEqual({ warnings: [], notified: [] });
+});
+
+// --- /room command wiring -------------------------------------------------
 /** The command's registered handler, captured from a structural `pi`. */
 function captureRoomHandler(): (args: string, ctx: ExtensionContext) => Promise<void> {
   let handler: ((args: string, ctx: ExtensionContext) => Promise<void>) | undefined;
