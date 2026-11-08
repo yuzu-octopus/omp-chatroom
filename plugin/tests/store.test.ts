@@ -909,6 +909,69 @@ test("a stale lock from a dead pid is reaped, not fatal", () => {
   releaseRoomLock(root);
 });
 
+test("a lock carrying our OWN pid is named a thread, not another session", () => {
+  // 18.17.0 — worker-thread subagents share the process pid, so a lock file that still carries it
+  // while THIS thread holds no lock means another thread owns the room. Saying "locked by pid N"
+  // there points the agent at itself; the message must name the topology and the setting that
+  // fixes it (or the agent retries forever against a room it can never join).
+  const root = tempRoot();
+  fs.mkdirSync(`${root}/room`, { recursive: true });
+  fs.writeFileSync(lockPathFor(root), String(process.pid)); // "another thread" holds it
+  let message = "";
+  try {
+    acquireRoomLock(root);
+  } catch (error) {
+    message = (error as Error).message;
+  }
+  expect(message).toContain("another thread of this process");
+  expect(message).toContain("task.workerThreads: 0");
+  expect(message).not.toMatch(/locked by pid/);
+});
+
+test("a real worker thread is detected and refused with the fixing setting", async () => {
+  // The probe is the runtime's own `isMainThread`, and the refusal is what a worker-thread agent
+  // actually sees. Both are checked inside a REAL worker: a seam would prove nothing about a
+  // module graph that Bun builds, and the room depends on exactly that boundary.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "room-worker-"));
+  const logModule = new URL("../src/store/log.ts", import.meta.url).pathname;
+  const storeModule = new URL("../src/store/room-store.ts", import.meta.url).pathname;
+  const entry = path.join(dir, "probe.ts");
+  fs.writeFileSync(
+    entry,
+    `
+    import { parentPort } from "node:worker_threads";
+    import { isWorkerThread, WORKER_THREAD_REFUSAL } from ${JSON.stringify(logModule)};
+    import { roomStoreFor } from ${JSON.stringify(storeModule)};
+    let refusal = "";
+    try {
+      roomStoreFor({
+        cwd: ${JSON.stringify(dir)},
+        agent: { id: "WorkerA", kind: "sub" },
+        getArtifactsDir: () => ${JSON.stringify(dir)},
+        getSessionId: () => "worker-a",
+      } as never);
+    } catch (error) {
+      refusal = (error as Error).message;
+    }
+    parentPort?.postMessage({ worker: isWorkerThread(), refusal, expected: WORKER_THREAD_REFUSAL });
+    `,
+  );
+  const { Worker } = await import("node:worker_threads");
+  const result = await new Promise<{ worker: boolean; refusal: string; expected: string }>(
+    (resolve) => {
+      const worker = new Worker(entry);
+      worker.on("message", (message: unknown) =>
+        resolve(message as { worker: boolean; refusal: string; expected: string }),
+      );
+      worker.on("error", (error: Error) =>
+        resolve({ worker: false, refusal: `worker error: ${error.message}`, expected: "" }),
+      );
+    },
+  );
+  expect(result.worker).toBe(true);
+  expect(result.refusal).toBe(result.expected);
+}, 30_000); // a real worker boots its own module graph; the 5s default is not enough under a full-suite run
+
 test("releaseRoomLock never unlinks another owner's lock", () => {
   const root = tempRoot();
   fs.mkdirSync(`${root}/room`, { recursive: true });

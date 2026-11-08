@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import { isMainThread } from "node:worker_threads";
 import { globalMap } from "../globals";
 import { logPathFor, newMessageId } from "../ids";
 import { type RecordKind, type RoomRecord, STATUS_KEYS, type StatusObject } from "./schema";
@@ -31,6 +32,35 @@ interface LockHold {
 const HOLDS = globalMap<string, LockHold>("__roomLockHolds");
 
 /**
+ * Whether this code is running inside a host worker thread.
+ *
+ * 18.17.0 put concurrent subagents on worker threads (`task.workerThreads`, default 4, from the
+ * 9th concurrent run) so they stop competing with the TUI. A worker has its own module graph, so
+ * the room's per-process singletons — the open log fd, the hydrated claim map, the cursors — are
+ * a DIFFERENT instance there, and the pid-based lock below cannot tell the two apart: it reads
+ * its own pid back and refuses as if a stranger held the room. A room is per-process by
+ * construction, so the honest answer in a worker is a refusal that names the fix, not a
+ * "locked by pid" that points at the caller itself.
+ */
+export function isWorkerThread(): boolean {
+  // `isMainThread` is the runtime's own answer, not a guess from `process.pid` — a worker SHARES
+  // the pid, which is exactly why the lock check below cannot tell the two apart.
+  return !isMainThread;
+}
+
+/**
+ * The refusal a worker-thread agent gets, with the setting that fixes it.
+ *
+ * Host default `task.workerThreads` is 4 and the pool starts using workers at the 9th concurrent
+ * subagent, so this is reachable by a large swarm — the exact case the room exists for — and it
+ * must be actionable rather than cryptic.
+ */
+export const WORKER_THREAD_REFUSAL =
+  "room is per-process: this agent runs on a host worker thread, which has its own room state. " +
+  "Set `task.workerThreads: 0` (or keep fewer than 9 concurrent subagents) to run the swarm " +
+  "in-process, where the room is shared.";
+
+/**
  * Cross-process single-writer lock (plan 017 followup). Two omp processes on one project root
  * would mint colliding seqs and never see each other's records (proven: 10 duplicate seqs over
  * 40 records with a rendezvous probe) — silent divergence, not an error. The lock makes the
@@ -59,9 +89,22 @@ export function acquireRoomLock(root: string): void {
   if (Number.isInteger(owner) && owner > 0) {
     try {
       process.kill(owner, 0); // liveness check only — no signal sent
+      // The pid is alive. If it is OUR pid but we hold no lock on this root, the holder is another
+      // thread of this process (18.17.0 worker-thread subagents): a room is per-process, so this
+      // is a topology refusal, not another omp session.
+      if (owner === process.pid && !HOLDS.has(root)) {
+        throw new Error(
+          `room is per-process and another thread of this process holds it (pid ${owner}); ` +
+            WORKER_THREAD_REFUSAL,
+        );
+      }
       throw new Error(`room file locked by pid ${owner}`);
     } catch (error) {
-      if (error instanceof Error && error.message.startsWith("room file locked by pid"))
+      if (
+        error instanceof Error &&
+        (error.message.startsWith("room file locked by pid") ||
+          error.message.startsWith("room is per-process"))
+      )
         throw error;
       // ESRCH: owner dead → stale lock, fall through and reap it.
     }

@@ -7,7 +7,14 @@ import { type ClaimState, expireStale, hydrateClaims } from "./claims";
 import { startCompactor, stopCompactor } from "./compactor";
 import { loadRoomConfig, type RoomConfig, resolveRoomId } from "./config";
 import { forgetDeliveredT0 } from "./cursors";
-import { appendLine, closeRoomLog, openRoomLog, replay } from "./log";
+import {
+  appendLine,
+  closeRoomLog,
+  isWorkerThread,
+  openRoomLog,
+  replay,
+  WORKER_THREAD_REFUSAL,
+} from "./log";
 import { legacyRoomRoot, openMigratedRoom, roomRootFor } from "./room-root";
 import type { RoomRecord, RoomRecordDraft } from "./schema";
 import { invalidateTree } from "./tree-store";
@@ -283,6 +290,10 @@ function rootOf(ctx: ExtensionContext): string {
 }
 
 export function roomStoreFor(ctx: ExtensionContext): RoomStore {
+  if (isWorkerThread()) throw new Error(WORKER_THREAD_REFUSAL);
+  // Topology guard, before any file work: a host worker thread has its own module graph, so this
+  // process-level room is not the one its peers are in. Refusing with the fix beats handing the
+  // agent a `locked by pid <its own pid>` it cannot act on.
   // [invented] R10
   const root = rootOf(ctx);
   const agentId = ctx.agent.id;
