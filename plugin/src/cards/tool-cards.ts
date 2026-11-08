@@ -40,7 +40,10 @@ const SYMBOL_KEY = { room: "status.info", wait: "status.pending" } as const sati
 >;
 
 /** One-line, ANSI-free summary of the arguments — shared by both backends. */
-function roomCallSummary(args: RoomParams): string {
+function roomCallSummary(raw: unknown): string {
+  // Narrowed here, not in the signature: the hook receives raw pre-validation args, and Bun's
+  // checker resolves the host's `Static<TParams>` for a runtime schema stub to `unknown`.
+  const args = (raw ?? {}) as RoomParams;
   const target =
     args.op === "claim" || args.op === "release"
       ? [args.topic, args.key].filter(Boolean).join("/")
@@ -50,7 +53,16 @@ function roomCallSummary(args: RoomParams): string {
     .join(" ");
 }
 
-function waitCallSummary(args: Record<string, unknown>): string {
+/**
+ * The call's one-line summary, from the RAW args the host hands a renderer.
+ *
+ * `unknown`, not `Record<string, unknown>`: a render hook receives pre-validation arguments (the
+ * host documents `lenientArgValidation` and passes raw values), and Bun's checker resolves the
+ * generic `Static<TParams>` for the runtime schema stub to `unknown`, so a narrower parameter
+ * would not be assignable to the hook it is registered as. Narrowing happens here instead.
+ */
+function waitCallSummary(raw: unknown): string {
+  const args = (raw ?? {}) as Record<string, unknown>;
   const timeout =
     typeof args.timeout === "number" ? `timeout ${Math.round(args.timeout / 1000)}s` : undefined;
   if (Array.isArray(args.agents))
@@ -142,7 +154,7 @@ function card(lines: readonly string[]): Component {
 }
 
 export function renderRoomCall(
-  args: RoomParams,
+  args: unknown,
   _options: ToolRenderResultOptions,
   theme: Theme,
 ): Component {
@@ -162,7 +174,7 @@ export function renderRoomResult(
   result: AgentToolResult<RoomToolDetails>,
   _options: ToolRenderResultOptions,
   theme: Theme,
-  args?: RoomParams,
+  args?: unknown,
 ): Component {
   const { meta, error } = roomResultSummary(result);
   const head = renderStatusLine(
@@ -179,7 +191,7 @@ export function renderRoomResult(
 }
 
 export function describeRoomCall(
-  args: RoomParams,
+  args: unknown,
   _options: ToolRenderResultOptions,
 ): NativeToolView | undefined {
   return {
@@ -191,7 +203,7 @@ export function describeRoomCall(
 export function describeRoomResult(
   result: AgentToolResult<RoomToolDetails>,
   _options: ToolRenderResultOptions,
-  args?: RoomParams,
+  args?: unknown,
 ): NativeToolView | undefined {
   const { meta, error } = roomResultSummary(result);
   return {
@@ -206,7 +218,7 @@ export function describeRoomResult(
 export type WaitDetails = WaitForAgentDetails | WaitForMessageDetails | WaitForClaimDetails; // [invented]
 
 export function renderWaitCall(
-  args: Record<string, unknown>,
+  args: unknown,
   _options: ToolRenderResultOptions,
   theme: Theme,
 ): Component {
@@ -226,7 +238,7 @@ export function renderWaitResult(
   result: AgentToolResult<WaitDetails>,
   _options: ToolRenderResultOptions,
   theme: Theme,
-  args?: Record<string, unknown>,
+  args?: unknown,
 ): Component {
   const { meta, error } = waitResultSummary(result.details);
   const head = renderStatusLine(
@@ -243,7 +255,7 @@ export function renderWaitResult(
 }
 
 export function describeWaitCall(
-  args: Record<string, unknown>,
+  args: unknown,
   _options: ToolRenderResultOptions,
 ): NativeToolView | undefined {
   return { head: toolHeadSpans("Wait", waitCallSummary(args)) };
@@ -252,7 +264,7 @@ export function describeWaitCall(
 export function describeWaitResult(
   result: AgentToolResult<WaitDetails>,
   _options: ToolRenderResultOptions,
-  args?: Record<string, unknown>,
+  args?: unknown,
 ): NativeToolView | undefined {
   const { meta, error } = waitResultSummary(result.details);
   return {

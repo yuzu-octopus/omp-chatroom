@@ -24,6 +24,7 @@ import {
   renderRoomResult,
 } from "../cards/tool-cards";
 import { globalMap } from "../globals";
+import { hostSchema } from "../host-schema";
 import { buildDigest, DIGEST_CLAIMS_CAP, ROSTER_CAP } from "../onboarding/digest";
 import { safeRoomText } from "../onboarding/escape";
 import { contended, grant, reclaimIfStale, release, renew, staleGen } from "../store/claims";
@@ -772,7 +773,7 @@ export function registerRoomTool(pi: ExtensionAPI): void {
     name: ROOM_TOOL_NAME,
     label: "Room",
     description: prompt.render(ROOM_DESCRIPTION),
-    parameters: params,
+    parameters: hostSchema(params),
     loadMode: ROOM_LOAD_MODE,
     approval: "read",
     strict: true,
@@ -780,7 +781,16 @@ export function registerRoomTool(pi: ExtensionAPI): void {
     renderResult: renderRoomResult,
     describeCall: describeRoomCall,
     describeResult: describeRoomResult,
-    async execute(_toolCallId, p, _signal, _onUpdate, ctx): Promise<RoomToolResult> {
+    async execute(
+      _toolCallId,
+      // 18.18.1 / Bun's checker: `Static<TParams>` collapses to `unknown` when the schema is the
+      // runtime stub, so the param type is stated here rather than inferred through the host
+      // generic; `RoomParams` is the same shape the zod schema validates.
+      p: RoomParams,
+      _signal,
+      _onUpdate,
+      ctx,
+    ): Promise<RoomToolResult> {
       // U6 — a missing/unwritable/corrupt room file returns a normal result, never a throw.
       let store: RoomStore;
       try {

@@ -1,3 +1,4 @@
+import type { TSchema } from "@oh-my-pi/pi-ai";
 import {
   AgentRegistry,
   type AgentToolResult,
@@ -18,6 +19,7 @@ import {
   renderWaitCall,
   renderWaitResult,
 } from "../cards/tool-cards";
+import { hostSchema } from "../host-schema";
 import { type RoomStore, roomStoreFor } from "../store/room-store";
 import { clearWaitEdges, findWaitCycle, setWaitEdges } from "../store/wait-graph";
 import type { WaitOutcome } from "./wait-for-claim"; // K11 — declared once, there
@@ -301,7 +303,7 @@ export function registerWaitForAgent(pi: ExtensionAPI): void {
     name: WAIT_FOR_AGENT_NAME,
     label: "Wait for agent",
     description: WAIT_FOR_AGENT_DESCRIPTION,
-    parameters: params,
+    parameters: hostSchema(params),
     loadMode: "essential",
     approval: "read",
     strict: true,
@@ -325,7 +327,7 @@ export function registerWaitForAgent(pi: ExtensionAPI): void {
     renderResult: renderWaitResult,
     describeCall: describeWaitCall,
     describeResult: describeWaitResult,
-  } satisfies ToolDefinition<typeof params, WaitForAgentDetails> & {
+  } satisfies ToolDefinition<TSchema, WaitForAgentDetails> & {
     interruptible: boolean;
     handlesToolInterrupt: boolean;
   };

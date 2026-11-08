@@ -1,3 +1,4 @@
+import type { TSchema } from "@oh-my-pi/pi-ai";
 import type {
   AgentToolResult,
   AgentToolUpdateCallback,
@@ -5,6 +6,7 @@ import type {
   ExtensionContext,
   ToolDefinition,
 } from "@oh-my-pi/pi-coding-agent";
+import { hostSchema } from "../host-schema";
 import { safeRoomText } from "../onboarding/escape";
 import {
   type ClaimState,
@@ -271,7 +273,7 @@ export function registerWaitForClaim(pi: ExtensionAPI): void {
     name: WAIT_FOR_CLAIM_NAME,
     label: "Wait for claim",
     description: WAIT_FOR_CLAIM_DESCRIPTION,
-    parameters: params,
+    parameters: hostSchema(params),
     loadMode: "essential",
     approval: "read",
     strict: true,
@@ -287,7 +289,7 @@ export function registerWaitForClaim(pi: ExtensionAPI): void {
     ): Promise<WaitForClaimResult> {
       return await waitForClaim(pi, ctx, p, signal);
     },
-  } satisfies ToolDefinition<typeof params, WaitForClaimDetails> & { interruptible: boolean };
+  } satisfies ToolDefinition<TSchema, WaitForClaimDetails> & { interruptible: boolean };
 
   pi.registerTool(tool);
 }

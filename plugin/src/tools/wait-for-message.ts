@@ -1,3 +1,4 @@
+import type { TSchema } from "@oh-my-pi/pi-ai";
 import type {
   AgentToolResult,
   AgentToolUpdateCallback,
@@ -11,6 +12,7 @@ import {
   renderWaitCall,
   renderWaitResult,
 } from "../cards/tool-cards";
+import { hostSchema } from "../host-schema";
 import { safeRoomText } from "../onboarding/escape";
 import { type RoomStore, roomStoreFor } from "../store/room-store";
 import type { RoomRecord } from "../store/schema";
@@ -271,7 +273,7 @@ export function registerWaitForMessage(pi: ExtensionAPI): void {
     name: WAIT_FOR_MESSAGE_NAME,
     label: "Wait for message",
     description: WAIT_FOR_MESSAGE_DESCRIPTION,
-    parameters: params,
+    parameters: hostSchema(params),
     loadMode: "essential",
     approval: "read",
     strict: true,
@@ -295,7 +297,7 @@ export function registerWaitForMessage(pi: ExtensionAPI): void {
     renderResult: renderWaitResult,
     describeCall: describeWaitCall,
     describeResult: describeWaitResult,
-  } satisfies ToolDefinition<typeof params, WaitForMessageDetails> & {
+  } satisfies ToolDefinition<TSchema, WaitForMessageDetails> & {
     interruptible: boolean;
     handlesToolInterrupt: boolean;
   };
