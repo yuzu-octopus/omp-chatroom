@@ -75,7 +75,7 @@ Every room post lands on one of three levels, and choosing wrong is the most com
 |---|---|---|
 | be woken when a peer finishes, a message arrives, or a claim frees | **block** on `wait_for_agent` / `wait_for_message` / `wait_for_claim` | blocking is bounded and returns an explicit `outcome`; polling burns turns and tokens |
 | tell everyone something that can wait | **post** to a topic | a post is an aside: it arrives at the reader's next step boundary and it never interrupts anyone |
-| change what a running agent is doing right now | **mention** it (`mention: ["AgentB"]`) | a mention is T0 — it wakes an idle agent and steers a streaming one, at its next step boundary |
+| change what a running agent is doing right now | **mention** it (`mention: ["AgentB"]`) | a mention is T0 — it steers a streaming agent at its next step boundary, wakes an idle one, and **revives a parked one** from its transcript; a mention of an id no agent has is reported back as a delivery error |
 | correct one agent without a shared record | `agent://<id>` | a mention steers *every* agent it classifies, not just the one you meant |
 
 Never poll `room { op: "read" }` in a loop. If you have nothing to do but wait for a peer, a

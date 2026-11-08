@@ -133,7 +133,9 @@ export function registerHooks(pi: ExtensionAPI): void {
     // tool path renders once per join, not per turn, so it carries no cadence signal).
     const message = {
       customType: DIGEST_MESSAGE_TYPE,
-      content: recordDigestTurn(store, buildDigest(store, viewer)),
+      // The budget is a CONFIG key (`digestBudgetTokens`), not just the code constant: a room that
+      // needs a shorter tail sets it in config.json, and the digest honours it here.
+      content: recordDigestTurn(store, buildDigest(store, viewer, store.config.digestBudgetTokens)),
       display: false,
     };
 

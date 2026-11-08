@@ -23,7 +23,7 @@ it:
 | Gap | What breaks without it |
 |---|---|
 | **Exclusive ownership with a lease** | Two agents pointed at the same file have no way to agree who owns it first. Work is duplicated or overwritten. |
-| **A shared, readable record** | A broadcast reaches the agents alive at that instant and nobody after. A claim or finding posted while an agent was parked is gone. |
+| **A shared, readable record** | A broadcast reaches the agents alive at that instant and nobody after. A room record does not expire with the moment: it is still there for the next join, still readable from a cursor, and a **mention revives a parked peer** from its transcript — the case a broadcast can never cover, because in a long-running swarm most peers are parked at any given instant. |
 | **Tiered attention** | Every message is either an interrupt or noise. There is no way to say "this matters to me" vs "this matters to them". |
 | **Bounded blocking waits** | Polling, or parking forever with no way to be woken by a specific fact. |
 | **A durable summary of the past** | The log grows without bound; the tail crowds out everything before it. |
@@ -274,6 +274,27 @@ and is not a config key. Unknown keys are ignored, wrong-typed values fall back 
 |---|---|---|---|
 | `--room-panel-key` | string | `""` | keyboard shortcut that opens the panel; empty disables |
 
+Every key in `<room root>/room/config.json`, with its default (`DEFAULT_ROOM_CONFIG`,
+`plugin/src/store/config.ts`). A wrong-typed value falls back to the default; `/room config` prints
+the effective values.
+
+| Key | Default | What it does |
+|---|---|---|
+| `roomId` | minted | the room's identity; also the log's filename, so it is validated as `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` |
+| `maxT1PerTurn` | `10` | K — T1 records injected per recipient per turn; past it the overflow becomes one summary line |
+| `maxT1Tokens` | `2048` | B — the token budget for those records; the charge is the RENDERED line (topic + body), not the body alone |
+| `coalesceCount` | `20` | N — pending T2 records digested into one line once there are this many |
+| `coalesceMs` | `300000` | T — 5 min; a lag older than this is reported, and the digest rides the next delivery |
+| `postsPerWindow` | `1` | srTCM committed rate: posts per 2 s window before the producer's overflow is coalesced |
+| `burstPosts` | `10` | the burst allowance on top of `postsPerWindow` |
+| `claimTtlMs` | `300000` | default lease when a `claim` omits `ttl`; the write path clamps to 1 s – 24 h |
+| `claimSweepMs` | `5000` | how often expired leases are swept, with waiter promotion |
+| `maxBodyBytes` | `8192` | a post body's cap (refused, never truncated) |
+| `logMaxRecords` | `5000` | retention: records kept before the head is pruned behind a `gap` record |
+| `logMaxAgeMs` | `604800000` | retention by age: 7 days |
+| `compactionCallsPerDay` | `20000` | the cold-tree compactor's daily model-call rate cap (a rate, not a total) |
+| `digestBudgetTokens` | `3800` | how much of the per-turn digest may be spent on the tail |
+
 `--room-panel-key` is best-effort: the host's `setupKeyHandlers()` runs only at editor build, so a
 late-loaded plugin has no shortcut until the next rebuild. The slash command is the primary route.
 
@@ -307,7 +328,7 @@ subagents is unaffected — they live in the same process and share one room and
 
 ```sh
 cd plugin
-bun test tests/                                 # 603 pass / 1 skip, 604 run, 18 files
+bun test tests/                                 # 604 pass / 1 skip, 605 run, 18 files
 bunx --bun tsc --noEmit -p tsconfig.json        # typecheck only
 bunx --bun @biomejs/biome check src tests       # lint + format check
 bunx --bun @biomejs/biome check src tests --write   # apply fixes

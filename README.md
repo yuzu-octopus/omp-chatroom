@@ -113,7 +113,7 @@ Gates, all green:
 
 | Gate | Result |
 |---|---|
-| `bun test tests/` | **603 pass / 1 skip / 0 fail**, 604 run, 18 files |
+| `bun test tests/` | **604 pass / 1 skip / 0 fail**, 605 run, 18 files |
 | `bun check` (native, ~95 ms) | **0 errors**, 55 files |
 | `bunx --bun tsc --noEmit -p tsconfig.json` | **0 errors** |
 | `bunx --bun @biomejs/biome check src tests` | **0 errors, 0 warnings** |
@@ -138,6 +138,12 @@ run. A worker has its own module graph, so it has its own room state; an agent t
 with the setting that fixes it (`task.workerThreads: 0`, or fewer than 9 concurrent subagents)
 instead of a `locked by pid` that would point at itself. Below that threshold — every swarm this
 plugin was measured on — agents share one process and one room.
+
+Two "inactive" states behave differently, and the difference matters when you address someone: a
+**parked** peer (kept-alive, no live session) is reachable — a T0 mention goes through the host bus,
+which revives it from its transcript — while a peer on a **worker thread** is not in this room at
+all. So a mention wakes an idle worker, and nothing can wake a worker-thread one until
+`task.workerThreads` is 0.
 
 ## Layout
 

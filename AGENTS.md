@@ -62,7 +62,7 @@ advanced on delivery into context, never on send.
 
 ```sh
 cd plugin
-bun test tests/                                 # whole suite (603 pass, 1 skip, 18 files)
+bun test tests/                                 # whole suite (604 pass, 1 skip, 18 files)
 bun test tests/ --coverage                      # the same run with a coverage table (not a gate)
 bun check                                       # native typecheck, ~95 ms (CI runs it first)
 bun run typecheck                               # the same check via tsc, the authoritative gate
@@ -132,7 +132,7 @@ yourself. The human has the machine and will run it.
 |I8|delivery is serialised per room root — two concurrent posts reach a recipient in seq order|`tools/room.ts:528-544`|
 |I9|a recipient's cursor never advances past a record it has not seen AND has not been given — a given seq (a delivered T0, an issued-but-unconfirmed send, a T0 batched into the ceiling summary) owes nothing, so it neither pins the floor nor gets re-selected|`attention/delivery.ts:172-177`, `tools/room.ts:736-760`, `store/cursors.ts:55-100`|
 |I10|the load-time host-drift check **warns**, it never throws — a working room beats a plugin that refuses to load|`index.ts:31-47`|
-|I11|a delivery never waits for the recipient's whole turn — the host's send resolves at the end of the **target's** turn, so every send is bounded (250 ms); a resolved `false` is ACCEPTANCE, not a decline (the host's streaming branch queues the message into the running turn and returns `false`: `agent-session.ts:10499-10541`); only a rejection or a session with no send capability means nothing was issued; the per-recipient deliveries run concurrently so one slow recipient cannot hold up the others|`attention/delivery.ts:26`, `attention/delivery.ts:60-105`, `attention/delivery.ts:160-200`, `tools/room.ts:566-580`|
+|I11|a delivery never waits for the recipient's whole turn — the host's send resolves at the end of the **target's** turn, so every send is bounded (250 ms); a resolved `false` is ACCEPTANCE, not a decline (the host's streaming branch queues the message into the running turn and returns `false`: `agent-session.ts:10499-10541`); only a rejection or a session with no send capability means nothing was issued; the transport matches the peer — its own card on a live session, the host IRC channel on a worker-thread peer, and `IrcBus.send` (which revives it from its transcript) on a parked one, so a T0 mention reaches an idle worker; the per-recipient deliveries run concurrently so one slow recipient cannot hold up the others|`attention/delivery.ts:26`, `attention/delivery.ts:60-105`, `attention/delivery.ts:131-200`, `tools/room.ts:566-580`|
 |I12|a delivered T0 is delivered ONCE — while an older record is still owed the cursor cannot advance past it, so the T0 would be re-selected and re-sent (a wake+steer storm); the GIVEN seqs are remembered per room root and per recipient, and the registry holds a delivered T0, an issued-but-unconfirmed send of any tier, and a T0 batched into the ceiling summary|`store/cursors.ts:55-100`, `attention/delivery.ts:252-300`, `tools/room.ts:690-706`|
 |I13|the retention `gap` record is CARRIED by the next pass — it is T1 for every viewer but is appended outside any op's batch, so left uncarried it pinned every cursor and froze the room|`tools/room.ts:642-670`, `attention/tiers.ts:46-47`|
 
@@ -210,16 +210,18 @@ Detailed conventions and the not-covered list: `docs/research/omp-agent-notes/te
 - **Bun only** — `bun` 1.4.4 (`engines.bun` >=1.4.4, the host's own floor). Package manager, runner, and runtime. No `node`, `npm`, or `npx`.
 - **Host: omp 18.18.1.** The plugin pins it exactly in both `peerDependencies` and
   `devDependencies` — `@oh-my-pi/pi-coding-agent`, `@oh-my-pi/pi-tui`, `@oh-my-pi/pi-ai` and
-  `@oh-my-pi/pi-utils` — because the eleven deep subpath imports (`DEEP_SPECIFIERS`) are
-  wildcard-only, not public API. The eleven are
-  `@oh-my-pi/pi-coding-agent/{internal-urls/local-protocol,registry/agent-registry,session/harness-tags,utils/event-bus}`
+  `@oh-my-pi/pi-utils` — because the twelve deep subpath imports (`DEEP_SPECIFIERS`) are
+  wildcard-only, not public API. The twelve are
+  `@oh-my-pi/pi-coding-agent/{internal-urls/local-protocol,irc/bus,registry/agent-registry,session/harness-tags,utils/event-bus}`
   and
   `@oh-my-pi/pi-tui/{chat/messages,chrome/overlay-box,render/render-utils,render/status-line,theme/active-symbols,tools/irc,tools/renderer}`
   — `theme/active-symbols` is the tenth (it is the host's own symbol lookup, which the plugin's
   theme shim resolves through rather than copying). `tools/irc` is the eleventh, and it is the
   cross-agent delivery contract: a worker-thread peer session accepts only `deliverIrcMessage`,
-  whose message is that type. Two of the eleven are imported by the TESTS
-  only (`pi-coding-agent/internal-urls/local-protocol` and `pi-coding-agent/utils/event-bus`): no
+  whose message is that type. `irc/bus` is the twelfth and the reason a mention to an IDLE worker
+  works at all: `IrcBus.send` calls `lifecycle.ensureLive` for a parked/aborted ref, so it is the
+  only transport that can revive a peer with no session. Two of the twelve are imported by the
+  TESTS only (`pi-coding-agent/internal-urls/local-protocol` and `pi-coding-agent/utils/event-bus`): no
   source file imports them, but they are still subpaths the plugin resolves, so they belong in the
   list a host bump is audited against.
   `@oh-my-pi/pi-utils` was imported by eight source files while

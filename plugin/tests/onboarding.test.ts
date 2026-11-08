@@ -220,6 +220,30 @@ test("a poisoned roomId from config cannot inject into the digest header", () =>
   expect(header).not.toContain(UNTRUSTED_CLOSE);
 });
 
+test("the digest honours the CONFIG budget, not just the code constant", async () => {
+  // `digestBudgetTokens` is a config key with a default; before this, `before_agent_start` called
+  // `buildDigest(store, viewer)` with no third argument, so the key was inert — the class of bug
+  // the docs audit called out ("most knobs are live" was false for this one).
+  const bulk = "Z".repeat(200);
+  for (let i = 0; i < 50; i++) post(i, `record-${i}-${bulk}`);
+  store.config.digestBudgetTokens = 900;
+
+  const { pi, fire } = fakePi();
+  registerHooks(pi);
+  const result = (await fire(
+    "before_agent_start",
+    { type: "before_agent_start", prompt: "hi", systemPrompt: [] },
+    fakeCtx("AgentA"),
+  )) as { message?: { content?: string } } | undefined;
+  const content = result?.message?.content ?? "";
+
+  // The tight budget drops the OLDEST backlog records and keeps the newest, exactly as the
+  // explicit-budget call does — proving the value reached buildDigest.
+  expect(content).toContain("record-49-");
+  expect(content).not.toContain("record-0-");
+  expect(content).toContain("Caps:");
+});
+
 // ---------------------------------------------------------------------------------------------
 // 4. The routing rule lives in the system prompt, independent of the digest.
 // ---------------------------------------------------------------------------------------------

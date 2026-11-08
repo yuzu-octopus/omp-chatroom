@@ -10,7 +10,7 @@ export const HOST_VERSION_PIN = "18.18.1";
 // `pi-tui/theme/active-symbols` and `pi-coding-agent/session/harness-tags`.
 //
 // The first four are the store-critical surface; the rest are listed so a future phase fails loudly
-// on drift rather than at first use. Two of the eleven are imported by the TESTS only
+// on drift rather than at first use. Two of the twelve are imported by the TESTS only
 // (`pi-coding-agent/internal-urls/local-protocol` and `pi-coding-agent/utils/event-bus`): no
 // source file imports them, but they are still subpaths the plugin resolves, so they belong in the
 // list a host bump is audited against.
