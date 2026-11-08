@@ -249,13 +249,13 @@ type DigestTurnLine = DigestStats & { room: string; seq: number; at: number };
  * only when `OMP_ROOM_DIGEST_STATS=1`.
  */
 export function recordDigestTurn(store: RoomStore, rendered: string): string {
-  if (process.env[DIGEST_STATS_ENV] !== "1") return rendered;
+  if (Bun.env[DIGEST_STATS_ENV] !== "1") return rendered;
   const prev = PREV_DIGESTS.get(store.root) ?? null;
   const stats = digestStats(store, prev, rendered);
   PREV_DIGESTS.set(store.root, rendered);
   const line: DigestTurnLine = { room: store.root, seq: store.seq, at: Date.now(), ...stats };
   const out =
-    process.env[DIGEST_STATS_PATH_ENV] ?? path.join(os.tmpdir(), "omp-room-digest-stats.jsonl");
+    Bun.env[DIGEST_STATS_PATH_ENV] ?? path.join(os.tmpdir(), "omp-room-digest-stats.jsonl");
   try {
     fs.appendFileSync(out, `${JSON.stringify(line)}\n`);
   } catch {

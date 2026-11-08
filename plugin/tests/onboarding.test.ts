@@ -1000,8 +1000,8 @@ test("an over-budget digest gauges truncated (F6)", () => {
 // ---------------------------------------------------------------------------------------------
 
 test("flag off: the hook render is byte-identical and writes no file (F6 harness)", async () => {
-  delete process.env[DIGEST_STATS_ENV];
-  delete process.env[DIGEST_STATS_PATH_ENV];
+  delete Bun.env[DIGEST_STATS_ENV];
+  delete Bun.env[DIGEST_STATS_PATH_ENV];
   resetDigestTurns();
   registerAgents(2);
   post(0, "hello");
@@ -1023,8 +1023,8 @@ test("flag off: the hook render is byte-identical and writes no file (F6 harness
 test("flag on: one JSONL line per hook run with the gauge fields (F6 harness)", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "room-digest-stats-"));
   const out = path.join(dir, "stats.jsonl");
-  process.env[DIGEST_STATS_ENV] = "1";
-  process.env[DIGEST_STATS_PATH_ENV] = out;
+  Bun.env[DIGEST_STATS_ENV] = "1";
+  Bun.env[DIGEST_STATS_PATH_ENV] = out;
   resetDigestTurns();
   try {
     registerAgents(2);
@@ -1065,8 +1065,8 @@ test("flag on: one JSONL line per hook run with the gauge fields (F6 harness)", 
     expect(b.changedBytes).toBe(0);
     expect(b.commonPrefix).toBe(b.bytes);
   } finally {
-    delete process.env[DIGEST_STATS_ENV];
-    delete process.env[DIGEST_STATS_PATH_ENV];
+    delete Bun.env[DIGEST_STATS_ENV];
+    delete Bun.env[DIGEST_STATS_PATH_ENV];
     resetDigestTurns();
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -1088,16 +1088,16 @@ test("flag on with an unwritable path: the turn still renders, recording degrade
   // swallows the write error and returns the render unchanged. A directory
   // as the target makes appendFileSync throw EISDIR deterministically.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "room-digest-stats-"));
-  process.env[DIGEST_STATS_ENV] = "1";
-  process.env[DIGEST_STATS_PATH_ENV] = dir;
+  Bun.env[DIGEST_STATS_ENV] = "1";
+  Bun.env[DIGEST_STATS_PATH_ENV] = dir;
   resetDigestTurns();
   try {
     post(0, "hello");
     const expected = buildDigest(store, viewer("AgentA"));
     expect(recordDigestTurn(store, expected)).toBe(expected);
   } finally {
-    delete process.env[DIGEST_STATS_ENV];
-    delete process.env[DIGEST_STATS_PATH_ENV];
+    delete Bun.env[DIGEST_STATS_ENV];
+    delete Bun.env[DIGEST_STATS_PATH_ENV];
     resetDigestTurns();
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -1106,8 +1106,8 @@ test("flag on with an unwritable path: the turn still renders, recording degrade
 test("flag on: a second consecutive identical render gauges zero churn (F6 harness)", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "room-digest-stats-"));
   const out = path.join(dir, "stats.jsonl");
-  process.env[DIGEST_STATS_ENV] = "1";
-  process.env[DIGEST_STATS_PATH_ENV] = out;
+  Bun.env[DIGEST_STATS_ENV] = "1";
+  Bun.env[DIGEST_STATS_PATH_ENV] = out;
   resetDigestTurns();
   try {
     registerAgents(2);
@@ -1121,8 +1121,8 @@ test("flag on: a second consecutive identical render gauges zero churn (F6 harne
     expect(second.changedBytes).toBe(0);
     expect(second.commonPrefix).toBe(rendered.length);
   } finally {
-    delete process.env[DIGEST_STATS_ENV];
-    delete process.env[DIGEST_STATS_PATH_ENV];
+    delete Bun.env[DIGEST_STATS_ENV];
+    delete Bun.env[DIGEST_STATS_PATH_ENV];
     resetDigestTurns();
     fs.rmSync(dir, { recursive: true, force: true });
   }

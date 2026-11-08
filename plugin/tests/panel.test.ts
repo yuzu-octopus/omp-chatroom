@@ -1186,7 +1186,7 @@ test("panel `r` delivery failure surfaces as a warning notify (lines 620-628)", 
     expect(store.records.filter((r) => r.kind === "release")).toHaveLength(1);
     // The floated push rejects → the rejection arm notifies a warning. The host's send resolves
     // when the target's turn ends, so the rejection needs a macrotask to land.
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await Bun.sleep(50);
     expect(capture.notified.some((n) => n.message.startsWith("delivery: "))).toBe(true);
     expect(
       capture.notified.some((n) => n.message.startsWith("delivery: ") && n.level === "warning"),
