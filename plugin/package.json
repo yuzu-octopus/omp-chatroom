@@ -41,7 +41,7 @@
     }
   },
   "engines": {
-    "bun": ">=1.3.14"
+    "bun": ">=1.4.4"
   },
   "peerDependencies": {
     "@oh-my-pi/pi-coding-agent": "18.18.1",

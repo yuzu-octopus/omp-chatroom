@@ -63,8 +63,8 @@ advanced on delivery into context, never on send.
 ```sh
 cd plugin
 bun test tests/                                 # whole suite (549 pass, 1 skip, 18 files)
-bun check                                        # typecheck (Bun's own; ~10× faster than tsc)
-bunx --bun tsc --noEmit -p tsconfig.json        # the same typecheck via tsc (CI runs this)
+bun check                                       # native typecheck, ~95 ms (CI runs it first)
+bun run typecheck                               # the same check via tsc, the authoritative gate
 bunx --bun @biomejs/biome check src tests       # lint + format
 bunx --bun @biomejs/biome check src tests --write   # apply fixes
 ```
@@ -193,7 +193,7 @@ Detailed conventions and the not-covered list: `docs/research/omp-agent-notes/te
 
 ## Runtime/Tooling Preferences
 
-- **Bun only** — `bun` 1.4.3. Package manager, runner, and runtime. No `node`, `npm`, or `npx`.
+- **Bun only** — `bun` 1.4.4 (`engines.bun` >=1.4.4, the host's own floor). Package manager, runner, and runtime. No `node`, `npm`, or `npx`.
 - **Host: omp 18.18.1.** The plugin pins it exactly in both `peerDependencies` and
   `devDependencies` — `@oh-my-pi/pi-coding-agent`, `@oh-my-pi/pi-tui`, `@oh-my-pi/pi-ai` and
   `@oh-my-pi/pi-utils` — because the eleven deep subpath imports (`DEEP_SPECIFIERS`) are
@@ -224,6 +224,12 @@ Detailed conventions and the not-covered list: `docs/research/omp-agent-notes/te
 - Biome config: `indentStyle: space`, `indentWidth: 2`, `lineWidth: 100`,
   `noNonNullAssertion` **off** (those assertions are deliberate, documented invariants),
   scope `src/**` + `tests/**`.
+- **Two typecheckers, one meaning.** `bun check` is the native checker (~95 ms) and `tsc` is the
+  authority; both read the same tree and both must be clean. Getting there cost one cast:
+  `hostSchema()` (`src/host-schema.ts`) hands the host its own runtime schema unchanged, because
+  `TSchema` is a `TypeBox | ZodLikeSchema` union the two checkers disambiguate differently. Param
+  types the plugin reads are stated by hand on `execute` and the render hooks, so nothing inherits
+  `unknown` from that boundary.
 
 ## Testing & QA
 
