@@ -441,6 +441,8 @@ const ICON_NAMES = [
   "job",
   "cache",
   "cacheMiss",
+  "cacheWarm",
+  "cacheCold",
   "input",
   "output",
   "throughput",
@@ -857,6 +859,12 @@ export function uncolouredTheme(): Record<string, unknown> {
     bg: (_color: string, text: string): string => text,
     bgFill: (_color: string, text: string): string => text,
     fgOnBg: (_color: string, _background: string, text: string): string => text,
+    // 18.17.0 — colourful markdown paints headings, code and table headers from the terminal's own
+    // ANSI palette (`pi-tui/src/theme/theme-class.ts:379` indexes `ANSI_COLOR_INDEX`). The fallback
+    // paints NO colour, and the host calls this on EVERY heading and inline-code span, so a missing
+    // member here is a `theme.ansiFg is not a function` on the next markdown frame once the
+    // fallback is published as the host's theme. Same contract as `fgResolved`: colour, then text.
+    ansiFg: (_color: string, text: string): string => text,
     // The style members are ONE-argument functions in the host's Theme (`italic(text)`), like
     // `bold`. The fallback paints no styling at all — `bold` no-ops for the same reason — so a
     // half-styled line is never painted: the text is the text.
@@ -864,6 +872,9 @@ export function uncolouredTheme(): Record<string, unknown> {
     underline: strong,
     strikethrough: strong,
     inverse: strong,
+    // 18.18.x — the dim-text sibling the host's own transcript rows read (`theme.faint(text)`);
+    // a published fallback without it is a `theme.faint is not a function` on such a row.
+    faint: strong,
     // The border-colour members answer with a ONE-argument function, like the bash/python ones.
     getThinkingBorderColor: (_level: string): ((str: string) => string) => strong,
     // The spinner frames. The host's own ascii preset frames (`pi-tui/src/theme/symbols.ts`,
