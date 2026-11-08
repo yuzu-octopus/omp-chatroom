@@ -88,6 +88,36 @@ const textOf = (res: ToolResultEnvelope): string => res.content.map((c) => c.tex
 const WAIT_TIMEOUT_MS = 60_000;
 
 test(
+  "the observer waits keep the host's interrupt contract; the claiming wait does not claim it",
+  async () => {
+    // 18.13.2 — `handlesToolInterrupt` is what lets an interruptible tool RUN when a loop-owned
+    // interrupt is already queued, so it can drain the wake event instead of being skipped before
+    // it starts; the host's own `wait` sets it (pi-coding-agent/src/tools/wait.ts:153). Read off a
+    // REAL session's registered tool, which is exactly where agent-loop reads it.
+    const root = freshRoot();
+    const bus = new EventBus();
+    const a = await newSession(bus, undefined, root, "AgentA");
+    try {
+      const reads = (name: string): Record<string, unknown> =>
+        toolOf(a, name) as unknown as Record<string, unknown>;
+
+      for (const name of ["wait_for_message", "wait_for_agent"]) {
+        expect(reads(name).interruptible, `${name} must stay interruptible`).toBe(true);
+        expect(reads(name).handlesToolInterrupt, `${name} must drain a queued wait`).toBe(true);
+      }
+      // A claim is a SIDE EFFECT, not an observation: letting it run through a queued interrupt
+      // would grant a lease the agent never asked to hold any more. It stays non-interruptible, so
+      // the host's pre-start skip applies and no flag is claimed.
+      expect(reads("wait_for_claim").interruptible).toBe(false);
+      expect(reads("wait_for_claim").handlesToolInterrupt ?? false).toBe(false);
+    } finally {
+      await a.dispose();
+    }
+  },
+  WAIT_TIMEOUT_MS,
+);
+
+test(
   "wait_for_claim blocks, then resolves {outcome:'event', acquired:true, claim:{holder}} when the holder releases",
   async () => {
     const root = freshRoot();

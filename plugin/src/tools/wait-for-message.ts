@@ -275,9 +275,13 @@ export function registerWaitForMessage(pi: ExtensionAPI): void {
     loadMode: "essential",
     approval: "read",
     strict: true,
-    // R9 — not in the typed ToolDefinition; declared on the literal, and the wait never relies on it
-    // for correctness (it observes `signal` and bounds its own timeout).
+    // 18.13.2 — an interruptible tool that sets `handlesToolInterrupt` still RUNS when a
+    // loop-owned interrupt is already queued, so it can drain the caller's wake event instead of
+    // being skipped before it starts; the host's own `wait` sets it (pi-coding-agent
+    // src/tools/wait.ts:153). Safe here because a pre-aborted signal returns this wait's snapshot
+    // at once rather than blocking, which is the flag's one requirement.
     interruptible: true,
+    handlesToolInterrupt: true,
     async execute(
       _toolCallId: string,
       p: WaitForMessageParams,
@@ -291,7 +295,10 @@ export function registerWaitForMessage(pi: ExtensionAPI): void {
     renderResult: renderWaitResult,
     describeCall: describeWaitCall,
     describeResult: describeWaitResult,
-  } satisfies ToolDefinition<typeof params, WaitForMessageDetails> & { interruptible: boolean };
+  } satisfies ToolDefinition<typeof params, WaitForMessageDetails> & {
+    interruptible: boolean;
+    handlesToolInterrupt: boolean;
+  };
 
   pi.registerTool(tool);
 }
