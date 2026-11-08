@@ -1,7 +1,7 @@
 import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent";
 import { prompt } from "@oh-my-pi/pi-utils";
-import { deliver, sendBounded } from "../attention/delivery";
+import { deliver, sendToTarget } from "../attention/delivery";
 import {
   admitPost,
   coalescePending,
@@ -368,10 +368,12 @@ async function notice(
     //
     // Bounded: the host's send resolves when the TARGET'S TURN ends, so an unbounded await would
     // deadlock the room (A's pass waits for B's turn, B's turn posts and waits for A's pass).
-    const outcome = await sendBounded(
-      ctx,
-      Promise.resolve(session.sendCustomMessage(payload, { deliverAs })),
-    );
+    const outcome = await sendToTarget(ctx, session, target, {
+      from: ctx.agent.id,
+      content: typeof payload.content === "string" ? payload.content : safe(content),
+      payload,
+      options: { deliverAs },
+    });
     if (!outcome.ok) throw outcome.error;
     return;
   }

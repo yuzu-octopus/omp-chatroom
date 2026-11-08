@@ -1,4 +1,5 @@
 import { AgentRegistry, type ExtensionAPI, type ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { cardTypeFor } from "../cards/message-cards";
 import { safeRoomText } from "../onboarding/escape";
 import { bumpCursor, markDeliveredT0 } from "../store/cursors";
@@ -83,6 +84,64 @@ export async function sendBounded(
     // The bound is a deadline, not a job: it is cleared on every path (I4).
     if (timer !== undefined) timers.clearTimer?.(timer);
   }
+}
+
+/**
+ * The subset of a target session this module needs, expressed structurally.
+ *
+ * 18.18.1 split the session surface: `AgentSessionHandle` (what `AgentRegistry.get().session`
+ * is typed as) no longer declares `sendCustomMessage`, and a worker-thread peer session exposes
+ * `deliverIrcMessage` INSTEAD of it. A room whose mentions only worked on the main thread would
+ * be a room that dies at `task.workerThreads` scale (host default: workers from the 9th
+ * concurrent subagent), so the send is capability-dispatched rather than assumed.
+ */
+type CustomSendCapable = {
+  sendCustomMessage: (payload: unknown, options: unknown) => Promise<boolean>;
+};
+type IrcDeliverCapable = {
+  deliverIrcMessage: (msg: IrcMessage) => Promise<"injected" | "woken">;
+};
+
+/**
+ * Deliver one room message to `target`'s session, bounded.
+ *
+ * Two paths, in capability order:
+ * 1. `sendCustomMessage` — the main-thread host session. Carries our card (`customType` +
+ *    `details`), so the recipient sees the room's own block, and honours `deliverAs`/`triggerTurn`.
+ * 2. `deliverIrcMessage` — a worker-thread peer session, the host's own cross-agent channel. The
+ *    body is the same rendered line; the card is the host's IRC block, which is what a peer can
+ *    actually receive. Returns `injected` (queued into a running turn) or `woken` (started one):
+ *    both are deliveries, unlike `sendCustomMessage`'s `false`.
+ *
+ * Both are awaited through {@link sendBounded}: the host resolves a send when the target's TURN
+ * ends, and awaiting that from inside a delivery pass deadlocks the room (see the bound's note).
+ */
+export async function sendToTarget(
+  ctx: ExtensionContext,
+  session: unknown,
+  target: string,
+  message: { from: string; content: string; payload: Record<string, unknown>; options: unknown },
+): Promise<SendOutcome> {
+  const custom = session as Partial<CustomSendCapable>;
+  if (typeof custom?.sendCustomMessage === "function") {
+    return await sendBounded(
+      ctx,
+      Promise.resolve(custom.sendCustomMessage(message.payload, message.options)),
+    );
+  }
+  const irc = session as Partial<IrcDeliverCapable>;
+  if (typeof irc?.deliverIrcMessage === "function") {
+    const msg: IrcMessage = {
+      id: `${message.from}:${target}:${Date.now()}`, // room-local id: the host only carries it
+      from: message.from,
+      to: target,
+      body: message.content,
+      ts: Date.now(),
+    };
+    return await sendBounded(ctx, Promise.resolve(irc.deliverIrcMessage(msg)));
+  }
+  // Neither capability: nothing was issued, and saying "delivered" would be a lie.
+  return { ok: false, error: new Error("the target session accepts no agent message") };
 }
 
 // §5.3 — verbatim, plus `extra` — the optional digest lines (the T2 coalescing digest) that ride
@@ -177,10 +236,12 @@ export async function deliver(
   // rejection inside the bound is a transport failure: it propagates to the delivery pass, which
   // reports it as `deliveryError`, and the cursor is NOT bumped (the record is still owed).
   // The host's `false` (no turn started) lands here too, and it is NOT a delivery either.
-  const outcome = await sendBounded(
-    ctx,
-    Promise.resolve(ref!.session!.sendCustomMessage(payload, options)),
-  );
+  const outcome = await sendToTarget(ctx, ref!.session, target, {
+    from: ctx.agent.id,
+    content,
+    payload,
+    options,
+  });
   if (!outcome.ok) throw outcome.error;
   if (!outcome.accepted) {
     // UNCERTAIN: the send was issued, but the host never answered inside the bound. It may still

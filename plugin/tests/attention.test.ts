@@ -870,6 +870,96 @@ test("deliver: T0 steers, T1 is an aside, T2 only bumps the cursor", async () =>
   expect(store.deliveries).toEqual({ T0: 1, T1: 1, T2: 1 });
 });
 
+test("deliver: a worker-thread peer session is reached through deliverIrcMessage", async () => {
+  // 18.18.1 — `AgentSessionHandle` no longer declares `sendCustomMessage`, and a worker-thread
+  // peer session exposes ONLY `deliverIrcMessage`. Host default `task.workerThreads` puts the 9th
+  // concurrent subagent on a worker, so a delivery path built on `sendCustomMessage` alone throws
+  // there: the mention reaches nobody. The capability dispatch is what makes the room survive that
+  // scale, and `injected`/`woken` are BOTH deliveries (unlike `sendCustomMessage`'s `false`).
+  const root = tempRoot();
+  const ctx = fakeCtx(root, "Sender");
+  const store = roomStoreFor(ctx);
+  const peer = `peer-${Date.now()}`;
+  store.members.set(peer, {
+    agentId: peer,
+    joinedAtSeq: 0,
+    topics: new Set(["build"]),
+    muted: new Set(),
+    threadRoots: new Set(),
+    heldTopics: new Set(),
+  });
+  const irc: Array<Record<string, unknown>> = [];
+  const registry = AgentRegistry.global();
+  const original = registry.get(peer);
+  void original;
+  AgentRegistry.global().register({
+    id: peer,
+    displayName: peer,
+    kind: "sub",
+    status: "running",
+    session: {
+      async deliverIrcMessage(m: Record<string, unknown>): Promise<"injected" | "woken"> {
+        irc.push(m);
+        return "woken";
+      },
+    } as never,
+  });
+  const { pi } = fakePi();
+  const record = store.append({
+    kind: "msg",
+    from: "Sender",
+    topic: "build",
+    body: "peer hello",
+    mention: [peer],
+  });
+
+  const failure = await notifyRecipients(pi, ctx, store, [record], "Sender");
+  expect(failure).toBeUndefined();
+  expect(irc.length).toBe(1);
+  // The body is the SAME rendered room line the custom path would carry.
+  expect(String(irc[0]!.body)).toContain("peer hello");
+  expect(irc[0]).toMatchObject({ from: "Sender", to: peer });
+  // A receipt of either kind is a delivery: the cursor moved and the tier was counted.
+  expect(store.cursors.get(peer)).toBe(record.seq);
+  expect(store.deliveries.T0).toBeGreaterThan(0);
+});
+
+test("deliver: a session with neither send capability fails loudly and keeps the record owed", async () => {
+  // The helper's third arm: no `sendCustomMessage`, no `deliverIrcMessage`. Reporting a delivery
+  // would be a lie and would advance the cursor past a record nobody received.
+  const root = tempRoot();
+  const ctx = fakeCtx(root, "Sender");
+  const store = roomStoreFor(ctx);
+  const mute = `mute-${Date.now()}`;
+  store.members.set(mute, {
+    agentId: mute,
+    joinedAtSeq: 0,
+    topics: new Set(["build"]),
+    muted: new Set(),
+    threadRoots: new Set(),
+    heldTopics: new Set(),
+  });
+  AgentRegistry.global().register({
+    id: mute,
+    displayName: mute,
+    kind: "sub",
+    status: "running",
+    session: {} as never,
+  });
+  const { pi } = fakePi();
+  const record = store.append({
+    kind: "msg",
+    from: "Sender",
+    topic: "build",
+    body: "nobody home",
+    mention: [mute],
+  });
+
+  const failure = await notifyRecipients(pi, ctx, store, [record], "Sender");
+  expect(failure).toBeDefined();
+  expect(store.cursors.get(mute) ?? 0).toBe(0);
+});
+
 test("an uncertain T0 is remembered as given — the next pass does not storm", async () => {
   // delivery.ts uncertain arm 190: a T0 whose outcome is unknown is
   // marked delivered (so the next pass skips it) but the cursor stays
