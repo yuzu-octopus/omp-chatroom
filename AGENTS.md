@@ -109,19 +109,19 @@ yourself. The human has the machine and will run it.
 
 |#|Rule|Enforced at|
 |---|---|---|
-|I1|mutations are synchronous — no `await` between mint, write, project, notify|`store/room-store.ts:204-211`|
-|I2|no session-scoped module state; key by root/agent in `globalThis` maps|`store/room-store.ts:87-95`, `store/compactor.ts:43`, `store/compactor.ts:111`, `store/tree-store.ts:152`|
-|I3|key every shared structure by `ctx.agent.id`|`store/room-store.ts:94-95`, `panel/panel.ts:460`|
-|I4|timers via `ctx.setInterval` only — never a raw timer (a throw is process-fatal)|`store/compactor.ts:353`, `store/room-store.ts:432-448`|
-|I5|synchronous append survives a crash — `fsyncSync` in the one `appendLine` path|`store/log.ts:194-208`|
-|I6|every wait promise settles — signal, timeout and promotion all `finish()`|`tools/wait-for-claim.ts:195-205`, `:247-252` (and the siblings' equivalents)|
+|I1|mutations are synchronous — no `await` between mint, write, project, notify|`store/room-store.ts:211-220`|
+|I2|no session-scoped module state; key by root/agent in `globalThis` maps|`store/room-store.ts:94-101`, `store/compactor.ts:43`, `store/compactor.ts:111`, `store/tree-store.ts:152`|
+|I3|key every shared structure by `ctx.agent.id`|`store/room-store.ts:100-101`, `panel/panel.ts:540`|
+|I4|timers via `ctx.setInterval` only — never a raw timer (a throw is process-fatal)|`store/compactor.ts:353`, `store/room-store.ts:451-470`|
+|I5|synchronous append survives a crash — `fsyncSync` in the one `appendLine` path|`store/log.ts:336-352`|
+|I6|every wait promise settles — signal, timeout and promotion all `finish()`|`tools/wait-for-claim.ts:206-216`, `:258-263` (and the siblings' equivalents)|
 |I7|the compactor's daily spend cap **and** its write mutex are per room root — never process-global, or a busy room starves the other|`store/compactor.ts:36-52`, `store/compactor.ts:106-122`|
-|I8|delivery is serialised per room root — two concurrent posts reach a recipient in seq order|`tools/room.ts:408-424`|
-|I9|a recipient's cursor never advances past a record it has not seen — the owed floor is applied to **every** cursor bump in `deliver()` (the T0/T1 path included, not only the T2 one)|`attention/delivery.ts:160-165`, `tools/room.ts:536-545`|
+|I8|delivery is serialised per room root — two concurrent posts reach a recipient in seq order|`tools/room.ts:528-544`|
+|I9|a recipient's cursor never advances past a record it has not seen AND has not been given — a given seq (a delivered T0, an issued-but-unconfirmed send, a T0 batched into the ceiling summary) owes nothing, so it neither pins the floor nor gets re-selected|`attention/delivery.ts:172-177`, `tools/room.ts:736-760`, `store/cursors.ts:55-100`|
 |I10|the load-time host-drift check **warns**, it never throws — a working room beats a plugin that refuses to load|`index.ts:31-47`|
-|I11|a delivery never waits for the recipient's whole turn — the host's send resolves at the end of the **target's** turn, so every send is bounded (250 ms); a rejection inside the bound still surfaces as `deliveryError`, and the per-recipient deliveries run concurrently so one slow recipient cannot hold up the others|`attention/delivery.ts:25`, `attention/delivery.ts:38-63`, `attention/delivery.ts:145-153`, `tools/room.ts:333-337`|
-|I12|a delivered T0 is delivered ONCE — while an older record is still owed the cursor cannot advance past it, so the T0 would be re-selected and re-sent (a wake+steer storm); the delivered T0s are remembered per room root and per recipient|`store/cursors.ts:32-72`, `attention/delivery.ts:144-158`, `tools/room.ts:449-456`|
-|I13|the retention `gap` record is CARRIED by the next pass — it is T1 for every viewer but is appended outside any op's batch, so left uncarried it pinned every cursor and froze the room|`tools/room.ts:511-536`, `attention/tiers.ts:46-47`|
+|I11|a delivery never waits for the recipient's whole turn — the host's send resolves at the end of the **target's** turn, so every send is bounded (250 ms); a resolved `false` is ACCEPTANCE, not a decline (the host's streaming branch queues the message into the running turn and returns `false`: `agent-session.ts:10499-10541`); only a rejection or a session with no send capability means nothing was issued; the per-recipient deliveries run concurrently so one slow recipient cannot hold up the others|`attention/delivery.ts:26`, `attention/delivery.ts:60-105`, `attention/delivery.ts:160-200`, `tools/room.ts:566-580`|
+|I12|a delivered T0 is delivered ONCE — while an older record is still owed the cursor cannot advance past it, so the T0 would be re-selected and re-sent (a wake+steer storm); the GIVEN seqs are remembered per room root and per recipient, and the registry holds a delivered T0, an issued-but-unconfirmed send of any tier, and a T0 batched into the ceiling summary|`store/cursors.ts:55-100`, `attention/delivery.ts:252-300`, `tools/room.ts:690-706`|
+|I13|the retention `gap` record is CARRIED by the next pass — it is T1 for every viewer but is appended outside any op's batch, so left uncarried it pinned every cursor and froze the room|`tools/room.ts:642-670`, `attention/tiers.ts:46-47`|
 
 **The room lives in the global omp session store, not in the project tree.** The room root is
 `getSessionsDir()/rooms/<16 hex chars of the project path>` — i.e. `~/.omp/agent/sessions/rooms/<hash>`

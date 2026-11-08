@@ -31,6 +31,7 @@ Round-bd69c15 (2026-11-08): bun check 0 errors (native, ~90 ms), tsc 0 errors, b
 | 019 | The human-facing card names its topic; escape the room-authored strings the header rendered raw; the scratch ledger and the verification policy | P2 | S | — | DONE (302 tests / 15 files green; the card header needs the human's live check) |
 | 020 | The effectiveness round: five capabilities and four record kinds from the large-swarm research | P1 | L | — | DONE (331 tests / 15 files green; the room's effectiveness is the human's live check) |
 | 021 | The plugin's glyphs follow the host's symbol set (unicode/nerd/ascii), and the degraded theme is the host's own | P2 | M | — | DONE (`c9ebcd2`; 362 tests / 18 files green — the production topology is a live check) |
+| 022 | Adversarial round: five parallel audits (functional, UI, perf, docs-truth, security), 29 verified findings, six fix waves | P1 | L | 021 | [022-adversarial-round.md](022-adversarial-round.md) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJECTED (with one-line rationale — finding fixed independently or approach abandoned)
 
