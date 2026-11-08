@@ -32,17 +32,30 @@ export function lagFor(store: RoomStore, agentId: string): number {
 
 // --- what a recipient has ALREADY been given -------------------------------
 //
-// The cursor is a single scalar, so a T0 delivered while an OLDER record is still owed (a T1 the
-// K/B cap refused) cannot advance it: the cursor is pinned below the owed record, and the T0
-// stays above the cursor — so the next pass would select it again and re-send it. A T0 is a
-// wake+steer: re-sending it is an interrupt storm.
+// The cursor is a single scalar, so a record delivered while an OLDER record is still owed (a T1
+// the K/B cap refused) cannot advance it: the cursor is pinned below the owed record, and the
+// given record stays above the cursor — so the next pass would select it again and re-send it. A
+// re-sent T0 is a wake+steer storm; a re-selected T1 spends a K/B window slot on a record the
+// target already has, until the window admits nothing new.
 //
-// So the delivered T0s are remembered per room root and per recipient, and the pass skips them.
+// So the GIVEN seqs are remembered per room root and per recipient, and BOTH consumers consult
+// the registry: the pass's selection skips them, and the owed floor skips them too (a given
+// record owes nothing, so it must not pin the cursor cap at seq-1 for every later delivery).
+//
+// A given seq is any record the recipient has been handed — not only a T0:
+//   · a delivered T0 (recordDelivery), the wake+steer that must happen once;
+//   · an UNCERTAIN send: the bound expired after the message was issued (delivery.ts), so the
+//     record is in the target's session or may be, but the cursor must not claim it was read;
+//   · a T0 batched into the ceiling's ONE summary interrupt (governor.ts selectT0), so the next
+//     pass does not inject all 50+ of them individually.
+// `markDeliveredT0` keeps its T0-era name: onboarding/hook.ts and store/room-store.ts call it by
+// that name and its busiest caller is still the T0 path — a rename would touch both.
 // The registry is bounded (the oldest entries are dropped): it only has to cover the window in
 // which a floor holds the cursor back.
 const DELIVERED_T0 = globalMap<string, Map<string, Set<number>>>("__roomDeliveredT0");
 const DELIVERED_T0_MAX = 256;
 
+/** Remember that `seq` is GIVEN to this recipient (see the section note: not only T0s). */
 export function markDeliveredT0(root: string, agentId: string, seq: number): void {
   let byAgent = DELIVERED_T0.get(root);
   if (byAgent === undefined) {
@@ -67,7 +80,7 @@ export function markDeliveredT0(root: string, agentId: string, seq: number): voi
   }
 }
 
-/** The T0 seqs this recipient has already been given. */
+/** The seqs this recipient has already been GIVEN (see the section note: not only T0s). */
 export function deliveredT0s(root: string, agentId: string): ReadonlySet<number> {
   return DELIVERED_T0.get(root)?.get(agentId) ?? new Set<number>();
 }

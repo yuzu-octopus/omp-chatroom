@@ -9,10 +9,50 @@ import { type RecordKind, type RoomRecord, STATUS_KEYS, type StatusObject } from
 // the atomic append the plan relies on. Bun's `fs.constants` omits O_CLOEXEC and does not set it
 // by default, so the raw Linux value is supplied explicitly (the only supported platform).
 const O_CLOEXEC = process.platform === "linux" ? 0o2000000 : 0;
+// The log's last component must not be a link: H3 plants one and the O_CREAT|O_APPEND open
+// would append room history to whatever it names. The lstat guard below refuses first; this
+// refuses a link swapped in between the check and the open (ELOOP).
+const O_NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0;
 const FDS = globalMap<string, number>("__roomLogFds");
 
 export function lockPathFor(root: string): string {
   return `${root}/room/.lock`;
+}
+
+/**
+ * The first symlink in a room's WRITE chain, or null when the chain is clean.
+ *
+ * The write paths FOLLOW links: `saveRoomConfig` mkdirs and writes `config.json`, the lock is
+ * published inside `room/`, and `roomLogFd` opens the log O_CREAT|O_APPEND. A link planted in a
+ * project-local room turns "open the project" into a write to whatever it names:
+ * `ln -s ~/.bashrc /tmp/x/.omp-room/room/config.json` is enough. The delete paths already refuse
+ * links (`room-root.ts:105-116` `rmTreeQuiet` lstat guard); this is the same refusal for the
+ * writes. `lstat` never follows the link, so the check itself cannot be redirected.
+ *
+ * A MISSING component is safe — there is nothing to follow, and the mkdir that follows creates
+ * a real directory. The chain stops at the leaf: the root and the room dir are the two
+ * components this module (and `config.ts`) creates and renames inside.
+ */
+function symlinkInRoomPath(root: string, leaf: string): string | null {
+  for (const target of [root, `${root}/room`, leaf]) {
+    try {
+      if (fs.lstatSync(target).isSymbolicLink()) return target;
+    } catch {
+      // absent: nothing to follow
+    }
+  }
+  return null;
+}
+
+/** `symlinkInRoomPath` as a predicate, for callers that skip instead of throwing (migration). */
+export function roomWritePathIsSafe(root: string, leaf: string): boolean {
+  return symlinkInRoomPath(root, leaf) === null;
+}
+
+/** Refuse a room write path that reaches its target through a symlink; names the link. */
+export function assertRoomWritePath(root: string, leaf: string): void {
+  const link = symlinkInRoomPath(root, leaf);
+  if (link !== null) throw new Error(`room path is a symlink: ${link}`);
 }
 
 /**
@@ -60,59 +100,158 @@ export const WORKER_THREAD_REFUSAL =
   "Set `task.workerThreads: 0` (or keep fewer than 9 concurrent subagents) to run the swarm " +
   "in-process, where the room is shared.";
 
+// §lock — a FRESH lock file with no parseable pid is another writer MID-CREATE, not a dead
+// owner: reaping it is what hands the room to two writers. This is how old a writer's create
+// window may look before its file counts as abandoned (crash/legacy writer) and is reaped.
+export const LOCK_MID_CREATE_MS = 5_000;
+// How long a caller rides out a mid-create file before refusing, and how finely it polls.
+// Creation is three syscalls, so this is ~4 orders of magnitude of headroom for a descheduled
+// writer; the bound keeps the synchronous open from stalling the TUI.
+const LOCK_MID_CREATE_WAIT_MS = 250;
+const LOCK_MID_CREATE_POLL_MS = 5;
+
+/** What an existing lock file says: a pid, or that it is empty/unreadable and how old. */
+type LockInspection =
+  | { kind: "missing" }
+  | { kind: "owner"; owner: number }
+  | { kind: "unreadable"; ageMs: number };
+
+/** Block this thread without a timer: `acquireRoomLock` is synchronous by design (I1). */
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function recordHold(root: string): void {
+  const held = HOLDS.get(root);
+  HOLDS.set(root, { count: (held?.count ?? 0) + 1, room: held?.room ?? false });
+}
+
+/** The errno of a thrown value, without trusting its shape. */
+function errnoCode(error: unknown): string | undefined {
+  if (typeof error === "object" && error !== null && "code" in error) {
+    return typeof error.code === "string" ? error.code : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * Create `lockPath` ATOMICALLY WITH ITS CONTENT.
+ *
+ * `open(O_CREAT|O_EXCL)` creates an EMPTY file and the pid is a SECOND syscall, so a concurrent
+ * opener could read the empty file in between, parse NaN, call it stale and unlink it; the first
+ * writer's write then landed on an unlinked inode and BOTH processes believed they held the room
+ * (measured: 10 duplicate seqs over 40 records). `link(2)` publishes the already-written temp
+ * file in ONE atomic step and fails EEXIST when the name is taken, so the lock is never
+ * observable without its pid.
+ *
+ * @returns true when this caller won the name, false when another entry already holds it.
+ */
+function createLockFile(lockPath: string): boolean {
+  const tmp = `${lockPath}.${process.pid}.${newMessageId()}.tmp`;
+  fs.writeFileSync(tmp, String(process.pid), { encoding: "utf-8", flag: "wx" });
+  try {
+    fs.linkSync(tmp, lockPath);
+    return true;
+  } catch (error) {
+    if (errnoCode(error) === "EEXIST") return false;
+    throw error;
+  } finally {
+    fs.rmSync(tmp, { force: true });
+  }
+}
+
+/** Read the existing lock without ever following it. */
+function inspectLock(lockPath: string): LockInspection {
+  let stat: fs.Stats;
+  try {
+    stat = fs.lstatSync(lockPath);
+  } catch {
+    return { kind: "missing" };
+  }
+  // A link at the lock path is never followed: its content could name any pid, and unlinking it
+  // would target the link, not the file the link points at.
+  if (stat.isSymbolicLink()) throw new Error(`room path is a symlink: ${lockPath}`);
+  // Only a regular file can be a writer's lock. A directory or socket here is garbage, not a
+  // mid-create writer — the pre-fix "reap it now" behaviour stays for that shape.
+  if (!stat.isFile()) return { kind: "unreadable", ageMs: Number.POSITIVE_INFINITY };
+  let raw: string;
+  try {
+    raw = fs.readFileSync(lockPath, "utf-8");
+  } catch {
+    return { kind: "unreadable", ageMs: Date.now() - stat.mtimeMs };
+  }
+  const owner = Number.parseInt(raw, 10);
+  if (Number.isInteger(owner) && owner > 0) return { kind: "owner", owner };
+  return { kind: "unreadable", ageMs: Date.now() - stat.mtimeMs };
+}
+
 /**
  * Cross-process single-writer lock (plan 017 followup). Two omp processes on one project root
  * would mint colliding seqs and never see each other's records (proven: 10 duplicate seqs over
  * 40 records with a rendezvous probe) — silent divergence, not an error. The lock makes the
- * second writer fail LOUDLY instead. O_CREAT|O_EXCL is the atomic primitive (no flock in this
+ * second writer fail LOUDLY instead. `link(2)` is the atomic primitive (no flock in this
  * runtime); the file holds the owner pid so a dead owner's stale lock can be reaped after one
  * liveness check. Throws Error("room file locked by pid <N>") when a LIVE owner holds it.
  */
 export function acquireRoomLock(root: string): void {
   const lockPath = lockPathFor(root);
+  // H3 — refuse a planted link BEFORE mkdir: `mkdirSync(recursive)` through a symlinked room
+  // directory succeeds silently, and every write below would then land inside the link's target.
+  assertRoomWritePath(root, lockPath);
   fs.mkdirSync(lockPath.slice(0, lockPath.lastIndexOf("/")), { recursive: true });
-  try {
-    fs.writeFileSync(lockPath, String(process.pid), { flag: "wx" });
-    const held = HOLDS.get(root);
-    HOLDS.set(root, { count: (held?.count ?? 0) + 1, room: held?.room ?? false });
+  if (createLockFile(lockPath)) {
+    recordHold(root);
     return;
-  } catch (error) {
-    if ((error as { code?: string }).code !== "EEXIST") throw error;
   }
-  // A lock exists: reap it iff the owner is dead, else fail loudly.
-  let owner = 0;
-  try {
-    owner = Number.parseInt(fs.readFileSync(lockPath, "utf-8"), 10);
-  } catch {
-    owner = 0; // unreadable → treat as stale, fall through to unlink
-  }
-  if (Number.isInteger(owner) && owner > 0) {
-    try {
-      process.kill(owner, 0); // liveness check only — no signal sent
-      // The pid is alive. If it is OUR pid but we hold no lock on this root, the holder is another
-      // thread of this process (18.17.0 worker-thread subagents): a room is per-process, so this
-      // is a topology refusal, not another omp session.
-      if (owner === process.pid && !HOLDS.has(root)) {
+  // A lock exists. A parseable owner decides by liveness; an EMPTY/unparseable file is another
+  // writer mid-create and is left alone until it is older than the freshness window.
+  const deadline = Date.now() + LOCK_MID_CREATE_WAIT_MS;
+  for (;;) {
+    const found = inspectLock(lockPath);
+    if (found.kind === "missing") {
+      // It vanished between our failed link and the read: race for the name again.
+      if (createLockFile(lockPath)) {
+        recordHold(root);
+        return;
+      }
+      continue;
+    }
+    if (found.kind === "owner") {
+      try {
+        process.kill(found.owner, 0); // liveness check only — no signal sent
+        // The pid is alive. If it is OUR pid but we hold no lock on this root, the holder is
+        // another thread of this process (18.17.0 worker-thread subagents): a room is
+        // per-process, so this is a topology refusal, not another omp session.
+        if (found.owner === process.pid && !HOLDS.has(root)) {
+          throw new Error(
+            `room is per-process and another thread of this process holds it (pid ${found.owner}); ` +
+              WORKER_THREAD_REFUSAL,
+          );
+        }
+        throw new Error(`room file locked by pid ${found.owner}`);
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          (error.message.startsWith("room file locked by pid") ||
+            error.message.startsWith("room is per-process"))
+        )
+          throw error;
+        // ESRCH: owner dead → stale lock, fall through and reap it.
+      }
+    } else if (found.ageMs < LOCK_MID_CREATE_MS) {
+      // Another writer is between create and write (an old-format creator) or crashed within
+      // the window. Unlinking here is the double-writer bug: wait, then refuse LOUDLY.
+      if (Date.now() >= deadline) {
         throw new Error(
-          `room is per-process and another thread of this process holds it (pid ${owner}); ` +
-            WORKER_THREAD_REFUSAL,
+          `room file locked: the lock file is being created by another process (${lockPath})`,
         );
       }
-      throw new Error(`room file locked by pid ${owner}`);
-    } catch (error) {
-      if (
-        error instanceof Error &&
-        (error.message.startsWith("room file locked by pid") ||
-          error.message.startsWith("room is per-process"))
-      )
-        throw error;
-      // ESRCH: owner dead → stale lock, fall through and reap it.
+      sleepSync(LOCK_MID_CREATE_POLL_MS);
+      continue;
     }
+    // Stale: a dead pid, non-file garbage, or an unreadable file past the freshness window.
+    fs.rmSync(lockPath, { force: true, recursive: true });
   }
-  fs.rmSync(lockPath, { force: true, recursive: true });
-  fs.writeFileSync(lockPath, String(process.pid), { flag: "wx" });
-  const held = HOLDS.get(root);
-  HOLDS.set(root, { count: (held?.count ?? 0) + 1, room: held?.room ?? false });
 }
 
 /** Release the lock taken by `acquireRoomLock`. Only the owner unlinks (pid check). */
@@ -166,6 +305,9 @@ export function roomLogFd(root: string, roomId: string): number {
   const path = logPathFor(root, roomId);
   const existing = FDS.get(path);
   if (existing !== undefined) return existing;
+  // H3 — the log is opened for WRITE: a planted link would append the room's history to its
+  // target. `O_NOFOLLOW` below closes the race between this check and the open.
+  assertRoomWritePath(root, path);
   // The room's open ADOPTS the lock handed to it by the migration (see `reserveRoomLock`):
   // taking a second one would fail — a second acquire from the same process is an error by
   // design — and the hold the room adopts is the one the room's close releases.
@@ -180,7 +322,7 @@ export function roomLogFd(root: string, roomId: string): number {
   try {
     fd = fs.openSync(
       path,
-      fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_APPEND | O_CLOEXEC,
+      fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_APPEND | O_CLOEXEC | O_NOFOLLOW,
     );
   } catch (error) {
     // The room never opened: hand the lock back instead of leaking it.
@@ -239,7 +381,10 @@ export function replay(fd: number): { records: RoomRecord[]; skipped: number } {
       continue;
     }
     const record = validateRecord(parsed);
-    if (record === null) {
+    // §3.3 — the log is append-only, so an accepted seq never goes backwards. A line that does
+    // was not written through this room's lock (a hand edit, a merged legacy log) and is
+    // quarantined like any other invalid record instead of shifting the projection.
+    if (record === null || record.seq < lastSeq) {
       skipped++;
       records.push(gapRecord(lastSeq, "invalid"));
       continue;
@@ -262,6 +407,14 @@ export function closeRoomLog(root: string, roomId: string): void {
     releaseRoomLock(root);
   }
 }
+
+// §3.4 — the lease bounds the WRITE path clamps the model's ttl to (`tools/room.ts`). Replay
+// applies the SAME pair: a replayed line is on-disk input (the migration adopts a legacy
+// `.omp-room` from any checkout), so a hand-written `ttlMs: 1e18` must not hydrate a lease the
+// tool could never have minted — held by an id the registry does not know, it never goes stale
+// (claims.ts:36-40), so `grant` denies every later claimant for the life of the room.
+export const CLAIM_TTL_MIN_MS = 1_000;
+export const CLAIM_TTL_MAX_MS = 86_400_000;
 
 // [invented] — §3.3's per-kind required-field table, as data (the validator's single source).
 export const LOG_VALIDATION_FIELDS: Readonly<Record<RecordKind, readonly string[]>> = {
@@ -353,7 +506,12 @@ export function validateRecord(value: unknown): RoomRecord | null {
   if (!isPlainObject(value)) return null;
   if (value.v !== 1) return null;
   if (!isRecordKind(value.kind)) return null;
-  if (!Number.isInteger(value.seq) || !Number.isFinite(value.ts)) return null;
+  // seq is minted as `store.seq + 1` (room-store.ts:204-211), so 0 can never be written; ts is
+  // always Date.now(). Both are checked here because replay is the boundary for on-disk input.
+  const seq = value.seq;
+  if (typeof seq !== "number" || !Number.isInteger(seq) || seq < 1 || !Number.isFinite(value.ts)) {
+    return null;
+  }
   if (typeof value.id !== "string" || typeof value.from !== "string") return null;
 
   const kind: RecordKind = value.kind;
@@ -373,7 +531,17 @@ export function validateRecord(value: unknown): RoomRecord | null {
   ) {
     return null;
   }
-  if (kind === "claim" && !Number.isFinite(value.ttlMs)) return null;
+  if (kind === "claim") {
+    const ttl = value.ttlMs;
+    if (
+      typeof ttl !== "number" ||
+      !Number.isFinite(ttl) ||
+      ttl < CLAIM_TTL_MIN_MS ||
+      ttl > CLAIM_TTL_MAX_MS
+    ) {
+      return null;
+    }
+  }
   if (kind === "member" && !inSet(value.action, MEMBER_ACTIONS)) return null;
   if (kind === "release" && !inSet(value.reason, RELEASE_REASONS)) return null;
   if (kind === "gap" && (!Number.isInteger(value.skipped) || !inSet(value.reason, GAP_REASONS))) {
@@ -421,31 +589,30 @@ export type LogOpenResult =
         | "room file not found"
         | "room file unwritable"
         | "room file corrupt"
-        | "room file locked by another session";
+        | "room file locked by another session"
+        | "room path is a symlink";
     };
 export function openRoomLog(root: string, roomId: string): LogOpenResult {
   // [invented] F8 wrapper
   try {
     return { ok: true, fd: roomLogFd(root, roomId) };
   } catch (error) {
-    // The lock failure carries the owner pid ("room file locked by pid <N>"); the U6 surface
-    // reports the stable variant so callers can match on it without parsing a pid.
-    if (error instanceof Error && error.message.startsWith("room file locked by pid")) {
+    // H3 — a refused link keeps its own stable variant: reporting it as corruption would hide
+    // that opening the project would have written outside the room.
+    if (error instanceof Error && error.message.startsWith("room path is a symlink")) {
+      return { ok: false, error: "room path is a symlink" };
+    }
+    // The lock failure carries the owner pid ("room file locked by pid <N>") or the mid-create
+    // state; the U6 surface reports the stable variant so callers need not parse the message.
+    if (error instanceof Error && error.message.startsWith("room file locked")) {
       return { ok: false, error: "room file locked by another session" };
     }
-    let code: string | undefined;
-    if (
-      typeof error === "object" &&
-      error !== null &&
-      "code" in error &&
-      typeof error.code === "string"
-    ) {
-      code = error.code;
-    }
+    const code = errnoCode(error);
     if (code === "ENOENT" || code === "ENOTDIR") return { ok: false, error: "room file not found" };
     if (code === "EACCES" || code === "EPERM" || code === "EROFS") {
       return { ok: false, error: "room file unwritable" };
     }
+    if (code === "ELOOP") return { ok: false, error: "room path is a symlink" };
     return { ok: false, error: "room file corrupt" };
   }
 }

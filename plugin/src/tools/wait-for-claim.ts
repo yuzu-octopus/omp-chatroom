@@ -6,6 +6,12 @@ import type {
   ExtensionContext,
   ToolDefinition,
 } from "@oh-my-pi/pi-coding-agent";
+import {
+  describeWaitCall,
+  describeWaitResult,
+  renderWaitCall,
+  renderWaitResult,
+} from "../cards/tool-cards";
 import { hostSchema } from "../host-schema";
 import { safeRoomText } from "../onboarding/escape";
 import {
@@ -289,6 +295,14 @@ export function registerWaitForClaim(pi: ExtensionAPI): void {
     ): Promise<WaitForClaimResult> {
       return await waitForClaim(pi, ctx, p, signal);
     },
+    // The same pair `wait_for_agent`/`wait_for_message` attach (`tools/wait-for-agent.ts:326-329`).
+    // Without them the claim wait fell back to the host's generic card, which lost the shared head,
+    // the `acquired <resource>` / timeout summary and the error badge — and made
+    // `waitCallSummary`'s `wait_for_claim` branch unreachable from any surface.
+    renderCall: renderWaitCall,
+    renderResult: renderWaitResult,
+    describeCall: describeWaitCall,
+    describeResult: describeWaitResult,
   } satisfies ToolDefinition<TSchema, WaitForClaimDetails> & { interruptible: boolean };
 
   pi.registerTool(tool);

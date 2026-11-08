@@ -5,8 +5,14 @@ import * as path from "node:path";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { getSessionsDir } from "@oh-my-pi/pi-utils";
 import { logPathFor, roomIdFor } from "../src/ids";
-import { resolveRoomId } from "../src/store/config";
-import { closeRoomLog, lockPathFor, openRoomLog } from "../src/store/log";
+import { DEFAULT_ROOM_CONFIG, resolveRoomId, saveRoomConfig } from "../src/store/config";
+import {
+  acquireRoomLock,
+  closeRoomLog,
+  lockPathFor,
+  openRoomLog,
+  roomLogFd,
+} from "../src/store/log";
 import {
   globalRoomRoot,
   legacyRoomRoot,
@@ -430,4 +436,114 @@ test("the room's lock covers the migration and the open: a second writer is refu
   const reopened = openRoomLog(target, targetId);
   expect(reopened.ok).toBe(true);
   closeRoomLog(target, targetId);
+});
+
+// --- H3: the write paths refuse a planted symlink ---------------------------
+
+test("a symlinked config.json is refused and the link target is untouched", () => {
+  const root = tempRoot();
+  const roomDir = path.join(root, "room");
+  fs.mkdirSync(roomDir, { recursive: true });
+  const outside = tempRoot();
+  const precious = path.join(outside, "precious.txt");
+  fs.writeFileSync(precious, "precious");
+  // `ln -s ~/.bashrc /tmp/x/.omp-room/room/config.json`, in miniature.
+  fs.symlinkSync(precious, path.join(roomDir, "config.json"));
+
+  // Opening the room resolves its id through config.json: the READ refuses, and so does the
+  // write that would have followed the link.
+  expect(() => resolveRoomId(root)).toThrow(/room path is a symlink: .*config\.json/);
+  expect(fs.readFileSync(precious, "utf-8")).toBe("precious");
+  expect(() => saveRoomConfig(root, { ...DEFAULT_ROOM_CONFIG, roomId: "x" })).toThrow(
+    /room path is a symlink/,
+  );
+  // The assertion that fails if the direct write comes back: the target's bytes are unchanged.
+  expect(fs.readFileSync(precious, "utf-8")).toBe("precious");
+});
+
+test("a symlinked room dir is refused before any write reaches the link target", () => {
+  const root = tempRoot();
+  const outside = tempRoot();
+  fs.symlinkSync(outside, path.join(root, "room"));
+
+  expect(() => acquireRoomLock(root)).toThrow(/room path is a symlink: .*\/room$/);
+  expect(() => saveRoomConfig(root, DEFAULT_ROOM_CONFIG)).toThrow(/room path is a symlink/);
+  const opened = openRoomLog(root, roomIdFor(root));
+  expect(opened.ok).toBe(false);
+  if (!opened.ok) expect(opened.error).toBe("room path is a symlink");
+  // Nothing was created inside the link target (no mkdir, no .lock, no log).
+  expect(fs.readdirSync(outside)).toEqual([]);
+});
+
+test("a symlinked log file is refused and its target is not appended to", () => {
+  const root = tempRoot();
+  const roomId = roomIdFor(root);
+  fs.mkdirSync(path.join(root, "room"), { recursive: true });
+  const outside = tempRoot();
+  const precious = path.join(outside, "precious.jsonl");
+  fs.writeFileSync(precious, "keep\n");
+  fs.symlinkSync(precious, logPathFor(root, roomId));
+
+  expect(() => roomLogFd(root, roomId)).toThrow(/room path is a symlink: .*\.jsonl/);
+  const opened = openRoomLog(root, roomId);
+  expect(opened.ok).toBe(false);
+  if (!opened.ok) expect(opened.error).toBe("room path is a symlink");
+  // Neither the guard nor the refused open ever appended a record through the link.
+  expect(fs.readFileSync(precious, "utf-8")).toBe("keep\n");
+});
+
+test("a normal root still opens, writes its config atomically, and migrates", () => {
+  const root = tempRoot();
+  const roomId = resolveRoomId(root);
+  const roomDir = path.join(root, "room");
+  // The temp+rename leaves no staging file behind, and config.json is the only file yet.
+  expect(fs.readdirSync(roomDir).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+  expect(fs.readdirSync(roomDir)).toEqual(["config.json"]);
+
+  const opened = openRoomLog(root, roomId);
+  expect(opened.ok).toBe(true);
+  closeRoomLog(root, roomId);
+  expect(fs.existsSync(logPathFor(root, roomId))).toBe(true);
+
+  // A normal legacy room still moves.
+  const legacy = tempRoot();
+  const legacyId = roomIdFor(legacy);
+  fs.mkdirSync(path.join(legacy, "room"), { recursive: true });
+  fs.writeFileSync(path.join(legacy, "room", `${legacyId}.jsonl`), '{"seq":1}\n');
+  const target = tempRoot();
+  expect(migrateLegacyRoom(legacy, target)).toBe(true);
+  // No legacy config, so the copied log is named after the id the TARGET resolves.
+  expect(fs.existsSync(path.join(target, "room", `${roomIdFor(target)}.jsonl`))).toBe(true);
+  expect(fs.existsSync(legacy)).toBe(false);
+});
+
+test("migration refuses a symlinked legacy root and removes nothing", () => {
+  const outside = tempRoot();
+  const legacyId = roomIdFor(outside);
+  fs.mkdirSync(path.join(outside, "room"), { recursive: true });
+  fs.writeFileSync(path.join(outside, "room", `${legacyId}.jsonl`), '{"seq":1}\n');
+  const legacy = tempRoot();
+  const legacyLink = path.join(legacy, ".omp-room");
+  fs.symlinkSync(outside, legacyLink);
+  const target = tempRoot();
+  const before = snapshotTree(outside);
+
+  expect(migrateLegacyRoom(legacyLink, target)).toBe(false);
+  // BYTE FOR BYTE: the linked-to room is untouched, and the target got nothing.
+  expect(snapshotTree(outside)).toEqual(before);
+  expect(fs.existsSync(path.join(target, "room"))).toBe(false);
+});
+
+test("migration refuses a symlinked legacy room dir before taking its lock", () => {
+  const outside = tempRoot();
+  fs.mkdirSync(path.join(outside, "room"), { recursive: true });
+  fs.writeFileSync(path.join(outside, "room", `${roomIdFor(outside)}.jsonl`), '{"seq":1}\n');
+  const legacy = tempRoot();
+  fs.symlinkSync(path.join(outside, "room"), path.join(legacy, "room"));
+  const target = tempRoot();
+  const before = snapshotTree(outside);
+
+  expect(migrateLegacyRoom(legacy, target)).toBe(false);
+  expect(snapshotTree(outside)).toEqual(before);
+  expect(fs.existsSync(path.join(target, "room"))).toBe(false);
 });

@@ -5,7 +5,13 @@ import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { getSessionsDir } from "@oh-my-pi/pi-utils";
 import { roomDirNameFor, roomIdFor } from "../ids";
 import { configPath, isValidRoomId, loadRoomConfig } from "./config";
-import { acquireRoomLock, holdsRoomLock, releaseRoomLock, reserveRoomLock } from "./log";
+import {
+  acquireRoomLock,
+  holdsRoomLock,
+  releaseRoomLock,
+  reserveRoomLock,
+  roomWritePathIsSafe,
+} from "./log";
 
 /**
  * The legacy project-local room root: `<cwd>/.omp-room`.
@@ -222,6 +228,16 @@ export function migrateLegacyRoom(legacyRoot: string, targetRoot: string): boole
   if (legacyRoot === targetRoot) return false;
   const legacyRoomDir = path.join(legacyRoot, "room");
   const targetRoomDir = path.join(targetRoot, "room");
+  // H3 — the move WRITES on both sides: the legacy lock and the target's config/lock/log. A
+  // symlinked root, room dir or config would put those writes outside the tree the path names
+  // (opening a project would overwrite whatever the link points at). Refuse the whole move:
+  // like a failed copy, it removes NOTHING and leaves both trees exactly as they were.
+  if (
+    !roomWritePathIsSafe(legacyRoot, path.join(legacyRoomDir, "config.json")) ||
+    !roomWritePathIsSafe(targetRoot, path.join(targetRoomDir, "config.json"))
+  ) {
+    return false;
+  }
   if (legacyLogs(legacyRoomDir).length === 0) return false; // no legacy room
   // A legacy room held by a LIVE process belongs to THAT process: copying it would fork the
   // history while the old owner keeps appending to the old file. Leave the legacy room alone.
@@ -426,8 +442,9 @@ export function openMigratedRoom<T>(legacyRoot: string, targetRoot: string, open
   try {
     acquireRoomLock(targetRoot);
   } catch (error) {
-    // The room belongs to a live process: the open would fail exactly like this.
-    if (error instanceof Error && error.message.startsWith("room file locked by pid")) {
+    // The room belongs to a live process (or one is mid-create): the open would fail exactly
+    // like this.
+    if (error instanceof Error && error.message.startsWith("room file locked")) {
       throw new Error("room file locked by another session");
     }
     throw error;

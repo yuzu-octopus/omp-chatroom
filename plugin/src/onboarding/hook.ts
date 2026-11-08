@@ -24,7 +24,7 @@ import {
   roomTimers,
   unregisterSweepNotifier,
 } from "../store/room-store";
-import { owedFloorFor } from "../tools/room";
+import { notifyRecipients, owedFloorFor } from "../tools/room";
 import { buildDigest, recordDigestTurn } from "./digest";
 import rule from "./routing-rule.md" with { type: "text" };
 
@@ -66,11 +66,12 @@ export function registerHooks(pi: ExtensionAPI): void {
     }
     const agentId = ctx.agent.id;
     initCursor(store, agentId);
-    // K3 — the sweep's promised T0 notice. The sweep lives in the store layer (which cannot
-    // import delivery), so the main session registers the notifier that delivers it. Only the
-    // main session runs the sweep (R11/R28), so only the main session registers.
+    // K3 — the sweep's promised T0 notice, plus the one delivery pass that carries every record
+    // the sweep appended. The sweep lives in the store layer (which cannot run a pass), so the
+    // main session registers the notifier that does both. Only the main session runs the sweep
+    // (R11/R28), so only the main session registers.
     if (ctx.agent.kind === "main") {
-      registerSweepNotifier(store.root, async (expired) => {
+      registerSweepNotifier(store.root, async (expired, appended) => {
         for (const claim of expired) {
           // F4 — each expiry is delivered on its own: ONE dead target (a disposed session, a
           // transport rejection) must not swallow the rest of the batch, and the rejection must
@@ -97,6 +98,18 @@ export function registerHooks(pi: ExtensionAPI): void {
                 `${error instanceof Error ? error.message : String(error)}`,
             );
           }
+        }
+        // The sweep's OTHER record — the promoted `claim` that `resolveWaiters` appended for the
+        // oldest queued waiter — is written outside any op's batch, so this pass is the only one
+        // that can carry it (I13: the retention `gap` record's sibling producer). Uncarried it is
+        // T1 for the topic's followers yet reaches none of them, and it stays in their pending set
+        // pinning `cursorCap` at its `seq - 1` — T2 advancement freezes and `coalescePending`
+        // re-emits its "N new message(s)" line on every later pass. `notifyRecipients` reports a
+        // failure instead of throwing (its contract), and the T0 above is not re-sent: `deliver`
+        // marked it, and the pass consults that same registry (I12).
+        const failure = await notifyRecipients(pi, ctx, store, appended, agentId);
+        if (failure !== undefined) {
+          pi.logger.warn(`omp-agent-chatroom: sweep delivery failed: ${failure}`);
         }
       });
     }

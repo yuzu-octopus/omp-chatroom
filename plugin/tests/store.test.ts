@@ -2,11 +2,13 @@ import { afterAll, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { Worker } from "node:worker_threads";
+import { AgentRegistry, type ExtensionAPI, type ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { resolveLocalRoot } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
 import { classify } from "../src/attention/tiers";
 import { logPathFor, newMessageId, resourceKey, roomIdFor } from "../src/ids";
 import { registerHooks } from "../src/onboarding/hook";
+import { enqueueWaiter, grant } from "../src/store/claims";
 import {
   configPath,
   DEFAULT_ROOM_CONFIG,
@@ -30,7 +32,10 @@ import {
 import {
   acquireRoomLock,
   appendLine,
+  CLAIM_TTL_MAX_MS,
+  CLAIM_TTL_MIN_MS,
   closeRoomLog,
+  LOCK_MID_CREATE_MS,
   lockPathFor,
   openRoomLog,
   releaseRoomLock,
@@ -42,6 +47,7 @@ import {
   disposeRoomSession,
   enforceRetention,
   type RoomStore,
+  registerSweepNotifier,
   roomStoreFor,
   roomTimers,
   storeFor,
@@ -344,6 +350,78 @@ test("validateRecord accepts every kind and rejects missing or wrong-typed field
   expect(validateRecord(null)).toBeNull();
   expect(validateRecord("nope")).toBeNull();
   expect(validateRecord([])).toBeNull();
+});
+
+test("validateRecord applies the write path's lease bounds and seq/ts sanity", () => {
+  // A lease is minted only through the tool's clamp to [CLAIM_TTL_MIN_MS, CLAIM_TTL_MAX_MS],
+  // and seq through `store.seq + 1`; replay is the boundary for on-disk input and must not
+  // admit a wider shape than the write path can produce.
+  const claim = (over: Record<string, unknown> = {}): unknown => ({
+    v: 1,
+    seq: 1,
+    ts: 1,
+    kind: "claim",
+    id: "c1",
+    from: "A",
+    resource: "t/k",
+    ttlMs: CLAIM_TTL_MIN_MS,
+    ...over,
+  });
+  expect(validateRecord(claim())).not.toBeNull();
+  expect(validateRecord(claim({ ttlMs: CLAIM_TTL_MAX_MS }))).not.toBeNull();
+  expect(validateRecord(claim({ ttlMs: CLAIM_TTL_MIN_MS - 1 }))).toBeNull();
+  expect(validateRecord(claim({ ttlMs: CLAIM_TTL_MAX_MS + 1 }))).toBeNull();
+  expect(validateRecord(claim({ ttlMs: 1e18 }))).toBeNull();
+  expect(validateRecord(claim({ seq: 0 }))).toBeNull();
+  expect(validateRecord(claim({ ts: Number.POSITIVE_INFINITY }))).toBeNull();
+});
+
+test("replay quarantines an out-of-range lease, so it never pins the resource", () => {
+  const root = tempRoot();
+  const roomId = roomIdFor(root);
+  fs.mkdirSync(path.join(root, "room"), { recursive: true });
+  const written = [
+    msg(1),
+    {
+      v: 1,
+      seq: 2,
+      ts: 2000,
+      kind: "claim",
+      id: "c2",
+      from: "Ghost",
+      resource: "build/dead",
+      // The write path clamps to one day; this never expires and its holder is not registered,
+      // so hydrating it would deny every real claimant for the life of the room.
+      ttlMs: 1e18,
+    },
+    msg(3),
+  ];
+  fs.writeFileSync(
+    logPathFor(root, roomId),
+    written.map((record) => `${JSON.stringify(record)}\n`).join(""),
+  );
+  const store = storeFor(root, roomId);
+  try {
+    expect(store.claims.has("build/dead")).toBe(false);
+    expect(store.records.filter((r) => r.kind === "gap" && r.reason === "invalid").length).toBe(1);
+    // A later claimant gets the resource: the poisoned line never became a claim.
+    expect(grant(store, "build/dead", "Later", CLAIM_TTL_MIN_MS).ok).toBe(true);
+    expect(store.claims.get("build/dead")?.holder).toBe("Later");
+  } finally {
+    store.dispose();
+  }
+});
+
+test("replay quarantines a seq that goes backwards instead of projecting it", () => {
+  const root = tempRoot();
+  const roomId = roomIdFor(root);
+  const fd = roomLogFd(root, roomId);
+  appendLine(fd, `${JSON.stringify(msg(5))}\n`);
+  appendLine(fd, `${JSON.stringify(msg(3))}\n`);
+  const { records, skipped } = replay(fd);
+  expect(skipped).toBe(1);
+  expect(records.filter((r) => r.kind === "msg").map((r) => r.seq)).toEqual([5]);
+  closeRoomLog(root, roomId);
 });
 
 test("openRoomLog returns ok for a fresh root and maps a bad path without throwing", () => {
@@ -909,6 +987,114 @@ test("a stale lock from a dead pid is reaped, not fatal", () => {
   releaseRoomLock(root);
 });
 
+test("a fresh EMPTY lock is another writer mid-create: refused, never unlinked", () => {
+  // The create-then-write race in one place: a lock file with no pid used to parse as NaN,
+  // count as stale and be unlinked — then the first writer's pid landed on the unlinked inode
+  // and BOTH writers believed they owned the room. A young empty file is mid-create, not stale.
+  const root = tempRoot();
+  const lockPath = lockPathFor(root);
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+  fs.writeFileSync(lockPath, "");
+  let message = "";
+  try {
+    acquireRoomLock(root);
+  } catch (error) {
+    message = error instanceof Error ? error.message : String(error);
+  }
+  expect(message).toContain("being created");
+  // The assertion that fails if the old `rmSync` + recreate path comes back: the file survives,
+  // still empty, and the second writer did NOT get the room.
+  expect(fs.existsSync(lockPath)).toBe(true);
+  expect(fs.readFileSync(lockPath, "utf-8")).toBe("");
+});
+
+test("an EMPTY lock older than the freshness window is reaped: dead-writer recovery survives", () => {
+  const root = tempRoot();
+  const lockPath = lockPathFor(root);
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+  fs.writeFileSync(lockPath, ""); // a create that crashed before it could publish a pid
+  const stale = new Date(Date.now() - LOCK_MID_CREATE_MS - 1_000);
+  fs.utimesSync(lockPath, stale, stale);
+  expect(() => acquireRoomLock(root)).not.toThrow();
+  expect(fs.readFileSync(lockPath, "utf-8")).toBe(String(process.pid));
+  releaseRoomLock(root);
+});
+
+test("two acquirers race from one start: exactly one wins the lock", async () => {
+  // A REAL second thread: `link(2)` publishes the lock with its pid in one step, so the loser
+  // sees the winner's file (same process pid) instead of an empty window it could reap.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "room-lock-race-"));
+  TMP.push(dir);
+  const root = path.join(dir, "root");
+  fs.mkdirSync(path.join(root, "room"), { recursive: true });
+  const logModule = new URL("../src/store/log.ts", import.meta.url).pathname;
+  const entry = path.join(dir, "race.ts");
+  fs.writeFileSync(
+    entry,
+    `
+    import { parentPort, workerData } from "node:worker_threads";
+    import { acquireRoomLock, releaseRoomLock } from ${JSON.stringify(logModule)};
+    const start = new Int32Array(workerData.barrier);
+    const release = new Int32Array(workerData.barrier, 4, 1);
+    parentPort?.postMessage({ ready: true });
+    Atomics.wait(start, 0, 0);
+    let ok = false;
+    let message = "";
+    try {
+      acquireRoomLock(workerData.root);
+      ok = true;
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    parentPort?.postMessage({ done: true, ok, message });
+    // Hold the lock until the parent has attempted too: releasing early would let the parent
+    // win afterwards and make the "exactly one" assertion flaky for the wrong reason.
+    if (ok) {
+      Atomics.wait(release, 0, 0);
+      releaseRoomLock(workerData.root);
+    }
+    `,
+  );
+  const barrier = new SharedArrayBuffer(8);
+  const startSignal = new Int32Array(barrier, 0, 1);
+  const releaseSignal = new Int32Array(barrier, 4, 1);
+  const worker = new Worker(entry, { workerData: { root, barrier } });
+  try {
+    const ready = Promise.withResolvers<void>();
+    worker.once("message", () => ready.resolve());
+    worker.once("error", ready.reject);
+    await ready.promise;
+    const finished = Promise.withResolvers<{ ok: boolean; message: string }>();
+    worker.on("message", (payload: unknown) => {
+      if (typeof payload !== "object" || payload === null || !("done" in payload)) return;
+      const ok = "ok" in payload && payload.ok === true;
+      const message =
+        "message" in payload && typeof payload.message === "string" ? payload.message : "";
+      finished.resolve({ ok, message });
+    });
+    worker.on("error", finished.reject);
+    Atomics.store(startSignal, 0, 1);
+    Atomics.notify(startSignal, 0);
+    let mainOk = false;
+    let mainMessage = "";
+    try {
+      acquireRoomLock(root);
+      mainOk = true;
+    } catch (error) {
+      mainMessage = error instanceof Error ? error.message : String(error);
+    }
+    const raced = await finished.promise;
+    // The loser names the topology (the winner's pid is this same process), not a phantom path.
+    expect([mainOk, raced.ok].filter(Boolean).length).toBe(1);
+    expect(mainOk ? raced.message : mainMessage).toContain("another thread of this process");
+  } finally {
+    Atomics.store(releaseSignal, 0, 1);
+    Atomics.notify(releaseSignal, 0);
+    releaseRoomLock(root);
+    await worker.terminate();
+  }
+}, 30_000);
+
 test("a lock carrying our OWN pid is named a thread, not another session", () => {
   // 18.17.0 — worker-thread subagents share the process pid, so a lock file that still carries it
   // while THIS thread holds no lock means another thread owns the room. Saying "locked by pid N"
@@ -1099,5 +1285,166 @@ test("openRoomLog on an unwritable location reports unwritable, never throws", (
     if (!res.ok) expect(res.error).toBe("room file unwritable");
   } finally {
     fs.chmodSync(ro, 0o755);
+  }
+});
+
+// --- P1: the sweep carries EVERY record it appends ------------------------
+//
+// A claim sweep appends a `release{reason:"expired"}` and, when someone is queued on the resource,
+// `resolveWaiters` appends the promoted `claim` — both INSIDE the `claimSweepMs` tick, i.e. outside
+// any op's batch. The notifier used to be handed the expiry batch only, so the promoted claim was
+// carried to NO delivery pass: it is T1 for the topic's followers and reached none of them, and it
+// sat in their pending set pinning `cursorCap` at its `seq - 1` (T2 advancement frozen, the
+// coalesced "N new message(s)" line re-emitted on every later pass). The retention `gap` record
+// already rides the next pass (I13); this is its sibling producer.
+
+test("the claim sweep hands the notifier every record it appended, not just the release", async () => {
+  const root = tempRoot();
+  const storeRoot = path.join(root, ".omp-room");
+  const ctx = {
+    cwd: root,
+    agent: { id: "Main", kind: "main" },
+    localProtocolOptions: { root: storeRoot },
+    setInterval: () => 0 as unknown as Timer,
+    clearTimer: () => {},
+  } as unknown as ExtensionContext;
+  const store = roomStoreFor(ctx);
+  // Two followers of the topic the lease belongs to, and a third agent queued on the lease.
+  for (const id of ["Follower1", "Follower2"]) {
+    store.members.set(id, {
+      agentId: id,
+      joinedAtSeq: 0,
+      topics: new Set(["build"]),
+      muted: new Set(),
+      threadRoots: new Set(),
+      heldTopics: new Set(),
+    });
+  }
+  // A TTL of zero is already past: the very first tick expires it.
+  store.append({ kind: "claim", from: "Holder", resource: "build/step", ttlMs: 0 });
+  enqueueWaiter(store, "build/step", "Waiter");
+
+  const handed: Array<{ expiries: number; appended: readonly RoomRecord[] }> = [];
+  registerSweepNotifier(store.root, (expired, appended) => {
+    handed.push({ expiries: expired.length, appended });
+  });
+
+  // The sweep is the second interval the store schedules; drive that body directly.
+  const intervals: Array<() => unknown> = [];
+  roomTimers.stop(store.root);
+  roomTimers.start(store.root, {
+    ...ctx,
+    setInterval: (cb: () => unknown) => {
+      intervals.push(cb);
+      return 0 as unknown as Timer;
+    },
+  } as unknown as ExtensionContext);
+  expect(intervals.length).toBe(2);
+  await intervals[1]!();
+
+  expect(handed.length).toBe(1);
+  expect(handed[0]!.expiries).toBe(1);
+  const carried: readonly RoomRecord[] = handed[0]?.appended ?? [];
+  // MUTATION-SENSITIVE: while the notifier was handed `expired` alone, this list was empty —
+  // the promoted `claim` was appended to the log and carried to no pass at all.
+  expect(carried.map((r) => r.kind)).toEqual(["release", "claim"]);
+  const promoted = carried.find((r) => r.kind === "claim");
+  if (promoted?.kind !== "claim") throw new Error("expected the promoted claim");
+  expect(promoted.from).toBe("Waiter");
+  expect(store.claims.get("build/step")?.holder).toBe("Waiter");
+});
+
+test("the sweep's promoted claim is delivered to the topic's followers", async () => {
+  // The consumer side of the same fix: the notifier `before_agent_start` registers runs a delivery
+  // pass over every record the sweep appended. Before it, nothing carried the promoted claim, so a
+  // follower's cursor stopped one seq BELOW it (the release's T2 bump is capped at the owed floor)
+  // and no message was ever sent.
+  const root = tempRoot();
+  const storeRoot = path.join(root, ".omp-room");
+  const sent: RoomRecord[] = [];
+  const session = {
+    sendCustomMessage: async (payload: { details?: RoomRecord }) => {
+      if (payload?.details !== undefined) sent.push(payload.details);
+      return true;
+    },
+  };
+  const ctx = {
+    cwd: root,
+    agent: { id: "Main", kind: "main" },
+    localProtocolOptions: { root: storeRoot },
+    sessionManager: { getEntries: () => [] },
+    setInterval: () => 0 as unknown as Timer,
+    // `sendBounded` needs a deadline timer, or the send is issued and never counted.
+    setTimeout: () => 0 as unknown as Timer,
+    clearTimer: () => {},
+  } as unknown as ExtensionContext;
+  const store = roomStoreFor(ctx);
+  const followers = ["Follower1", "Follower2"];
+  try {
+    for (const id of followers) {
+      // A live session: `deliver` skips a target with no session, so the fake is what makes a T1
+      // observable.
+      AgentRegistry.global().register({
+        id,
+        displayName: id,
+        kind: "sub",
+        status: "idle",
+        session: session as never,
+      });
+      store.members.set(id, {
+        agentId: id,
+        joinedAtSeq: 0,
+        topics: new Set(["build"]),
+        muted: new Set(),
+        threadRoots: new Set(),
+        heldTopics: new Set(),
+      });
+    }
+    store.append({ kind: "claim", from: "Holder", resource: "build/step", ttlMs: 0 });
+    // The followers are up to date through the grant: the sweep's records are the only pending.
+    for (const id of followers) bumpCursor(store, id, store.seq);
+
+    const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
+    const pi = {
+      on(event: string, handler: (event: unknown, ctx: unknown) => unknown) {
+        const list = handlers.get(event) ?? [];
+        list.push(handler);
+        handlers.set(event, list);
+      },
+      appendEntry() {},
+      getFlag() {
+        return undefined;
+      },
+      registerFlag() {},
+      logger: { warn() {} },
+      sendMessage() {},
+    } as unknown as ExtensionAPI;
+    registerHooks(pi);
+    for (const handler of handlers.get("before_agent_start") ?? []) {
+      await handler({ type: "before_agent_start", prompt: "hi", systemPrompt: ["BASE"] }, ctx);
+    }
+    enqueueWaiter(store, "build/step", "Waiter");
+
+    const intervals: Array<() => unknown> = [];
+    roomTimers.stop(store.root);
+    roomTimers.start(store.root, {
+      ...ctx,
+      setInterval: (cb: () => unknown) => {
+        intervals.push(cb);
+        return 0 as unknown as Timer;
+      },
+    } as unknown as ExtensionContext);
+    expect(intervals.length).toBe(2);
+    await intervals[1]!();
+
+    const promoted = store.records.find((r) => r.kind === "claim" && r.from === "Waiter");
+    if (promoted === undefined) throw new Error("expected the promoted claim");
+    // MUTATION-SENSITIVE: with only the expiry batch handed to the notifier, `sent` stayed EMPTY
+    // and each follower's cursor stopped at the seq just below the promoted claim.
+    expect(sent.map((r) => r.kind)).toEqual(["claim", "claim"]);
+    expect(sent.every((r) => r.kind === "claim" && r.from === "Waiter")).toBe(true);
+    for (const id of followers) expect(cursorFor(store, id)).toBe(promoted.seq);
+  } finally {
+    AgentRegistry.resetGlobalForTests();
   }
 });

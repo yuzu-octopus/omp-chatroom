@@ -25,11 +25,19 @@ import {
 } from "../cards/tool-cards";
 import { globalMap } from "../globals";
 import { hostSchema } from "../host-schema";
-import { buildDigest, DIGEST_CLAIMS_CAP, ROSTER_CAP } from "../onboarding/digest";
+import { buildDigest, DIGEST_CLAIMS_CAP, estimateTokens, ROSTER_CAP } from "../onboarding/digest";
 import { safeRoomText } from "../onboarding/escape";
 import { contended, grant, reclaimIfStale, release, renew, staleGen } from "../store/claims";
 import { type RoomConfig, resolveRoomConfig } from "../store/config";
-import { bumpCursor, cursorFor, deliveredT0s, initCursor, lagFor } from "../store/cursors";
+import {
+  bumpCursor,
+  cursorFor,
+  deliveredT0s,
+  initCursor,
+  lagFor,
+  markDeliveredT0,
+} from "../store/cursors";
+import { CLAIM_TTL_MAX_MS, CLAIM_TTL_MIN_MS } from "../store/log";
 import { idemIndexKey, type MemberState, type RoomStore, roomStoreFor } from "../store/room-store";
 import {
   type BoardResult,
@@ -165,15 +173,117 @@ export const READ_LIMIT_DEFAULT = 50; // K20 — was 100; routed through the T1 
 export const READ_LIMIT_MAX = 200; // K20 — was 1 000 (~97k tokens)
 export const RECALL_LIMIT_MAX = 100; // §4.1
 
+/** S1 — the longest pattern the op will compile (documented in the schema). */
+const RECALL_PATTERN_MAX = 200;
+/** S1 — the scan's wall-clock budget, checked BEFORE and AFTER every test. */
+const RECALL_SCAN_MS = 1_000;
 /**
- * A quantifier applied to a group that itself contains a quantifier — the classic catastrophic
- * backtracking shape. The regex engine has no timeout, so the shape is refused rather than run.
+ * S1 — the most text any ONE `regex.test` sees. `recordLine` embeds a body up to `maxBodyBytes`
+ * (8192) verbatim, and the plugin is in-process, so one test over a whole line freezes the TUI and
+ * every agent: measured on Bun 1.4.4, `(a|aa)+x` over `"a".repeat(8000)` costs 2 222 ms. 512 chars
+ * shrinks the per-test input 16× and keeps an allowed super-linear pattern cheap (measured:
+ * `.*a.*z` costs 163 ms here, 671 ms at 768 chars, 1 340 ms at 1024).
+ *
+ * THE BOUND, BY DESIGN: a recall call costs at most RECALL_SCAN_MS plus ONE test, and that test
+ * sees at most RECALL_TEXT_MAX chars — a function of these two constants, not of the log or of a
+ * body an untrusted peer chose. (The engine has no regex timeout, so one test cannot be cut short;
+ * that is why the filter below refuses the families that make a test explode at ANY length.)
  */
-const NESTED_QUANTIFIER = /\([^()]*[+*][^()]*\)\s*[+*]/;
+const RECALL_TEXT_MAX = 512;
+/** S1 — how many unrestricted wildcards a pattern may carry; each adds a factor of the line. */
+const RECALL_WILDCARD_MAX = 2;
 
-const CLAIM_TTL_MIN_MS = 1_000; // §3.4 — TTL is mandatory; a zero lease is not a lease
-const CLAIM_TTL_MAX_MS = 86_400_000;
+/**
+ * S1 — the shapes that make backtracking super-linear, refused before the pattern is compiled.
+ * A cheap CONSERVATIVE filter, not a proof: a false positive costs a rewrite, a false negative
+ * costs a freeze, so it errs toward refusing. Quantifier tokens are `+`, `*`, `?` and
+ * `{n,}`/`{n,m}`; an exact `{n}` is bounded, so it is not one.
+ */
+const RECALL_UNSAFE: ReadonlyArray<{ shape: RegExp; why: string }> = [
+  {
+    // (a+)+ (a*)* (a?)+ (.*)* — a repeat of a group that itself repeats. This is the shape the
+    // old guard caught; `?` is a quantifier too and the group may repeat it. The optional
+    // `(?…` prefix keeps a non-capturing group's own `?` out of the inner-quantifier match, so
+    // a harmless `(?:abc)+` is not refused.
+    shape:
+      /\((?:\?(?:[:=!]|<[^>]*>))?(?!\?)(?:\\.|[^()\\])*(?:[+*?]|\{\d+,\d*\})(?:\\.|[^()\\])*\)\s*(?:[+*]|\{\d+,\d*\})/,
+    why: "a repeated group contains another quantifier",
+  },
+  {
+    // (a|aa)+ — the measured input; any alternation under a repeat multiplies the branches.
+    shape: /\((?:\\.|[^()\\])*\|(?:\\.|[^()\\])*\)\s*(?:[+*]|\{\d+,\d*\})/,
+    why: "a repeated group contains alternation",
+  },
+  {
+    // \1 / \k<name> — a backreference re-scans what it already matched.
+    shape: /\\[1-9]|\\k<[^>]*>/,
+    why: "a backreference re-scans what it matched",
+  },
+];
+
+/** S1 — one unrestricted repetition of a multi-character atom: `.*`, `\s+`, `[a-z]*`, `.{2,}`. */
+const RECALL_WILDCARD = /(?<!\\)(?:\.|\\[wWsSdD]|\[[^\]]*\])(?:[+*]|\{\d+,\d*\})/g;
+
+/** S1 — the refusal sentence, or null when the pattern may be compiled and run. */
+function recallRefusal(pattern: string): string | null {
+  for (const { shape, why } of RECALL_UNSAFE) {
+    if (shape.test(pattern)) {
+      return (
+        `pattern refused — catastrophic backtracking risk: ${why}. Allowed: literals, character ` +
+        `classes, and repetition of a single character; flatten a repeated group into a class ` +
+        `([ab]* instead of (a|b)*) or search one alternative at a time.`
+      );
+    }
+  }
+  if ((pattern.match(RECALL_WILDCARD) ?? []).length > RECALL_WILDCARD_MAX) {
+    return (
+      `pattern refused — catastrophic backtracking risk: more than ${RECALL_WILDCARD_MAX} ` +
+      `unrestricted wildcards (every .* / \\s+ / [class]* multiplies the backtracking by the line ` +
+      `length). Anchor them, or search a narrower literal.`
+    );
+  }
+  return null;
+}
+
 const _READ_CURSOR_LAG_MAX = 1_000;
+
+/**
+ * S3 — the persisted model-supplied fields, capped at the WRITE boundary. Only `body` was bounded
+ * (config.maxBodyBytes); the rest are appended to the JSONL verbatim and land in every recipient's
+ * read content and digest, and the per-turn budget is a TOKEN budget, so a 40 KB topic used to cost
+ * ~1 token and still be injected in full. Bytes, not chars: the log is bytes and the budget is a
+ * byte estimate. A refusal names the field and the cap, so the agent shortens the right thing.
+ */
+export const TOPIC_MAX_BYTES = 512;
+export const KEY_MAX_BYTES = 512;
+export const IDEM_KEY_MAX_BYTES = 256;
+export const MENTION_ID_MAX_BYTES = 128;
+export const STATUS_FIELD_MAX_BYTES = 512;
+/** A dependency is persisted as "<topic>/<key>", so it can never outgrow the two halves. */
+export const DEPENDS_ON_MAX_BYTES = TOPIC_MAX_BYTES + 1 + KEY_MAX_BYTES;
+
+/** S3 — null when the value fits; else a sentence naming the field and the cap it broke. */
+function overCap(field: string, value: string, max: number): string | null {
+  const bytes = Buffer.byteLength(value, "utf-8");
+  return bytes > max ? `${field} exceeds its ${max}-byte cap (got ${bytes} bytes)` : null;
+}
+
+/**
+ * S3 — a persisted string list (mention, dependsOn): every entry capped, and the list itself no
+ * longer than the roster — a list longer than the agents that exist names nobody.
+ * The entries are untrusted at this boundary, so a non-string is refused rather than coerced.
+ */
+function overListCap(field: string, values: readonly unknown[], idMax: number): string | null {
+  if (values.length > ROSTER_CAP) {
+    return `${field} names ${values.length} entries; the cap is ${ROSTER_CAP} (the roster cap)`;
+  }
+  for (const value of values) {
+    if (typeof value !== "string") return `${field} entries must be strings`;
+    const error = overCap(`${field} entry`, value, idMax);
+    if (error !== null) return error;
+  }
+  return null;
+}
 
 /** K22/S1 — every room-authored string that reaches the model goes through the shared escaper. */
 const safe = safeRoomText;
@@ -351,14 +461,20 @@ function recipients(store: RoomStore, actorId: string): string[] {
   return [...ids];
 }
 
-/** A board-delta card, the same shell `deliver` uses, for the T0 batch and the T2 digest. */
+/**
+ * A board-delta card, the same shell `deliver` uses, for the T0 batch and the T2 digest.
+ *
+ * Returns whether the line was ISSUED: `false` means the target has no session and is not the
+ * caller, so nothing went out — the T0-batch marking depends on it (a batch nobody was told
+ * about must stay selectable).
+ */
 async function notice(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
   target: string,
   content: string,
   deliverAs: "steer" | "aside",
-): Promise<void> {
+): Promise<boolean> {
   // K22/S1 — the digest line carries room-authored topic names; escape before it reaches the model.
   const payload = { customType: "room:board-delta", content: safe(content), display: true };
   const session = AgentRegistry.global().get(target)?.session;
@@ -376,9 +492,13 @@ async function notice(
       options: { deliverAs },
     });
     if (!outcome.ok) throw outcome.error;
-    return;
+    return true;
   }
-  if (target === ctx.agent.id) pi.sendMessage(payload, { deliverAs });
+  if (target === ctx.agent.id) {
+    pi.sendMessage(payload, { deliverAs });
+    return true;
+  }
+  return false; // no session and not the caller: nothing was issued
 }
 
 /**
@@ -389,11 +509,11 @@ async function notice(
  * Exported for the `/room` command path (room-command.ts), the second caller: the command handler
  * has no `deliveryError` envelope, so this function must stay throw-free — a throw would surface
  * as an unhandled rejection in the TUI. T0 is never dropped, but its pending set is ceiling-batched
- * by `selectT0` (N5) — past the ceiling ONE digest interrupt carries the count and the records stay
- * above the recipient's cursor. T2 is cursor-only, except that its pending set is digested by
- * `coalescePending` (N/T) onto the next T0/T1 delivery for that recipient. A post past the
- * producer's srTCM burst is coalesced for the digest — the record is already durable and its
- * recipients' cursors stay put.
+ * by `selectT0` (N5) — past the ceiling ONE digest interrupt carries the count, and the records stay
+ * above the recipient's cursor (recorded as given, so the next pass injects only newer ones). T2 is
+ * cursor-only, except that its pending set is digested by `coalescePending` (N/T) onto the next
+ * T0/T1 delivery for that recipient. A post past the producer's srTCM burst is coalesced for the
+ * digest — the record is already durable and its recipients' cursors stay put.
  */
 export async function notifyRecipients(
   pi: ExtensionAPI,
@@ -475,19 +595,24 @@ async function deliverToTarget(
   try {
     const viewer = viewerStateFor(store, target);
     const cursor = store.cursors.get(target) ?? 0;
-    // The recipient's whole pending set, minus muted and cursor-only T2: exactly what a
+    // A seq this recipient has already been GIVEN is not pending: while an older record is still
+    // owed the cursor cannot advance past it, so it would sit above the cursor forever and every
+    // later pass would re-send it — a wake+steer storm for a T0, and for an uncertain T1 a K/B
+    // window slot spent on a record the target already has (until `selectT1` admits nothing new).
+    // The same registry keeps a given seq out of the owed floor below.
+    const given = deliveredT0s(store.root, target);
+    // The recipient's whole pending set, minus muted, cursor-only T2, and given: exactly what a
     // push may show. T0 is exempt from K/B; T1 is admitted oldest-first by `selectT1`.
     const pending = store.records.filter(
-      (r) => r.seq > cursor && !isMuted(store, viewer, r) && classify(r, viewer) !== "T2",
+      (r) =>
+        r.seq > cursor &&
+        !given.has(r.seq) &&
+        !isMuted(store, viewer, r) &&
+        classify(r, viewer) !== "T2",
     );
     // N5 — past its ceiling the T0 set batches into ONE digest interrupt, never dropped.
-    // A T0 this recipient has ALREADY been given is skipped: while an older record is still
-    // owed the cursor cannot advance past it, so the T0 would stay pending and every later pass
-    // would re-send it — a wake+steer storm.
-    const alreadyDelivered = deliveredT0s(store.root, target);
-    const t0 = selectT0(
-      pending.filter((r) => classify(r, viewer) === "T0" && !alreadyDelivered.has(r.seq)),
-    );
+    const t0Pending = pending.filter((r) => classify(r, viewer) === "T0");
+    const t0 = selectT0(t0Pending);
     const admitted = [...t0.injected];
     // The T1 window is computed ONCE for this target: the admitted set cannot change within the
     // pass (the per-turn budget is not spent here), and the selection's SUMMARY LINE is what a
@@ -501,7 +626,12 @@ async function deliverToTarget(
     const t1Pending = pending.filter(
       (r) => classify(r, viewer) === "T1" && r.kind !== "gap" && !isMuted(store, viewer, r),
     );
-    const t1 = selectT1(store, viewer, t1Pending, { caps: config });
+    // S3 — same cost basis as `read`: the recipient is shown the rendered line, so the budget
+    // charges that line, not the body `roomBodyOf` alone would price.
+    const t1 = selectT1(store, viewer, t1Pending, {
+      caps: config,
+      costOf: (record) => estimateTokens(recordLine(record)),
+    });
     for (const record of records) {
       if (isMuted(store, viewer, record)) continue;
       if (classify(record, viewer) !== "T1") continue;
@@ -539,7 +669,10 @@ async function deliverToTarget(
     // `room{op:"read"}` (which starts at the cursor) can never return it. `bumpCursor` is
     // monotonic, so a later capped bump cannot pull the cursor back either. A CARRIED gap is
     // not owed (it was told), so it never pins the floor; an uncarried one stays owed but never
-    // lowers the floor the refusal below it already sets.
+    // lowers the floor the refusal below it already sets. Already-GIVEN seqs were filtered out
+    // of `pending` above, so they never pin the floor — but the T0 batch `selectT0` is about to
+    // collapse still counts as owed until its summary is ISSUED (below), so nothing bumps the
+    // cursor past records the recipient has not been told about yet.
     const owed = pending.filter((r) => !admitted.some((a) => a.seq === r.seq));
     const owedFloor = owed.reduce((min, r) => Math.min(min, r.seq), Number.POSITIVE_INFINITY);
     const cursorCap = owedFloor - 1;
@@ -554,7 +687,17 @@ async function deliverToTarget(
       extra = [];
     }
     if (t0.summaryLine !== null) {
-      await notice(pi, ctx, target, t0.summaryLine, "steer");
+      const issued = await notice(pi, ctx, target, t0.summaryLine, "steer");
+      // Only an ISSUED summary may mark the batch GIVEN: ONE line went out in place of the
+      // records, sending the recipient to `room{op:"read"}`. Recording them is what makes the
+      // ceiling hold on the next pass — without it that pass would inject all 50+ individually
+      // (the ceiling undone by the pass that was supposed to enforce it). They stay above the
+      // cursor (nothing bumped it past them: the floor below still counted them), so `read` still
+      // returns them, which is exactly what the summary promised. A target with no session got
+      // nothing, so its batch is NOT marked: it is re-selected (and re-summarised) on revival.
+      if (issued) {
+        for (const record of t0Pending) markDeliveredT0(store.root, target, record.seq);
+      }
     } else if (extra.length > 0) {
       await notice(pi, ctx, target, extra.join("\n"), "aside");
     }
@@ -598,10 +741,18 @@ export function owedFloorFor(
 ): number | null {
   const viewer = viewerStateFor(store, target);
   const cursor = store.cursors.get(target) ?? 0;
+  // A GIVEN seq owes nothing: it was handed to the recipient (a delivered T0, an uncertain send
+  // whose bound expired, a T0 batched into the ceiling summary) and only a floor kept it above
+  // the cursor. Left in the owed set it pins the cap at its seq-1 for EVERY later delivery, so
+  // the cursor freezes and the T1 window fills with already-sent records — the record is still
+  // readable (nothing bumped the cursor past it) and a later confirmed delivery may carry the
+  // cursor over it, which is honest: it was given.
+  const given = deliveredT0s(store.root, target);
   const owed = store.records.filter(
     (r) =>
       r.seq > cursor &&
       r.seq !== exceptSeq &&
+      !given.has(r.seq) &&
       // A `gap` is CARRIED by the next pass, not owed (see `deliverToTarget`) — unless the caller
       // is NOT a delivery pass. The sweep's expiry notice is not one: nothing carries the gap, so
       // a cursor bump past it would lose the notice that records were skipped.
@@ -662,7 +813,8 @@ export function registerRoomTool(pi: ExtensionAPI): void {
       .string()
       .optional()
       .describe(
-        'Topic name, e.g. "build". Used by post, mute and unmute. A claim rolls topic+key together.',
+        'Topic name, e.g. "build". Used by post, mute and unmute. A claim rolls topic+key together. ' +
+          "Max 512 bytes; longer is rejected, never truncated.",
       ),
     body: z
       .string()
@@ -676,7 +828,7 @@ export function registerRoomTool(pi: ExtensionAPI): void {
       .optional()
       .describe(
         "Agent ids to notify. A mention is delivered as T0 (wake + steer), so use it deliberately and " +
-          "prefer a topic when the message can wait.",
+          "prefer a topic when the message can wait. Each id max 128 bytes; at most 32 ids.",
       ),
     replyTo: z
       .string()
@@ -694,14 +846,14 @@ export function registerRoomTool(pi: ExtensionAPI): void {
       .describe(
         "Retry key: a repeat of this post with the same key returns the first one instead of " +
           "posting twice. Use it when a post may be retried — a double post double-wakes every " +
-          "mentioned agent.",
+          "mentioned agent. Max 256 bytes.",
       ),
     key: z
       .string()
       .optional()
       .describe(
         'Second half of a claim resource, e.g. "src/auth". The full resource is "<topic>/<key>". ' +
-          'Same "<topic>/<key>" string wait_for_claim takes.',
+          'Same "<topic>/<key>" string wait_for_claim takes. Max 512 bytes.',
       ),
     status: z
       .object({
@@ -715,7 +867,7 @@ export function registerRoomTool(pi: ExtensionAPI): void {
       .describe(
         "The topic's status ledger: five keys (is_request_satisfied, is_in_loop, " +
           "is_progress_being_made, next_speaker, instruction_or_question), each {reason, answer}. " +
-          "Only the agent holding the topic's claim may write it.",
+          "Only the agent holding the topic's claim may write it. Every reason/answer max 512 bytes.",
       ),
     gen: z
       .number()
@@ -731,7 +883,8 @@ export function registerRoomTool(pi: ExtensionAPI): void {
       .optional()
       .describe(
         'Resources that must be free before this claim can start, as "<topic>/<key>". The claim ' +
-          "is refused while one of them is held, and the refusal names the holder.",
+          "is refused while one of them is held, and the refusal names the holder. Each entry max " +
+          "1025 bytes; at most 32 entries.",
       ),
     ttl: z
       .number()
@@ -744,7 +897,8 @@ export function registerRoomTool(pi: ExtensionAPI): void {
       .optional()
       .describe(
         "Resume read at this log seq number (not a timestamp). Defaults to your cursor; " +
-          "read advances it — re-reading the same since re-delivers.",
+          "read advances it — re-reading the same since re-delivers. Clamped to the log " +
+          "(0…the highest seq): a value past the end reads nothing and cannot skip the future.",
       ),
     limit: z.number().optional().describe("Max records to return from read. 1…200, default 50."),
     lo: z
@@ -762,10 +916,11 @@ export function registerRoomTool(pi: ExtensionAPI): void {
       .string()
       .optional()
       .describe(
-        "Regex for recall over the raw log, newest first, max 100 matches. Max 200 chars; " +
-          "patterns with a quantifier over a quantified group ((a+)+) are refused, and the " +
-          "scan stops at its 1s budget between records. Recall is newest-first, 1s budget, may time out — " +
-          "narrow the pattern and retry.",
+        "Regex for recall over the raw log, newest first, max 100 matches. Max 200 chars; each " +
+          "record is searched through its first 512 chars. Refused before running: a repeat of a " +
+          "group that repeats or alternates ((a+)+, (a|aa)+), backreferences, and more than two " +
+          "unrestricted wildcards (.*, \\s+, [class]*) — they backtrack catastrophically on the " +
+          "host's thread. The scan also stops at its 1s budget; narrow the pattern and retry.",
       ),
   });
 
@@ -824,14 +979,28 @@ export function registerRoomTool(pi: ExtensionAPI): void {
           case "read": {
             const viewer = viewerStateFor(store, agentId);
             const cursor = cursorFor(store, agentId);
-            const since = p.since ?? cursor;
+            // S2 — `since` is model-supplied and `bumpCursor` is monotonic (cursors.ts:25), so one
+            // call with `since: 999999999` and nothing matching would push the cursor past every
+            // future record: no T0/T1 push ever again, `lagFor` (cursors.ts:30) reports 0 so the
+            // board says "caught up", and persistOwnCursor saves the poison into the session.
+            // Clamp the resume point to the log itself ([0, store.seq]) so a bump can only land on
+            // a seq the log has; a non-finite value (NaN) has no usable resume point and starts
+            // from the beginning rather than propagating NaN through Math.min/Math.max.
+            const requested = p.since ?? cursor;
+            const since = Number.isFinite(requested)
+              ? Math.min(Math.max(0, Math.trunc(requested)), store.seq)
+              : 0;
             const limit = clamp(p.limit ?? READ_LIMIT_DEFAULT, 1, READ_LIMIT_MAX);
             const pending = store.records.filter((r) => r.seq > since);
             // K20 — `read` is routed through the same per-turn K/B budget as the injection path.
+            // S3 — the budget charges the RENDERED line, not the body: the line also carries seq,
+            // sender and topic, and `selectT1`'s default (`roomBodyOf`, delivery.ts:296) ignores
+            // them, so a huge topic used to cost ~1 token and still be injected in full.
             const { injected } = selectT1(store, viewer, pending, {
               spend: true,
               limit,
               caps: config,
+              costOf: (record) => estimateTokens(recordLine(record)),
             });
             const next = injected.length > 0 ? injected[injected.length - 1]!.seq : since;
             bumpCursor(store, agentId, next);
@@ -865,12 +1034,24 @@ export function registerRoomTool(pi: ExtensionAPI): void {
           case "post": {
             const topic = p.topic;
             if (!topic) return fail("post requires a topic");
+            const topicError = overCap("topic", topic, TOPIC_MAX_BYTES);
+            if (topicError !== null) return fail(topicError);
             const body = p.body;
             if (body === undefined) return fail("post requires a body");
             // K19 — the body cap is enforced here, before the record is drafted; never truncated silently.
             const bytes = Buffer.byteLength(body, "utf-8");
             if (bytes > config.maxBodyBytes) {
               return fail(`body exceeds maxBodyBytes (${config.maxBodyBytes})`);
+            }
+            // S3 — the fields the body cap never covered, capped before the record is drafted: the
+            // log is append-only, so an oversized one is paid for on every later read and digest.
+            if (p.idemKey !== undefined) {
+              const idemError = overCap("idemKey", p.idemKey, IDEM_KEY_MAX_BYTES);
+              if (idemError !== null) return fail(idemError);
+            }
+            if (p.mention !== undefined) {
+              const mentionError = overListCap("mention", p.mention, MENTION_ID_MAX_BYTES);
+              if (mentionError !== null) return fail(mentionError);
             }
             // N7 — a body over the T1 token budget is truncated to a head + a read handle.
             const { head, handle } = truncateOversized(body, config.maxT1Tokens);
@@ -895,6 +1076,23 @@ export function registerRoomTool(pi: ExtensionAPI): void {
                   `status is missing or malformed: ${missing.join(", ")} (each key needs ` +
                     `{reason, answer})`,
                 );
+              }
+              // S3 — the ledger is persisted verbatim and injected to every recipient; cap each
+              // string before the shape check's `holds` gate, so the cap is what refuses it.
+              for (const key of STATUS_KEYS) {
+                const entry = p.status[key]!;
+                const reasonError = overCap(
+                  `status.${key}.reason`,
+                  entry.reason,
+                  STATUS_FIELD_MAX_BYTES,
+                );
+                if (reasonError !== null) return fail(reasonError);
+                const answerError = overCap(
+                  `status.${key}.answer`,
+                  entry.answer,
+                  STATUS_FIELD_MAX_BYTES,
+                );
+                if (answerError !== null) return fail(answerError);
               }
               const holds = [...store.claims.values()].some(
                 (claim) => claim.holder === agentId && claim.resource.startsWith(`${topic}/`),
@@ -986,6 +1184,14 @@ export function registerRoomTool(pi: ExtensionAPI): void {
             const topic = p.topic;
             const key = p.key;
             if (!topic || !key) return fail("claim requires topic and key");
+            // S3 — `<topic>/<key>` is persisted on the claim record and every board/read line.
+            const fieldError =
+              overCap("topic", topic, TOPIC_MAX_BYTES) ?? overCap("key", key, KEY_MAX_BYTES);
+            if (fieldError !== null) return fail(fieldError);
+            if (p.dependsOn !== undefined) {
+              const dependsError = overListCap("dependsOn", p.dependsOn, DEPENDS_ON_MAX_BYTES);
+              if (dependsError !== null) return fail(dependsError);
+            }
             const resource = `${topic}/${key}`;
             const viewer = viewerFor(store, agentId);
             const ttlMs = clamp(p.ttl ?? config.claimTtlMs, CLAIM_TTL_MIN_MS, CLAIM_TTL_MAX_MS);
@@ -1085,6 +1291,10 @@ export function registerRoomTool(pi: ExtensionAPI): void {
             const topic = p.topic;
             const key = p.key;
             if (!topic || !key) return fail("release requires topic and key");
+            // S3 — the release record persists the resource too.
+            const fieldError =
+              overCap("topic", topic, TOPIC_MAX_BYTES) ?? overCap("key", key, KEY_MAX_BYTES);
+            if (fieldError !== null) return fail(fieldError);
             const resource = `${topic}/${key}`;
             const held = store.claims.get(resource);
             if (!held) return fail("unknown resource");
@@ -1243,29 +1453,37 @@ export function registerRoomTool(pi: ExtensionAPI): void {
           case "recall": {
             const pattern = p.pattern;
             if (pattern === undefined) return fail("recall requires a pattern");
-            if (pattern.length > 200) return fail("pattern too long (max 200 chars)");
-            // Catastrophic backtracking: a quantifier over a group that itself contains a quantifier
-            // ((a+)+, (.*)*) is exponential on a non-matching input, and the scan deadline is only
-            // checked BETWEEN records — one such test can hang the tool for minutes. The shape is
-            // refused instead of run.
-            if (NESTED_QUANTIFIER.test(pattern)) {
-              return fail(
-                "pattern risks catastrophic backtracking (quantifier over a quantified group)",
-              );
+            if (pattern.length > RECALL_PATTERN_MAX) {
+              return fail(`pattern too long (max ${RECALL_PATTERN_MAX} chars)`);
             }
+            // S1 — refuse the super-linear shapes BEFORE compiling: the regex engine has no
+            // timeout, and one catastrophic `test` used to run for 2 222 ms (measured) on the
+            // host's own thread while the deadline was only checked between records.
+            const refusal = recallRefusal(pattern);
+            if (refusal !== null) return fail(refusal);
             let regex: RegExp;
             try {
               regex = new RegExp(pattern);
             } catch {
               return fail("invalid regex pattern");
             }
-            const deadline = Date.now() + 1000;
+            const deadline = Date.now() + RECALL_SCAN_MS;
             const matches: Array<{ seq: number; record: RoomRecord }> = [];
             for (let i = store.records.length - 1; i >= 0; i--) {
+              // S1 — the deadline is checked BEFORE the test (never start one past the budget) and
+              // AFTER it (a single test that overran aborts the scan instead of waking up to run
+              // every remaining record). One overrun is the bounded worst case, and the slice below
+              // is what keeps that one affordable.
               if (Date.now() > deadline) return fail("recall timed out");
               const record = store.records[i]!;
-              const text = recordLine(record);
-              if (regex.test(text)) {
+              const line = recordLine(record);
+              // S1 — a per-record slice: the pattern never sees more than RECALL_TEXT_MAX chars, so
+              // its cost is bounded by the slice, not by a body an untrusted peer chose. A match in
+              // the head or the first ~490 bytes of the body is still found.
+              const probe = line.length > RECALL_TEXT_MAX ? line.slice(0, RECALL_TEXT_MAX) : line;
+              const hit = regex.test(probe);
+              if (Date.now() > deadline) return fail("recall timed out");
+              if (hit) {
                 matches.push({ seq: record.seq, record });
                 if (matches.length >= RECALL_LIMIT_MAX) break;
               }

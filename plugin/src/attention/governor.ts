@@ -50,7 +50,10 @@ export function selectT0(
   ceiling: number = T0_COALESCE_CEILING,
 ): { injected: RoomRecord[]; summaryLine: string | null } {
   // Never dropped: under the ceiling every interrupt is injected; past it they are batched into a
-  // single digest interrupt that carries the count.
+  // single digest interrupt that carries the count. The CALLER must record the batched seqs as
+  // GIVEN (cursors.markDeliveredT0): the summary sends the recipient to `room{op:"read"}` instead
+  // of injecting them, and without that record the very next pass would inject all 50+
+  // individually — the ceiling undone by the pass that was supposed to enforce it.
   if (pending.length <= ceiling) return { injected: [...pending], summaryLine: null };
   return {
     injected: [],
@@ -157,14 +160,25 @@ export function moreLine(dropped: number, mentions: number, since: number): stri
  * `spend` charges this turn's ledger as it admits, so a second pull in the same turn sees what is
  * left; the push path (already turn-scoped) leaves it unset. `limit` is `read`'s own bound and can
  * only narrow the result. The first record is always admitted (progress over a stall).
+ *
+ * `costOf` is the price of one record against B. The default charges the BODY alone; the tool
+ * passes its renderer instead, because the budget must charge what the recipient is actually
+ * shown — the rendered line carries seq, sender and topic as well as the body (`room.ts`
+ * `recordLine`), so a huge topic was ~1 token and still injected in full.
  */
 export function selectT1(
   store: RoomStore,
   viewer: MemberState,
   pending: readonly RoomRecord[],
-  options: { spend?: boolean; limit?: number; caps?: Partial<Caps> } = {},
+  options: {
+    spend?: boolean;
+    limit?: number;
+    caps?: Partial<Caps>;
+    costOf?: (record: RoomRecord) => number;
+  } = {},
 ): { injected: RoomRecord[]; summaryLine: string | null } {
   const caps = { ...DEFAULT_CAPS, ...options.caps };
+  const costOf = options.costOf ?? ((record: RoomRecord) => estimateTokens(roomBodyOf(record)));
   const budget = options.spend === true ? budgetFor(store, viewer.agentId) : undefined;
   const maxRecords = Math.min(
     caps.maxT1PerTurn - (budget?.records ?? 0),
@@ -175,7 +189,7 @@ export function selectT1(
   let tokens = 0;
   if (maxRecords > 0) {
     for (const record of pending) {
-      const cost = estimateTokens(roomBodyOf(record));
+      const cost = costOf(record);
       if (injected.length > 0) {
         if (injected.length >= maxRecords) break;
         if (tokens + cost > maxTokens) break;

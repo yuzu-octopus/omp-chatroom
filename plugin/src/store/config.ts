@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { roomIdFor } from "../ids";
+import { newMessageId, roomIdFor } from "../ids";
+import { assertRoomWritePath } from "./log";
 // SCAFFOLD-DEFINED — mirrors the manifest settings, which are unreachable at runtime (R6).
 export interface RoomConfig {
   roomId: string; // "" = mint from the root (roomIdFor(root)); non-empty = explicit override
@@ -80,6 +81,10 @@ export function isValidRoomId(value: string): boolean {
 }
 
 export function loadRoomConfig(root: string): RoomConfig {
+  // H3 — config.json is READ for the room id and then (via `resolveRoomId`) WRITTEN. A planted
+  // link must be refused here too: following it would read a foreign file, and the later save
+  // would overwrite it. Refusal is outside the try — an absent file is defaults, a link is not.
+  assertRoomWritePath(root, configPath(root));
   try {
     return coerceConfig(JSON.parse(fs.readFileSync(configPath(root), "utf-8")));
   } catch {
@@ -89,8 +94,27 @@ export function loadRoomConfig(root: string): RoomConfig {
 
 export function saveRoomConfig(root: string, config: RoomConfig): void {
   const path = configPath(root);
+  assertRoomWritePath(root, path);
   fs.mkdirSync(path.slice(0, path.lastIndexOf("/")), { recursive: true });
-  fs.writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`, "utf-8");
+  // Write a unique temp INSIDE the verified directory and rename it into place. `rename(2)`
+  // replaces a link rather than writing through it, so a link planted after the check cannot
+  // redirect these bytes, and a crash cannot leave a half-written config that `coerceConfig`
+  // would silently read as defaults.
+  const tmp = `${path}.${newMessageId()}.tmp`;
+  try {
+    fs.writeFileSync(tmp, `${JSON.stringify(config, null, 2)}\n`, {
+      encoding: "utf-8",
+      flag: "wx",
+    });
+    fs.renameSync(tmp, path);
+  } catch (error) {
+    try {
+      fs.rmSync(tmp, { force: true });
+    } catch {
+      // Best-effort: the temp is inert either way (it is not the config the room reads).
+    }
+    throw error;
+  }
 }
 
 // X1 — the ONE room-id resolver: config override > roomIdFor(root). Root-stable, never a session id.

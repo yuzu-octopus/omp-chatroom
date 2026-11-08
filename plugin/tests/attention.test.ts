@@ -41,7 +41,12 @@ import {
   roomStoreFor,
 } from "../src/store/room-store";
 import type { RoomRecord } from "../src/store/schema";
-import { notifyRecipients, type RoomToolResult, registerRoomTool } from "../src/tools/room";
+import {
+  notifyRecipients,
+  owedFloorFor,
+  type RoomToolResult,
+  registerRoomTool,
+} from "../src/tools/room";
 
 // --- fixtures -------------------------------------------------------------
 
@@ -632,9 +637,9 @@ function fakeCtx(root: string, id: string): ExtensionContext {
 }
 
 /**
- * `result` is what the HOST answers: `true` (the turn started), `false` (the host's preflight
- * declined - it resolves false, it does not reject), or a promise that never settles (the bound
- * expires).
+ * `result` is what the HOST answers: `true` (the turn started), `false` (the message was QUEUED
+ * into a streaming turn and no turn started — agent-session.ts:10499-10541; it resolves false, it
+ * does not reject), or a promise that never settles (the bound expires).
  */
 function registerSession(id: string, calls: Send[], result: boolean | "never" = true): void {
   const session = {
@@ -704,24 +709,28 @@ test("R5: deliveries are counted per tier, and a T0 is logged", async () => {
   }
 });
 
-test("a send the host DECLINED is not a delivery: the record stays owed", async () => {
-  // The host resolves `false` when its preflight declines to start a turn - a resolution, not a
-  // rejection. Treating it as a delivery marks the record delivered AND pushes it below the
-  // cursor, so the mention is gone from the recipient's view for good.
+test("a streaming target's `false` is a QUEUED message: the T0 counts as delivered", async () => {
+  // The host resolves `false` AFTER queueing the message into a running turn — every streaming
+  // `deliverAs` arm returns false (agent-session.ts:10499-10541) — so `false` means "no turn was
+  // started", not "declined". Mapping it to a failure left the record un-given, so the next pass
+  // re-steered the same mention (the I12 storm) and the poster got a deliveryError for a message
+  // that WAS queued.
   const root = tempRoot();
   const ctx = fakeCtx(root, "Sender");
   const store = roomStoreFor(ctx);
   const { pi } = fakePi();
   const calls: Send[] = [];
-  registerSession("Decliner", calls, false);
+  registerSession("Streamer", calls, false);
 
-  const record = msg(1, { from: "Other", topic: "build", mention: ["Decliner"] });
-  await expect(deliver(pi, ctx, "Decliner", record, "T0")).rejects.toThrow();
+  const record = msg(1, { from: "Other", topic: "build", mention: ["Streamer"] });
+  await expect(deliver(pi, ctx, "Streamer", record, "T0")).resolves.toBeUndefined();
 
-  // The cursor did NOT move: the record is still owed, so `room{op:"read"}` can still return it.
-  expect(store.cursors.get("Decliner")).toBeUndefined();
-  // and the T0 was not marked as given, so the next pass will try again
-  expect(deliveredT0s(store.root, "Decliner").has(1)).toBe(false);
+  // Delivered: the send fired, the tier counter counted it, the cursor moved, and the T0 is
+  // remembered as given so no later pass re-steers it.
+  expect(calls.length).toBe(1);
+  expect(store.deliveries.T0).toBe(1);
+  expect(store.cursors.get("Streamer")).toBe(1);
+  expect(deliveredT0s(store.root, "Streamer").has(1)).toBe(true);
 });
 
 test("a send whose outcome is UNKNOWN does not advance the cursor either", async () => {
@@ -742,11 +751,10 @@ test("a send whose outcome is UNKNOWN does not advance the cursor either", async
   expect(deliveredT0s(store.root, "Slow").has(1)).toBe(true);
 });
 
-test("a T1 send the host DECLINED reports the failure AND leaves the record owed", async () => {
-  // The host resolves `false` when its preflight declines to start a
-  // turn — a resolution, not a rejection. The pass must REPORT it (the
-  // failure note names the decline) while the cursor stays put, so the
-  // record stays owed via `room{op:"read"}`.
+test("a T1 the host answers `false` to is a delivery: cursor advances, nothing reported", async () => {
+  // Same host contract as the T0 arm: `false` is a message queued into a streaming turn, so
+  // treating it as a failure re-sent the record on every later pass and told the poster its
+  // delivery failed. It must count as delivered, with no failure note.
   const root = tempRoot();
   const ctx = fakeCtx(root, "Sender");
   const store = roomStoreFor(ctx);
@@ -762,8 +770,9 @@ test("a T1 send the host DECLINED reports the failure AND leaves the record owed
   registerSession("Slow", [], false);
   const record = store.append({ kind: "msg", from: "Sender", topic: "build", body: "hello" });
   const failure = await notifyRecipients(pi, ctx, store, [record], "Sender");
-  expect(store.cursors.get("Slow") ?? 0).toBe(0);
-  expect(typeof failure).toBe("string");
+  expect(failure).toBeUndefined();
+  expect(store.cursors.get("Slow")).toBe(record.seq);
+  expect(store.deliveries.T1).toBe(1);
 });
 
 test("a T1 send whose outcome is UNKNOWN leaves the cursor AND reports nothing", async () => {
@@ -789,6 +798,109 @@ test("a T1 send whose outcome is UNKNOWN leaves the cursor AND reports nothing",
   const failure = await notifyRecipients(pi, ctx, store, [record], "Sender");
   expect(store.cursors.get("Slow") ?? 0).toBe(0);
   expect(failure).toBeUndefined();
+});
+
+test("an uncertain T1 stops pinning the floor: the next pass's confirmed T1 moves the cursor", async () => {
+  // The bound expired on the first send — the steady state, since a live recipient's send
+  // resolves at the END of its turn. The record is GIVEN but not owed; left owed it pins the
+  // cap at its seq-1 for every later delivery, so the next pass's confirmed T1 is bump-capped
+  // below it: the cursor never moves, the T1 window fills with already-sent records, and
+  // `selectT1` stops admitting new ones.
+  const root = tempRoot();
+  const b = `attn-uncertainfloor-${Date.now()}`;
+  const first: Send[] = [];
+  registerSession(b, first, "never");
+  const h = roomHarness(root, "A");
+  memberFollowing(h, b);
+  const r1 = await h.execute({ op: "post", topic: "build", body: "first" });
+  expect(r1.details).toMatchObject({ ok: true, op: "post" });
+  expect(JSON.stringify(r1.details)).not.toContain("deliveryError"); // issued, not failed
+  expect(first.length).toBe(1);
+  expect(h.store.cursors.get(b) ?? 0).toBe(0); // unconfirmed: the cursor does not claim it
+
+  // The recipient now answers inside the bound. A later T1 must still be admitted AND advance
+  // the cursor: the given seq owes nothing.
+  const second: Send[] = [];
+  registerSession(b, second, true);
+  const r2 = await h.execute({ op: "post", topic: "build", body: "second" });
+  expect(r2.details).toMatchObject({ ok: true, op: "post" });
+  expect(second.length).toBe(1);
+  const seq = h.store.records.find((r) => r.kind === "msg" && r.body === "second")!.seq;
+  expect(h.store.cursors.get(b)).toBe(seq);
+});
+
+test("an uncertain T1 stays readable: read returns it because the cursor did not move", async () => {
+  // Given, but never confirmed: nothing may bump the cursor over it, so `read` (which starts at
+  // the cursor) still returns the record. The registry only stops it being re-sent.
+  const root = tempRoot();
+  const b = `attn-uncertainread-${Date.now()}`;
+  registerSession(b, [], "never");
+  const h = roomHarness(root, "A");
+  memberFollowing(h, b);
+  const res = await h.execute({ op: "post", topic: "build", body: "unconfirmed" });
+  expect(res.details).toMatchObject({ ok: true, op: "post" });
+  expect(JSON.stringify(res.details)).not.toContain("deliveryError");
+  expect(h.store.cursors.get(b) ?? 0).toBe(0);
+  const seq = h.store.records.find((r) => r.kind === "msg" && r.body === "unconfirmed")!.seq;
+  expect(deliveredT0s(h.store.root, b).has(seq)).toBe(true); // given: no re-send
+
+  // The recipient's own read of the room still sees it.
+  const reader = roomHarness(root, b);
+  const read = await reader.execute({ op: "read" });
+  expect(read.details).toMatchObject({ ok: true, op: "read" });
+  const details = read.details;
+  const records = details !== undefined && "records" in details ? details.records : [];
+  expect(records.some((r) => r.kind === "msg" && r.body === "unconfirmed")).toBe(true);
+});
+
+test("a send that was NEVER issued still pins the floor: a genuine drop is not forgiven", async () => {
+  // `sendToTarget`'s own `ok:false` is the no-capability arm: nothing was issued. Only an ISSUED
+  // send may count as given — forgiving a genuine drop would let a later cursor bump walk over
+  // the dropped record and `read` could never return it.
+  const root = tempRoot();
+  const b = `attn-nocap-${Date.now()}`;
+  AgentRegistry.global().register({
+    id: b,
+    displayName: b,
+    kind: "sub",
+    status: "running",
+    session: {} as never, // neither sendCustomMessage nor deliverIrcMessage
+  });
+  const h = roomHarness(root, "A");
+  memberFollowing(h, b);
+  const r1 = await h.execute({ op: "post", topic: "build", body: "lost" });
+  expect("deliveryError" in (r1.details ?? {})).toBe(true); // reported: nothing was issued
+  expect(h.store.cursors.get(b) ?? 0).toBe(0);
+  const dropped = h.store.records.find((r) => r.kind === "msg" && r.body === "lost")!.seq;
+  expect(deliveredT0s(h.store.root, b).has(dropped)).toBe(false);
+
+  // The transport comes back; the next pass must not step over the dropped record.
+  registerSession(b, [], true);
+  const r2 = await h.execute({ op: "post", topic: "build", body: "next" });
+  expect(r2.details).toMatchObject({ ok: true, op: "post" });
+  expect("deliveryError" in (r2.details ?? {})).toBe(false);
+  expect(h.store.cursors.get(b) ?? 0).toBe(0); // pinned below the dropped seq
+});
+
+test("the owed floor skips a given seq — a handed record pins no later delivery", () => {
+  // `owedFloorFor` is the SWEEP's floor too (hook.ts delivers outside a pass), so it must skip
+  // the same given seqs the pass does. Left owed, a handed record pins the cap at its seq-1 for
+  // every later delivery — the cursor freezes and `read` never advances.
+  const root = tempRoot();
+  const ctx = fakeCtx(root, "Sender");
+  const store = roomStoreFor(ctx);
+  const b = `attn-floorgiven-${Date.now()}`;
+  // A mention is T0 for any viewer — including one the store has never seen as a member.
+  const record = store.append({
+    kind: "msg",
+    from: "X",
+    topic: "build",
+    body: "handed",
+    mention: [b],
+  });
+  expect(owedFloorFor(store, b)).toBe(record.seq);
+  markDeliveredT0(store.root, b, record.seq);
+  expect(owedFloorFor(store, b)).toBeNull(); // given: owes nothing, pins nothing
 });
 
 test("a recipient whose T1 backlog exceeds the window is TOLD to read, not left deaf", async () => {
@@ -961,10 +1073,10 @@ test("deliver: a session with neither send capability fails loudly and keeps the
 });
 
 test("an uncertain T0 is remembered as given — the next pass does not storm", async () => {
-  // delivery.ts uncertain arm 190: a T0 whose outcome is unknown is
-  // marked delivered (so the next pass skips it) but the cursor stays
-  // put (the record stays owed). Silence twice would be a storm; moving
-  // the cursor would lose the record.
+  // delivery.ts uncertain arm: a send whose outcome is unknown is marked GIVEN, so the next
+  // pass does not re-select it and the owed floor does not pin the cursor at seq-1 — while the
+  // cursor stays put, so the record stays readable. Silence twice would be a storm; moving the
+  // cursor would lose the record.
   const root = tempRoot();
   const ctx = fakeCtx(root, "Sender");
   const store = roomStoreFor(ctx);
@@ -1224,6 +1336,42 @@ test("T0 coalescing: >50 pending T0 interrupts for one recipient become ONE batc
   expect(content).toContain('room{op:"read"');
   // Batching is not a drop: the records stay above B's cursor, so `read` returns them.
   expect(h.store.cursors.get(b) ?? 0).toBe(0);
+});
+
+test("the T0 ceiling holds across passes: the batch is given, so the next pass injects nothing", async () => {
+  // selectT0 past the ceiling injects nothing and returns ONE summary line pointing at `read`.
+  // Nothing marked those seqs, so the very NEXT pass selected all 52 again and injected every
+  // one of them individually — up to 50+ serialized bounded sends on the shared per-root chain,
+  // the ceiling undone by the pass that was supposed to enforce it. Recording the batch as
+  // given keeps them out of the selection; they stay above the cursor, so `read` still has them.
+  const root = tempRoot();
+  const bCalls: Send[] = [];
+  const b = `attn-t0batch2-${Date.now()}`;
+  registerSession(b, bCalls);
+  const h = roomHarness(root, "A");
+  for (let i = 0; i < 51; i++) {
+    h.store.append({ kind: "msg", from: "X", topic: "build", body: `ping ${i}`, mention: [b] });
+  }
+
+  const first = await h.execute({ op: "post", topic: "build", body: "over to you", mention: [b] });
+  expect(first.details).toMatchObject({ ok: true, op: "post" });
+  expect(bCalls.length).toBe(1);
+  expect(bCalls[0]!.options).toMatchObject({ deliverAs: "steer" });
+
+  // Nothing was injected individually and the cursor did not move: `read` still returns them,
+  // which is exactly what the summary line promises.
+  expect(h.store.cursors.get(b) ?? 0).toBe(0);
+  const reader = roomHarness(root, b);
+  const read = await reader.execute({ op: "read" });
+  const readDetails = read.details;
+  const readRecords =
+    readDetails !== undefined && "records" in readDetails ? readDetails.records : [];
+  expect(readRecords.some((r) => r.kind === "msg" && r.body === "ping 0")).toBe(true);
+
+  // A second pass with nothing NEW for B: no second summary, no 52 individual interrupts.
+  const second = await h.execute({ op: "post", topic: "elsewhere", body: "unrelated" });
+  expect(second.details).toMatchObject({ ok: true, op: "post" });
+  expect(bCalls.length).toBe(1);
 });
 
 test("T2 digest: 20 pending T2 records ride the next T0 delivery as exactly one line", async () => {

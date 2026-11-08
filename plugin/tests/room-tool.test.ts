@@ -21,6 +21,7 @@ import {
   requeueWaiter,
   resolveWaiters,
 } from "../src/store/claims";
+import { DEFAULT_ROOM_CONFIG, saveRoomConfig } from "../src/store/config";
 import {
   disposeRoomSession,
   type RoomStore,
@@ -1248,6 +1249,57 @@ test("read: the budget is per turn — a repeat read is throttled and the turn b
   const third = await invokeRoom(ctx, { op: "read", limit: 200 });
   expect(((third.details?.records ?? []) as unknown[]).length).toBeGreaterThan(0);
 });
+
+// --- S2 — `since` is model-supplied; it must not be able to poison the cursor ---
+
+test("read: a since past the log is clamped, and a later mention still reaches the agent", async () => {
+  const { store, ctx } = newTestStore();
+  await invokeRoom(ctx, { op: "join" });
+  store.append({ kind: "msg", from: "AgentB", topic: "t", body: "one" });
+
+  const poisoned = await invokeRoom(ctx, { op: "read", since: 999_999_999 });
+  expect(poisoned.details).toMatchObject({ ok: true, op: "read" });
+  // The resume point is clamped to the log, so the bump lands ON the highest seq, never past it.
+  // Unclamped, `bumpCursor` (cursors.ts:25, monotonic) keeps 999999999, `lagFor` (cursors.ts:30)
+  // then reports 0 — "caught up" — and persistOwnCursor saves the poison into the session.
+  expect(poisoned.details?.cursor).toBeLessThanOrEqual(store.seq);
+  expect(store.cursors.get("AgentA") ?? 0).toBeLessThanOrEqual(store.seq);
+
+  // The poison's real cost is every future record: a mention posted AFTER it must still be read.
+  const mention = store.append({
+    kind: "msg",
+    from: "AgentB",
+    topic: "t",
+    body: "ping",
+    mention: ["AgentA"],
+  });
+  resetTurnBudget(store, "AgentA");
+  const after = await invokeRoom(ctx, { op: "read" });
+  const seqs = ((after.details?.records ?? []) as Array<{ seq: number }>).map((r) => r.seq);
+  expect(seqs).toContain(mention.seq);
+});
+
+test("read: a negative or NaN since is clamped to the log start", async () => {
+  const { store, ctx } = newTestStore();
+  store.append({ kind: "msg", from: "AgentB", topic: "t", body: "one" });
+  store.append({ kind: "msg", from: "AgentB", topic: "t", body: "two" });
+
+  const negative = await invokeRoom(ctx, { op: "read", since: -5 });
+  expect(((negative.details?.records ?? []) as Array<{ seq: number }>).map((r) => r.seq)).toEqual([
+    1, 2,
+  ]);
+
+  // NaN cannot reach the log either: Math.min/Math.max PROPAGATE NaN, so the clamp has to catch it
+  // before them, and a NaN `next` would surface as a NaN cursor in details.
+  resetTurnBudget(store, "AgentA");
+  const nan = await invokeRoom(ctx, { op: "read", since: Number.NaN });
+  expect(((nan.details?.records ?? []) as Array<{ seq: number }>).map((r) => r.seq)).toEqual([
+    1, 2,
+  ]);
+  expect(Number.isFinite(nan.details?.cursor as number)).toBe(true);
+  expect(Number.isNaN(store.cursors.get("AgentA") ?? 0)).toBe(false);
+});
+
 test("read: every record kind renders its own model-facing line", async () => {
   // recordLine arms (room.ts:228-245): one of each kind in the log, then a
   // read asserts each shape. `note` has no tool-path producer (no op mints
@@ -1424,6 +1476,122 @@ test("post with a body over maxBodyBytes is refused and appends nothing", async 
   expect(ok.details).toMatchObject({ ok: true });
 });
 
+// --- S3 — every persisted model field is capped at the write boundary ---
+
+test("post: a topic over its cap is refused, naming the field and the cap", async () => {
+  const { store, ctx } = newTestStore();
+  const before = store.records.length;
+  // The log is append-only: an oversized topic is paid for on every later read and digest, and
+  // the per-turn budget used to charge the body alone, so it was ~1 token and injected in full.
+  const res = await invokeRoom(ctx, { op: "post", topic: "t".repeat(513), body: "hello" });
+  expect(res.details).toMatchObject({ ok: false });
+  expect(res.details?.error).toContain("topic");
+  expect(res.details?.error).toContain("512");
+  expect(store.records.length).toBe(before);
+});
+
+test("post: mention, idemKey and status fields are capped at the write boundary", async () => {
+  const { store, ctx } = newTestStore();
+  const before = store.records.length;
+
+  const idem = await invokeRoom(ctx, {
+    op: "post",
+    topic: "t",
+    body: "x",
+    idemKey: "k".repeat(257),
+  });
+  expect(idem.details?.error).toContain("idemKey");
+  expect(idem.details?.error).toContain("256");
+
+  const mentionId = await invokeRoom(ctx, {
+    op: "post",
+    topic: "t",
+    body: "x",
+    mention: ["a".repeat(129)],
+  });
+  expect(mentionId.details?.error).toContain("mention");
+  expect(mentionId.details?.error).toContain("128");
+
+  const mentionCount = await invokeRoom(ctx, {
+    op: "post",
+    topic: "t",
+    body: "x",
+    mention: Array.from({ length: 33 }, (_, i) => `a${i}`),
+  });
+  expect(mentionCount.details?.error).toContain("mention");
+  expect(mentionCount.details?.error).toContain("32");
+
+  const status = Object.fromEntries(
+    [
+      "is_request_satisfied",
+      "is_in_loop",
+      "is_progress_being_made",
+      "next_speaker",
+      "instruction_or_question",
+    ].map((key): [string, { reason: string; answer: string }] => [
+      key,
+      { reason: "r", answer: "a".repeat(513) },
+    ]),
+  );
+  const statusRes = await invokeRoom(ctx, { op: "post", topic: "t", body: "x", status });
+  expect(statusRes.details?.error).toContain("status");
+  expect(statusRes.details?.error).toContain("512");
+
+  // None of the four refusals appended anything.
+  expect(store.records.length).toBe(before);
+});
+
+test("claim: key and dependsOn are capped at the write boundary", async () => {
+  const { store, ctx } = newTestStore();
+  const before = store.records.length;
+
+  const longKey = await invokeRoom(ctx, { op: "claim", topic: "t", key: "k".repeat(513) });
+  expect(longKey.details?.error).toContain("key");
+  expect(longKey.details?.error).toContain("512");
+
+  const many = await invokeRoom(ctx, {
+    op: "claim",
+    topic: "t",
+    key: "a",
+    dependsOn: Array.from({ length: 33 }, (_, i) => `t/${i}`),
+  });
+  expect(many.details?.error).toContain("dependsOn");
+  expect(many.details?.error).toContain("32");
+
+  // A dependency is persisted as "<topic>/<key>", so its cap is the two halves plus the slash.
+  const longDep = await invokeRoom(ctx, {
+    op: "claim",
+    topic: "t",
+    key: "a",
+    dependsOn: ["d".repeat(1026)],
+  });
+  expect(longDep.details?.error).toContain("dependsOn");
+  expect(longDep.details?.error).toContain("1025");
+
+  expect(store.records.length).toBe(before);
+});
+
+test("read: a 300-byte topic is accepted, and the budget charges the rendered line", async () => {
+  const { store, ctx } = newTestStore();
+  // 250 tokens ≈ 1000 chars: room for a 900-char body ALONE, or for a 300-byte topic ALONE — not
+  // for both. The two records are compared in ONE pass, so the window, not the clock, decides.
+  saveRoomConfig(store.root, { ...DEFAULT_ROOM_CONFIG, maxT1Tokens: 250 });
+  const longTopic = "t".repeat(300);
+  const a = await invokeRoom(ctx, { op: "post", topic: longTopic, body: "hi" });
+  expect(a.details).toMatchObject({ ok: true, op: "post" }); // 300 ≤ the 512-byte topic cap
+  const b = await invokeRoom(ctx, { op: "post", topic: "t", body: "y".repeat(900) });
+  expect(b.details).toMatchObject({ ok: true, op: "post" });
+  resetTurnBudget(store, "AgentA");
+
+  const read = await invokeRoom(ctx, { op: "read", limit: 200 });
+  const seqs = ((read.details?.records ?? []) as Array<{ seq: number }>).map((r) => r.seq);
+  // A's rendered line is ~325 chars ≈ 82 tokens, B's is ~925 ≈ 232: 82 + 232 > 250, so B is
+  // refused and `more` says how to get it. Charged by BODY alone the window would admit B too
+  // (1 + 225 ≤ 250) — that is the defect: the topic and the frame were free.
+  expect(seqs).toEqual([a.details?.seq as number]);
+  expect(read.details?.more).toBe(true);
+});
+
 test("a clean post carries no deliveryError envelope — only failures do", async () => {
   // room.ts okWithDelivery 619-625: deliveryError is ADDED only when a
   // failure note exists. A clean post's details must have NO deliveryError
@@ -1587,6 +1755,48 @@ test("recall: an ordinary pattern still scans the log", async () => {
   expect(result.details).toMatchObject({ ok: true, op: "recall" });
   const matches = (result.details as { matches: Array<{ record: { body?: string } }> }).matches;
   expect(matches.length).toBe(1);
+});
+
+// --- S1 — recall has a bounded worst case, not just a filter ---
+
+test("recall: the measured (a|aa)+x input is refused up front, never run", async () => {
+  const { store, ctx } = newTestStore();
+  // The measured hang: `new RegExp("(a|aa)+x").test("a".repeat(8000))` = 2 222 ms on Bun 1.4.4.
+  // 8000 chars is exactly maxBodyBytes and `recordLine` embeds the body verbatim, so ONE post puts
+  // it in the log — and `(a|aa)+x` passes the old guard (no quantifier inside the group).
+  store.append({ kind: "msg", from: "AgentB", topic: "t", body: "a".repeat(8000) });
+  const start = Date.now();
+  const result = await invokeRoom(ctx, { op: "recall", pattern: "(a|aa)+x" });
+  // The refusal IS the fix: an alternation under a repeat never reaches a `test` at all.
+  expect(result.details).toMatchObject({ ok: false });
+  expect(result.details?.error).toContain("catastrophic backtracking");
+  // A generous ceiling — it only catches a regression that actually runs the pattern (≥2 s).
+  expect(Date.now() - start).toBeLessThan(1_500);
+});
+
+test("recall: a pattern with more than two unrestricted wildcards is refused", async () => {
+  const { store, ctx } = newTestStore();
+  // `.*a.*a.*a.*z` has no grouped quantifier, no alternation and no backreference, so the shape
+  // rules miss it — but each `.*` multiplies the backtracking by the line: measured 2 707 ms at
+  // 128 chars, >8 s at 192. Three unrestricted wildcards are refused instead.
+  store.append({ kind: "msg", from: "AgentB", topic: "t", body: "a".repeat(512) });
+  const result = await invokeRoom(ctx, { op: "recall", pattern: ".*a.*a.*a.*z" });
+  expect(result.details).toMatchObject({ ok: false });
+  expect(result.details?.error).toContain("catastrophic backtracking");
+  expect(result.details?.error).toContain("wildcards");
+});
+
+test("recall: each test sees at most the first 512 chars of a record line", async () => {
+  const { store, ctx } = newTestStore();
+  // The slice is the bound for a pattern the filter cannot know about: whatever the model writes,
+  // one `test` sees the line's head plus ~490 bytes of the body, never a full 8192-byte body.
+  store.append({ kind: "msg", from: "AgentB", topic: "t", body: `${"x".repeat(600)}needle` });
+  const beyond = await invokeRoom(ctx, { op: "recall", pattern: "needle" });
+  expect(((beyond.details?.matches ?? []) as unknown[]).length).toBe(0);
+
+  store.append({ kind: "msg", from: "AgentB", topic: "t", body: `needle${"x".repeat(600)}` });
+  const inside = await invokeRoom(ctx, { op: "recall", pattern: "needle" });
+  expect(((inside.details?.matches ?? []) as unknown[]).length).toBe(1);
 });
 
 // --- F3/F5: the room tree op serves the persisted, no-whole-message view ---

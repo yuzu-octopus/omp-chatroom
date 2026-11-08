@@ -3,6 +3,12 @@ import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { noteGap } from "../attention/governor";
 import { globalMap } from "../globals";
 import { logPathFor, newMessageId, topicOf } from "../ids";
+// The sweep carries EVERY record it appends (see the tick below); `appendedSince` is the one
+// watermark slice the op paths already use (tools/room.ts:617), so the sweep reuses it rather than
+// keeping a second copy of the rule. Safe against the tools/room → store/room-store cycle: it is
+// only called from the timer callback, long after both module bodies have evaluated, and neither
+// module touches the other's bindings at module scope.
+import { appendedSince } from "../tools/room";
 import { type ClaimState, expireStale, hydrateClaims } from "./claims";
 import { startCompactor, stopCompactor } from "./compactor";
 import { loadRoomConfig, type RoomConfig, resolveRoomId } from "./config";
@@ -356,10 +362,12 @@ export const PRUNE_INTERVAL_MS = 60_000; // [invented]
 /**
  * A claim that just expired on the sweep.
  *
- * The sweep runs in the store layer, which cannot import the delivery layer (delivery imports the
- * store — a cycle). So the sweep hands the expiry to a notifier registered by the session that
- * opened the room, and the notifier delivers the promised T0 notice ("your lease expired") to the
- * displaced holder.
+ * The sweep runs in the store layer, which cannot run a delivery pass (delivery imports the
+ * store — a cycle). So the sweep hands its tick to a notifier registered by the session that
+ * opened the room: the expiries, for the promised T0 notice ("your lease expired") to the
+ * displaced holder, and every record the tick appended, so the notifier can run the one delivery
+ * pass that carries them — the sweep writes outside any op's batch, which is exactly the trap the
+ * retention `gap` record fell into (I13).
  */
 export interface ExpiredClaim {
   resource: string;
@@ -367,7 +375,18 @@ export interface ExpiredClaim {
   next?: string;
   record: RoomRecord;
 }
-export type SweepNotifier = (expired: readonly ExpiredClaim[]) => void | Promise<void>;
+/**
+ * `appended` is EVERY record this tick appended, not only the expiries: `resolveWaiters` appends
+ * the promoted `claim` for a queued waiter INSIDE the sweep, outside any op's batch, so no
+ * `notifyRecipients` pass would ever carry it (I13 — the retention `gap` record's sibling
+ * producer). Left uncarried, that claim is T1 for the topic's followers yet reaches none of them,
+ * and it sits in their pending set pinning `cursorCap` at its `seq - 1`: T2 advancement freezes and
+ * `coalescePending` re-emits its "N new message(s)" line on every later pass.
+ */
+export type SweepNotifier = (
+  expired: readonly ExpiredClaim[],
+  appended: readonly RoomRecord[],
+) => void | Promise<void>;
 
 /** Notifiers, one per room root (I2: keyed by root, in a globalThis map). */
 const SWEEP_NOTIFIERS = globalMap<string, SweepNotifier>("__roomSweepNotifiers");
@@ -445,13 +464,18 @@ export const roomTimers: RoomTimerRegistry = {
           enforceRetention(store, Date.now());
         }, PRUNE_INTERVAL_MS),
         ctx.setInterval(() => {
+          // The watermark is taken BEFORE the sweep appends: everything the sweep writes this
+          // tick — the release AND the promoted claim `resolveWaiters` appends for a queued
+          // waiter — is then carried to the notifier. The promoted claim used to be dropped
+          // here (only `expired` was handed over), so no pass ever carried it (I13).
+          const before = store.seq;
           const expired = expireStale(store, Date.now());
           if (expired.length === 0) return;
           const notifier = SWEEP_NOTIFIERS.get(root);
           if (notifier === undefined) return;
           // The promise is RETURNED so the host's ManagedTimers isolates a rejection from the
           // delivery (a dead session's send) instead of letting it escape unhandled.
-          return notifier(expired);
+          return notifier(expired, appendedSince(store, before));
         }, store.config.claimSweepMs),
       ],
     });

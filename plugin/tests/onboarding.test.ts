@@ -809,11 +809,15 @@ test("the expiry notifier delivers the whole batch when one delivery fails (F4)"
   // The failing delivery must not swallow the rest of the batch, and the rejection must not
   // escape the notifier.
   await expect(intervals[1]!()).resolves.toBeUndefined();
-  expect(bad.sent).toBe(1);
+  // A FAILED notice is retried by the carrying pass the sweep now also runs (the failed send
+  // never marked the record given), so this target sees two attempts; the healthy one's send
+  // resolved, so it is marked given and the pass skips it — exactly once, never twice.
+  expect(bad.sent).toBe(2);
   expect(good.sent).toBe(1);
-  // The failure is logged, not swallowed.
-  expect(warnings.length).toBe(1);
-  expect(warnings[0]).toContain("transport down");
+  // The failures are logged, not swallowed: the per-expiry delivery and the carrying pass each
+  // report their own rejection.
+  expect(warnings.some((w) => w.includes("transport down"))).toBe(true);
+  expect(warnings.every((w) => !w.includes("unhandled"))).toBe(true);
 });
 
 test("the expiry notifier is unregistered when the session shuts down (F4)", async () => {

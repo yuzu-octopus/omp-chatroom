@@ -18,23 +18,34 @@ import type { Tier } from "./tiers";
  * waits for A's pass. One stuck pass blocks every later post in the room, and the room root is
  * shared by the main session and every subagent — so it blocks the whole swarm.
  *
- * The plugin only needs the message ACCEPTED, and the host accepts it as soon as the message is
- * queued into the target's session. So the wait is bounded: 250 ms is long enough that a healthy
- * transport resolves well inside it (the send resolves on acceptance; only the TURN is slow) and
- * short enough that a post never stalls on a target's turn.
+ * The plugin only needs the message ISSUED. So the wait is bounded: 250 ms is short enough that a
+ * post never stalls on a target's turn — and it expires ROUTINELY, because a live recipient's send
+ * resolves at the end of ITS turn. The expiry is the steady state, not an error: it is handled as
+ * "issued, unconfirmed" (see `SendOutcome`), never as a failure.
  */
 export const SEND_ACCEPT_BOUND_MS = 250;
 
 /**
  * The outcome of a bounded send.
  *
- * Three states, not two, and the third one matters:
- * - **accepted** — the host took it (`sendCustomMessage` resolved truthy or void).
- * - **uncertain** — the bound expired before the host answered. The send WAS issued, but its fate
- *   is unknown: the host may still queue it, or its preflight may decline it.
- * - **failed** — the send was rejected, or the host DECLINED it. The host resolves `false` for
- *   outcomes that provably start no turn (a streaming queue, an idle plan-mode fold, a deferred
- *   ACP turn) — a *resolution*, not a rejection, and it must not be mistaken for a delivery.
+ * Three states, and the third one matters:
+ * - **accepted** — the host took the message. `sendCustomMessage` resolves `true` when it started
+ *   a turn, and `false` when it did not: in the STREAMING branch every `deliverAs` arm
+ *   (`steer`/`aside`/`followUp`/`nextTurn`) queues the message into the running turn and
+ *   `return false` (agent-session.ts:10499-10541). So `false` means "no turn was started", NOT
+ *   "declined": the message IS in the target's session, and whether a turn started is the host's
+ *   business. A streaming T0/T1 is the common case, and its `false` is the steady state. The one
+ *   `false` that is a genuine drop — the `aside` arm's `#sessionGenerationChanged` guard, which
+ *   returns before queueing — is indistinguishable from a queue at this boundary (and rare); the
+ *   alternative, calling every streaming `false` a failure, is the re-steer storm this fixed.
+ * - **uncertain** — the bound expired before the host answered. The send WAS issued; its fate is
+ *   unknown, so `deliver` records it as GIVEN but does not move the cursor (the record stays
+ *   readable).
+ * - **failed** — the send was rejected, or the target exposes no send capability at all
+ *   (`sendToTarget`'s own `ok:false`): nothing was issued, so the record stays owed.
+ *
+ * A `false` resolution is NOT a failure: mapping it to `ok:false` reported `deliveryError` for a
+ * queued message and left the record un-given, so the next pass re-steered the same mention.
  */
 export type SendOutcome = { ok: true; accepted: boolean } | { ok: false; error: unknown };
 
@@ -51,12 +62,11 @@ export async function sendBounded(
   send: Promise<unknown>,
 ): Promise<SendOutcome> {
   const settled: Promise<SendOutcome> = send.then(
-    (value: unknown) =>
-      // `false` is the host's "no turn started" answer. Treating it as a delivery would mark a
-      // record delivered that nobody ever received.
-      value === false
-        ? { ok: false, error: new Error("the host declined the send") }
-        : { ok: true, accepted: true },
+    // ANY resolution is acceptance. The host resolves `false` for a QUEUED message — every
+    // streaming `deliverAs` arm returns false after queueing it into the running turn
+    // (agent-session.ts:10499-10541) — so `false` says "no turn was started", not "declined".
+    // Only a rejection (or the no-capability arm in `sendToTarget`) means nothing was issued.
+    () => ({ ok: true, accepted: true }),
     (error: unknown) => ({ ok: false, error }),
   );
   // A ctx without the host's timer API has no deadline — and a raw timer is forbidden (I4).
@@ -111,7 +121,8 @@ type IrcDeliverCapable = {
  * 2. `deliverIrcMessage` — a worker-thread peer session, the host's own cross-agent channel. The
  *    body is the same rendered line; the card is the host's IRC block, which is what a peer can
  *    actually receive. Returns `injected` (queued into a running turn) or `woken` (started one):
- *    both are deliveries, unlike `sendCustomMessage`'s `false`.
+ *    both are deliveries — as is `sendCustomMessage`'s `false`, which says the same thing (queued
+ *    into the running turn; no turn started).
  *
  * Both are awaited through {@link sendBounded}: the host resolves a send when the target's TURN
  * ends, and awaiting that from inside a delivery pass deadlocks the room (see the bound's note).
@@ -158,10 +169,11 @@ export async function deliver(
   const store = roomStoreFor(ctx);
 
   // The floor for this target's cursor: the seq just below the oldest record it still OWES (a T1
-  // the K/B cap refused, or a T0 past the batch ceiling). NO cursor bump may cross it — not the
-  // T0/T1 bump and not the T2 bump — otherwise a delivered record that sits ABOVE an owed one
-  // pushes the cursor past it and `room{op:"read"}` (which starts at the cursor) could never
-  // return the owed record. `bumpCursor` is monotonic, so a later capped bump cannot pull it back.
+  // the K/B cap refused; a T0 batch only until its ONE summary is issued, and a GIVEN record not
+  // at all — cursors.ts). NO cursor bump may cross it — not the T0/T1 bump and not the T2 bump —
+  // otherwise a delivered record that sits ABOVE an owed one pushes the cursor past it and
+  // `room{op:"read"}` (which starts at the cursor) could never return the owed record.
+  // `bumpCursor` is monotonic, so a later capped bump cannot pull it back.
   const cap = cursorCap ?? record.seq;
 
   // M11 companion — never deliver an agent its own action back. A voluntary release has
@@ -234,8 +246,9 @@ export async function deliver(
   }
   // The send resolves when the TARGET'S TURN ends — so it is bounded (see `sendBounded`). A
   // rejection inside the bound is a transport failure: it propagates to the delivery pass, which
-  // reports it as `deliveryError`, and the cursor is NOT bumped (the record is still owed).
-  // The host's `false` (no turn started) lands here too, and it is NOT a delivery either.
+  // reports it as `deliveryError`, and the cursor is NOT bumped (the record is still owed). The
+  // host's `false` is NOT a failure: it queued the message into a streaming turn and started no
+  // turn (agent-session.ts:10499-10541), which is acceptance.
   const outcome = await sendToTarget(ctx, ref!.session, target, {
     from: ctx.agent.id,
     content,
@@ -244,11 +257,12 @@ export async function deliver(
   });
   if (!outcome.ok) throw outcome.error;
   if (!outcome.accepted) {
-    // UNCERTAIN: the send was issued, but the host never answered inside the bound. It may still
-    // queue the message, or its preflight may decline it. So: remember it as GIVEN (the next pass
-    // must not storm the target with duplicates) but do NOT advance the cursor — the record stays
-    // readable, because a send that was declined must not fall below the cursor and be lost.
-    if (tier === "T0") markDeliveredT0(store.root, target, record.seq);
+    // UNCERTAIN: the send was issued, but the host never answered inside the bound — the steady
+    // state for a live recipient, whose send resolves at the END of its turn. Record it as GIVEN
+    // (the next pass must not storm the target with duplicates, and the owed floor must not pin
+    // the cursor at seq-1 for good) but do NOT advance the cursor: it was never confirmed, so
+    // the record stays above the cursor and `room{op:"read"}` can still return it.
+    markDeliveredT0(store.root, target, record.seq);
     return;
   }
   recordDelivery(store, target, record, tier);
@@ -268,6 +282,8 @@ function recordDelivery(store: RoomStore, target: string, record: RoomRecord, ti
   if (tier === "T0") {
     // A delivered T0 is remembered: while an older record is still owed the cursor cannot advance
     // past it, and without this the next pass would select and RE-SEND it (a wake+steer storm).
+    // The registry also keeps the given seq out of the owed floor — a delivered T0 owes nothing,
+    // so it must not pin the cursor cap at seq-1 for every later delivery (cursors.ts).
     markDeliveredT0(store.root, target, record.seq);
     store.append({
       kind: "delivered",
