@@ -9,6 +9,7 @@ import {
   zod,
 } from "@oh-my-pi/pi-coding-agent";
 import { resolveLocalRoot } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
+import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import {
   deliver,
   escapeForDelivery,
@@ -661,10 +662,15 @@ function registerSession(id: string, calls: Send[], result: boolean | "never" = 
   });
 }
 
-test("deliver: a parked target's delivery is skipped, not thrown", async () => {
+test("deliver: a parked target is revived through the host bus, not skipped", async () => {
+  // 18.18.1 — a parked ref has no session, so a mention cannot use a session handle; the host's
+  // IrcBus.send calls `lifecycle.ensureLive` for exactly that ref and revives it from its
+  // transcript. Skipping instead meant a mention to an idle worker vanished in silence — the
+  // common case in a long-running swarm.
   const root = tempRoot();
   const { pi, sends } = fakePi();
   const ctx = fakeCtx(root, "Sender");
+  const store = roomStoreFor(ctx);
   const parked = `attn-parked-${Date.now()}`;
   AgentRegistry.global().register({
     id: parked,
@@ -673,11 +679,43 @@ test("deliver: a parked target's delivery is skipped, not thrown", async () => {
     status: "parked",
     session: null,
   });
+  const busSends: Array<{ from: string; to: string; body: string }> = [];
+  IrcBus.installGlobal({
+    send: async (m: { from: string; to: string; body: string }) => {
+      busSends.push(m);
+      return { to: m.to, outcome: "revived" };
+    },
+  } as never);
+  try {
+    const record = msg(1, { from: "Other", topic: "build", mention: [parked] });
+    await expect(deliver(pi, ctx, parked, record, "T0")).resolves.toBeUndefined();
+    expect(busSends.length).toBe(1);
+    expect(busSends[0]).toMatchObject({ from: "Sender", to: parked });
+    expect(busSends[0]!.body).toContain("Other");
+    expect(store.cursors.get(parked)).toBe(record.seq); // a revival IS a delivery
+    expect(sends.length).toBe(0);
+  } finally {
+    IrcBus.resetGlobalForTests();
+  }
+});
 
-  const record = msg(1, { from: "Other", topic: "build" });
-  await expect(deliver(pi, ctx, parked, record, "T1")).resolves.toBeUndefined();
-  expect(sends.length).toBe(0); // nothing sent to the caller
-  expect(roomStoreFor(ctx).cursors.get(parked)).toBeUndefined(); // and the cursor did not advance
+test("deliver: an unreachable mention is reported, not swallowed", async () => {
+  const root = tempRoot();
+  const { pi } = fakePi();
+  const ctx = fakeCtx(root, "Sender");
+  const store = roomStoreFor(ctx);
+  const ghost = `attn-ghost-${Date.now()}`;
+  store.members.set(ghost, {
+    agentId: ghost,
+    joinedAtSeq: 0,
+    topics: new Set(["build"]),
+    muted: new Set(),
+    threadRoots: new Set(),
+    heldTopics: new Set(),
+  });
+  const record = msg(1, { from: "Other", topic: "build", mention: [ghost] });
+  await expect(deliver(pi, ctx, ghost, record, "T0")).rejects.toThrow(/not a known agent/);
+  expect(store.cursors.get(ghost)).toBeUndefined();
 });
 
 test("R5: deliveries are counted per tier, and a T0 is logged", async () => {

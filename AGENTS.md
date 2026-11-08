@@ -62,12 +62,25 @@ advanced on delivery into context, never on send.
 
 ```sh
 cd plugin
-bun test tests/                                 # whole suite (550 pass, 1 skip, 18 files)
+bun test tests/                                 # whole suite (603 pass, 1 skip, 18 files)
 bun test tests/ --coverage                      # the same run with a coverage table (not a gate)
 bun check                                       # native typecheck, ~95 ms (CI runs it first)
 bun run typecheck                               # the same check via tsc, the authoritative gate
 bunx --bun @biomejs/biome check src tests       # lint + format
 bunx --bun @biomejs/biome check src tests --write   # apply fixes
+```
+
+**If the one-shot suite blocks**, split it into the two alphabetical halves — every file passes
+alone and in halves; only all 18 in one process hang, and only while another omp session is live on
+the machine (reproduced on a stashed tree, so it is the environment, not a test):
+
+```sh
+bun test tests/attention.test.ts tests/board-columns.test.ts tests/cards.test.ts tests/config.test.ts \
+  tests/drift.test.ts tests/e2e-room.test.ts tests/host-contract.test.ts tests/onboarding.test.ts \
+  tests/panel.test.ts
+bun test tests/room-command.test.ts tests/room-root.test.ts tests/room-root-e2e.test.ts \
+  tests/room-tool.test.ts tests/store.test.ts tests/symbol-sets.test.ts tests/theme-fallback.test.ts \
+  tests/tree.test.ts tests/wait-tools.test.ts
 ```
 
 **There is no build step** — Bun runs the TypeScript directly and omp loads it in-process. Two load

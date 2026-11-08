@@ -42,6 +42,7 @@ test("the installed host carries the deep specifiers the plugin imports, with ex
     ["@oh-my-pi/pi-tui/render/render-utils", "createCachedComponent"],
     ["@oh-my-pi/pi-tui/render/status-line", "renderStatusLine"],
     ["@oh-my-pi/pi-tui/theme/active-symbols", "activeThemeSymbol"],
+    ["@oh-my-pi/pi-coding-agent/irc/bus", "IrcBus"],
     ["@oh-my-pi/pi-utils", "formatAge"],
     ["@oh-my-pi/pi-utils", "sanitizeText"],
   ];

@@ -31,9 +31,12 @@ export const HOST_VERSION_PIN = "18.18.1";
 // The theme ladder's other half — the host's own way to fill the pi-tui module singleton with a
 // REAL theme (`initThemeSync`, with the user's symbol-preset override and colour-blind mode) and
 // to read the override back (`getSymbolPresetOverride`) — needs NO pin: all of them are exports of
-// the `@oh-my-pi/pi-tui` barrel the plugin already imports. Eleven now, not ten.
+// the `@oh-my-pi/pi-tui` barrel the plugin already imports. Twelve now, not eleven: `pi-coding-agent/irc/bus`
+// joined with 18.18.1, because `IrcBus.send` is the only path that REVIVES a parked peer (it calls
+// `lifecycle.ensureLive` for a parked/aborted ref) — a session handle cannot reach one.
 export const DEEP_SPECIFIERS: readonly string[] = [
   "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol",
+  "@oh-my-pi/pi-coding-agent/irc/bus",
   "@oh-my-pi/pi-coding-agent/registry/agent-registry",
   "@oh-my-pi/pi-coding-agent/session/harness-tags",
   "@oh-my-pi/pi-coding-agent/utils/event-bus",

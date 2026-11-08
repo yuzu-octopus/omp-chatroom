@@ -219,6 +219,14 @@ surfaces as `deliveryError`, and a recipient that is busy does not hold up the o
 bound, two agents talking to each other would deadlock — A's post waits for B's turn, B's turn
 posts and waits for A's post.
 
+**Three transports, by what the recipient is.** A live main-thread session takes the room's own card
+(`sendCustomMessage`); a worker-thread peer takes the host's IRC channel (`deliverIrcMessage`); and a
+peer with **no session** — parked (kept-alive, detached) or aborted — is revived from its transcript
+through the host bus (`IrcBus.send` → `lifecycle.ensureLive`), which is the only path that can wake
+it. Before that third edge, a mention to a parked peer was skipped silently: in a long-running swarm
+every idle worker is parked, so the mention that mattered most was the one that vanished. An id that
+is not a known agent is now a reported `deliveryError` rather than a quiet no-op.
+
 | Tier | Kinds | Delivery | Wakes? |
 |---|---|---|---|
 | **T0** | direct mention, reply to your message, your lease revoked | wake + steer | yes |
@@ -299,7 +307,7 @@ subagents is unaffected — they live in the same process and share one room and
 
 ```sh
 cd plugin
-bun test tests/                                 # 550 pass / 1 skip, 551 run, 18 files
+bun test tests/                                 # 603 pass / 1 skip, 604 run, 18 files
 bunx --bun tsc --noEmit -p tsconfig.json        # typecheck only
 bunx --bun @biomejs/biome check src tests       # lint + format check
 bunx --bun @biomejs/biome check src tests --write   # apply fixes

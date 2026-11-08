@@ -1,4 +1,5 @@
 import { AgentRegistry, type ExtensionAPI, type ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { IrcBus, type IrcBusApi } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { cardTypeFor } from "../cards/message-cards";
 import { safeRoomText } from "../onboarding/escape";
@@ -155,6 +156,47 @@ export async function sendToTarget(
   return { ok: false, error: new Error("the target session accepts no agent message") };
 }
 
+/**
+ * Send one room message to a peer whose ref has NO live session — a parked (kept-alive but
+ * detached) or aborted subagent.
+ *
+ * The host's own `agent://<id>` path reaches those peers by REVIVING them from their transcript,
+ * and that revival lives in `IrcBus.#deliver` (`lifecycle.ensureLive` for a `parked`/`aborted`
+ * ref), not in the session handle we otherwise use: a parked ref has no session to call. Without
+ * this edge a mention to a parked peer was skipped in silence — the common case in a long-running
+ * swarm, where every idle worker is parked and only the busy ones have a session.
+ *
+ * The receipt is the host's own verdict: `revived`, `injected` and `woken` all mean the message
+ * reached the peer (a revival starts a turn); `failed` means it did not, and names why (an
+ * unknown id, a read-only advisor, a revive that could not be rebuilt) — which must surface as a
+ * `deliveryError` rather than a quiet drop.
+ */
+export async function sendToParkedPeer(
+  ctx: ExtensionContext,
+  from: string,
+  to: string,
+  content: string,
+): Promise<SendOutcome> {
+  const bus = (IrcBus as { global?: () => IrcBusApi }).global?.();
+  if (bus === undefined) {
+    return {
+      ok: false,
+      error: new Error("no IRC bus is installed, so a parked peer cannot be reached"),
+    };
+  }
+  const settled = Promise.resolve(bus.send({ from, to, body: content, broadcast: false })).then(
+    (receipt) =>
+      receipt.outcome === "failed"
+        ? {
+            ok: false as const,
+            error: new Error(receipt.error ?? "the host could not reach the peer"),
+          }
+        : { ok: true as const, accepted: true },
+    (error: unknown) => ({ ok: false as const, error }),
+  );
+  return await sendBounded(ctx, settled);
+}
+
 // §5.3 — verbatim, plus `extra` — the optional digest lines (the T2 coalescing digest) that ride
 // the same message, so the digest never needs a timer or a second push channel (§5.2 N/T).
 export async function deliver(
@@ -206,11 +248,25 @@ export async function deliver(
     return;
   }
 
-  // Resolve the destination BEFORE deriving the payload: a parked/aborted ref is skipped, and the
-  // skip must not depend on work (cardTypeFor/escaping) that a parked target cannot use.
+  // Resolve the destination BEFORE deriving the payload: an advisor or an unknown id is skipped or
+  // reported, and that decision must not depend on work (cardTypeFor/escaping) it cannot use.
   const ref = target === ctx.agent.id ? null : AgentRegistry.global().get(target);
-  if (target !== ctx.agent.id && !ref?.session) {
-    return; // parked/aborted → skip, do not throw
+  // A peer with NO session is parked (kept-alive, detached) or aborted — not gone. The host's IRC
+  // bus revives exactly those from their transcript (`lifecycle.ensureLive` in `IrcBus.#deliver`),
+  // which is why a mention reaches them through the bus and not through a session handle. Skipping
+  // them silently was the bug: in a long-running swarm every idle worker is parked, so the mention
+  // that matters most — to the agent that is not busy yet — was the one that vanished.
+  // Reviving a peer costs a transcript load and a turn, so only a DELIBERATE interrupt pays for it:
+  // a T0 (a mention of it, or its own lease being revoked). Topic chatter (T1) and the T2 pass
+  // never revive anyone — the record waits above the cursor until the peer is live again, which
+  // is what `room{op:"read"}` and the join backlog are for.
+  const needsBus = target !== ctx.agent.id && tier === "T0" && ref != null && ref.session == null;
+  if (target !== ctx.agent.id && ref == null) {
+    // Not a registry id at all: no session to send to and no transcript to revive. A mention that
+    // reaches nobody is worse than no mention — the poster believes it notified someone — so this
+    // is reported as a delivery failure (the pass collects it into `deliveryError`) instead of a
+    // quiet skip.
+    throw new Error(`mention ${target} is not a known agent, so nothing was delivered to it`);
   }
 
   // K2 — dispatch on record.kind FIRST and derive the body per kind. `record.body` exists only on
@@ -249,12 +305,14 @@ export async function deliver(
   // reports it as `deliveryError`, and the cursor is NOT bumped (the record is still owed). The
   // host's `false` is NOT a failure: it queued the message into a streaming turn and started no
   // turn (agent-session.ts:10499-10541), which is acceptance.
-  const outcome = await sendToTarget(ctx, ref!.session, target, {
-    from: ctx.agent.id,
-    content,
-    payload,
-    options,
-  });
+  const outcome = needsBus
+    ? await sendToParkedPeer(ctx, ctx.agent.id, target, content)
+    : await sendToTarget(ctx, ref!.session, target, {
+        from: ctx.agent.id,
+        content,
+        payload,
+        options,
+      });
   if (!outcome.ok) throw outcome.error;
   if (!outcome.accepted) {
     // UNCERTAIN: the send was issued, but the host never answered inside the bound — the steady

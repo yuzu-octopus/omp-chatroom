@@ -1618,7 +1618,10 @@ test(
       // A releases: C is promoted; B sees the foreign win with maxWaitMs exceeded and
       // settles {timeout, acquired:false} instead of requeueing (the livelock guard).
       await roomA.execute("c-rel", { op: "release", topic: "race", key: "res" });
-      const loserB = await Promise.race([waitBP, Bun.sleep(2_000).then(() => null)]);
+      // 5 s, not 2: the settle is immediate once the release lands, but the full suite runs files
+      // concurrently, and a loaded box can lose a 2 s window (observed; the wait itself would
+      // still settle at its 30 s timeout without the guard, so the assertion keeps its teeth).
+      const loserB = await Promise.race([waitBP, Bun.sleep(5_000).then(() => null)]);
       expect(loserB).not.toBeNull();
       expect(loserB!.details).toMatchObject({ ok: true, outcome: "timeout", acquired: false });
       expect(loserB!.useless).toBe(true);
