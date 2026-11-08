@@ -63,6 +63,7 @@ advanced on delivery into context, never on send.
 ```sh
 cd plugin
 bun test tests/                                 # whole suite (550 pass, 1 skip, 18 files)
+bun test tests/ --coverage                      # the same run with a coverage table (not a gate)
 bun check                                       # native typecheck, ~95 ms (CI runs it first)
 bun run typecheck                               # the same check via tsc, the authoritative gate
 bunx --bun @biomejs/biome check src tests       # lint + format
