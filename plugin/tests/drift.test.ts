@@ -61,6 +61,10 @@ test("DEEP_SPECIFIERS lists the Option A four plus the Option B surface", () => 
   // The host's symbol lookup: a barrel-less subpath the plugin's theme shim resolves every
   // painted glyph through, so a host bump that moves it must fail here, not inside a panel.
   expect(DEEP_SPECIFIERS).toContain("@oh-my-pi/pi-tui/theme/active-symbols");
+  // 18.18.1 — the cross-agent delivery type. A worker-thread peer session accepts ONLY
+  // `deliverIrcMessage`, and that message's shape is `IrcMessage` from this subpath: if a bump
+  // moves it, the room's peer delivery must fail here rather than when the 9th subagent spawns.
+  expect(DEEP_SPECIFIERS).toContain("@oh-my-pi/pi-tui/tools/irc");
 });
 
 test("each Option A deep specifier exports something, with no undefined members", () => {

@@ -279,6 +279,14 @@ recorded per-turn stats yet — run it and read the JSONL.
 4. **PanelRowsImpl's `wait`-timeout (2026-10-26).** Delivered with its claim released; no output stranded, but its timeout path was never exercised — needs a live observation.
 5. **Production topology (2026-10-26).** The suite runs the plugin's copy of the host; a real TUI
 session with the installed host remains the human's check.
+6. **The 9-agent worker-thread boundary (2026-11-08).** The refusal is proven inside a real Bun
+worker, but no live swarm has yet crossed `SUBAGENT_WORKER_THRESHOLD` (9 concurrent runs) with the
+plugin loaded. Spawn 10 subagents that each call `room{op:"join"}`: eight or nine run in-process,
+the rest should come back with the `task.workerThreads: 0` refusal rather than a `locked by pid`.
+Re-run the same swarm with `task.workerThreads: 0` and every agent should join.
+7. **Panel chord conflict warning (2026-11-08).** `--room-panel-key` set to a chord your keymap
+already binds (e.g. `ctrl-r`) should raise one warning at `session_start` naming the holder. Only
+the handler's logic is unit-tested; the notice has not been seen in a real TUI.
 
 
 Everything else has been exercised by a real model in a real terminal or a real session: the panel
