@@ -1,6 +1,6 @@
-// X6 — the installed host is 18.12.6 (verified in @oh-my-pi/pi-coding-agent/package.json).
+// X6 — the installed host is 18.18.1 (verified in @oh-my-pi/pi-coding-agent/package.json).
 // The pin mirrors package.json `peerDependencies`; tests/drift.test.ts asserts the two agree.
-export const HOST_VERSION_PIN = "18.12.6";
+export const HOST_VERSION_PIN = "18.18.1";
 
 // Every deep specifier the plugin imports (`[deep]` in the host map) — source OR test. The drift
 // test imports the store-critical four and asserts each resolves non-undefined; this list is the
@@ -10,7 +10,7 @@ export const HOST_VERSION_PIN = "18.12.6";
 // `pi-tui/theme/active-symbols` and `pi-coding-agent/session/harness-tags`.
 //
 // The first four are the store-critical surface; the rest are listed so a future phase fails loudly
-// on drift rather than at first use. Two of the ten are imported by the TESTS only
+// on drift rather than at first use. Two of the eleven are imported by the TESTS only
 // (`pi-coding-agent/internal-urls/local-protocol` and `pi-coding-agent/utils/event-bus`): no
 // source file imports them, but they are still subpaths the plugin resolves, so they belong in the
 // list a host bump is audited against.
@@ -20,6 +20,10 @@ export const HOST_VERSION_PIN = "18.12.6";
 // theme it is handed (roster-strip.ts), so nothing imports it and listing it would gate a
 // dependency the plugin does not have. Ten, not eleven.
 //
+// The eleventh arrived with 18.18.1: `pi-tui/tools/irc`, whose `IrcMessage` is the shape of the
+// host's cross-agent delivery (`deliverIrcMessage`) — the only send a worker-thread peer session
+// accepts, so the type is part of the delivery contract, not an incidental import.
+//
 // `@oh-my-pi/pi-tui/theme/active-symbols` is the tenth: it is the host's own lookup for the
 // ACTIVE symbol set (unicode / nerd / ascii), which the plugin's theme shim reads — and snapshots
 // at construction — instead of carrying a copy of the host's symbol tables.
@@ -27,7 +31,7 @@ export const HOST_VERSION_PIN = "18.12.6";
 // The theme ladder's other half — the host's own way to fill the pi-tui module singleton with a
 // REAL theme (`initThemeSync`, with the user's symbol-preset override and colour-blind mode) and
 // to read the override back (`getSymbolPresetOverride`) — needs NO pin: all of them are exports of
-// the `@oh-my-pi/pi-tui` barrel the plugin already imports. Still ten, not eleven.
+// the `@oh-my-pi/pi-tui` barrel the plugin already imports. Eleven now, not ten.
 export const DEEP_SPECIFIERS: readonly string[] = [
   "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol",
   "@oh-my-pi/pi-coding-agent/registry/agent-registry",
@@ -38,6 +42,7 @@ export const DEEP_SPECIFIERS: readonly string[] = [
   "@oh-my-pi/pi-tui/render/render-utils",
   "@oh-my-pi/pi-tui/render/status-line",
   "@oh-my-pi/pi-tui/theme/active-symbols",
+  "@oh-my-pi/pi-tui/tools/irc",
   "@oh-my-pi/pi-tui/tools/renderer",
 ];
 

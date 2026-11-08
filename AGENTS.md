@@ -194,15 +194,17 @@ Detailed conventions and the not-covered list: `docs/research/omp-agent-notes/te
 ## Runtime/Tooling Preferences
 
 - **Bun only** — `bun` 1.4.3. Package manager, runner, and runtime. No `node`, `npm`, or `npx`.
-- **Host: omp 18.12.6.** The plugin pins it exactly in both `peerDependencies` and
+- **Host: omp 18.18.1.** The plugin pins it exactly in both `peerDependencies` and
   `devDependencies` — `@oh-my-pi/pi-coding-agent`, `@oh-my-pi/pi-tui`, `@oh-my-pi/pi-ai` and
-  `@oh-my-pi/pi-utils` — because the ten deep subpath imports (`DEEP_SPECIFIERS`) are
-  wildcard-only, not public API. The ten are
+  `@oh-my-pi/pi-utils` — because the eleven deep subpath imports (`DEEP_SPECIFIERS`) are
+  wildcard-only, not public API. The eleven are
   `@oh-my-pi/pi-coding-agent/{internal-urls/local-protocol,registry/agent-registry,session/harness-tags,utils/event-bus}`
   and
-  `@oh-my-pi/pi-tui/{chat/messages,chrome/overlay-box,render/render-utils,render/status-line,theme/active-symbols,tools/renderer}`
+  `@oh-my-pi/pi-tui/{chat/messages,chrome/overlay-box,render/render-utils,render/status-line,theme/active-symbols,tools/irc,tools/renderer}`
   — `theme/active-symbols` is the tenth (it is the host's own symbol lookup, which the plugin's
-  theme shim resolves through rather than copying). Two of the ten are imported by the TESTS
+  theme shim resolves through rather than copying). `tools/irc` is the eleventh, and it is the
+  cross-agent delivery contract: a worker-thread peer session accepts only `deliverIrcMessage`,
+  whose message is that type. Two of the eleven are imported by the TESTS
   only (`pi-coding-agent/internal-urls/local-protocol` and `pi-coding-agent/utils/event-bus`): no
   source file imports them, but they are still subpaths the plugin resolves, so they belong in the
   list a host bump is audited against.

@@ -6,7 +6,10 @@ import {
   type ExtensionContext,
   type ToolDefinition,
 } from "@oh-my-pi/pi-coding-agent";
-import type { AgentStatus } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import type {
+  AgentRegistryApi,
+  AgentStatus,
+} from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { escapeHarnessTags } from "@oh-my-pi/pi-coding-agent/session/harness-tags";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import {
@@ -58,7 +61,10 @@ const clamp = (value: number, lo: number, hi: number): number =>
   Math.min(hi, Math.max(lo, Math.trunc(value)));
 
 /** A snapshot row per named agent; an unregistered id reports `parked` (it is gone, not running). */
-function snapshot(registry: AgentRegistry, ids: readonly string[]): WaitForAgentDetails["agents"] {
+function snapshot(
+  registry: AgentRegistryApi,
+  ids: readonly string[],
+): WaitForAgentDetails["agents"] {
   return ids.map((id) => {
     const ref = registry.get(id);
     return ref === undefined
@@ -261,7 +267,7 @@ async function waitForAgent(
 }
 
 function eventResult(
-  registry: AgentRegistry,
+  registry: AgentRegistryApi,
   ids: readonly string[],
   startedAt: number,
 ): WaitForAgentResult {
@@ -299,9 +305,13 @@ export function registerWaitForAgent(pi: ExtensionAPI): void {
     loadMode: "essential",
     approval: "read",
     strict: true,
-    // R9 — not in the typed ToolDefinition; declared on the literal, and the wait never relies on it
-    // for correctness (it observes `signal` and bounds its own timeout).
+    // 18.13.2 — an interruptible tool that sets `handlesToolInterrupt` still RUNS when a
+    // loop-owned interrupt is already queued, so it can drain the caller's wake event instead of
+    // being skipped before it starts; the host's own `wait` sets it (pi-coding-agent
+    // src/tools/wait.ts:153). Safe here because a pre-aborted signal returns this wait's snapshot
+    // at once rather than blocking, which is the flag's one requirement.
     interruptible: true,
+    handlesToolInterrupt: true,
     async execute(
       _toolCallId: string,
       p: WaitForAgentParams,
@@ -315,7 +325,10 @@ export function registerWaitForAgent(pi: ExtensionAPI): void {
     renderResult: renderWaitResult,
     describeCall: describeWaitCall,
     describeResult: describeWaitResult,
-  } satisfies ToolDefinition<typeof params, WaitForAgentDetails> & { interruptible: boolean };
+  } satisfies ToolDefinition<typeof params, WaitForAgentDetails> & {
+    interruptible: boolean;
+    handlesToolInterrupt: boolean;
+  };
 
   pi.registerTool(tool);
 }
