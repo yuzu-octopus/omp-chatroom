@@ -50,10 +50,37 @@ export function lagFor(store: RoomStore, agentId: string): number {
 //     pass does not inject all 50+ of them individually.
 // `markDeliveredT0` keeps its T0-era name: onboarding/hook.ts and store/room-store.ts call it by
 // that name and its busiest caller is still the T0 path — a rename would touch both.
-// The registry is bounded (the oldest entries are dropped): it only has to cover the window in
-// which a floor holds the cursor back.
+// The registry stays bounded, but a count-only ring must not evict a seq that is still owed:
+// when the recipient's cursor is pinned below `seq`, that seq is above the cursor and the next
+// pass would re-select it if the given mark were forgotten. Entries at or below the floor are
+// already read; only if every entry is above the floor may the oldest be dropped to keep the bound.
 const DELIVERED_T0 = globalMap<string, Map<string, Set<number>>>("__roomDeliveredT0");
 const DELIVERED_T0_MAX = 256;
+
+/** The seqs this recipient has already been GIVEN (see the section note: not only T0s). */
+export function deliveredT0s(root: string, agentId: string): ReadonlySet<number> {
+  return DELIVERED_T0.get(root)?.get(agentId) ?? new Set<number>();
+}
+
+// The store registry is the source of the recipient's floor without widening the delivered API:
+function cursorFloorFor(root: string, agentId: string): number {
+  const stores = globalMap<string, RoomStore>("__roomStores");
+  return stores.get(root)?.cursors.get(agentId) ?? 0;
+}
+
+function evictBelowFloor(seqs: Set<number>, floor: number, keep: number): void {
+  // Entries at or below the floor are already read; entries above it are still owed and stay,
+  // so they may temporarily exceed `keep` until the recipient's cursor advances.
+  let drop = seqs.size - keep;
+  if (drop <= 0) return;
+  for (const entry of [...seqs]) {
+    if (drop <= 0) break;
+    if (entry <= floor) {
+      seqs.delete(entry);
+      drop -= 1;
+    }
+  }
+}
 
 /** Remember that `seq` is GIVEN to this recipient (see the section note: not only T0s). */
 export function markDeliveredT0(root: string, agentId: string, seq: number): void {
@@ -69,20 +96,10 @@ export function markDeliveredT0(root: string, agentId: string, seq: number): voi
   }
   seqs.add(seq);
   if (seqs.size > DELIVERED_T0_MAX) {
-    // Drop the oldest entries: they are the ones a long-passed floor can no longer revive.
-    // Insertion-ordered: the Set iterates oldest-first, so slice the head — no sort needed.
-    let drop = seqs.size - DELIVERED_T0_MAX;
-    for (const entry of seqs) {
-      if (drop <= 0) break;
-      seqs.delete(entry);
-      drop -= 1;
-    }
+    evictBelowFloor(seqs, cursorFloorFor(root, agentId), DELIVERED_T0_MAX);
+    // Above-floor entries remain owed and may temporarily exceed the soft cap until the
+    // recipient's cursor advances; dropping them would re-deliver a T0 the room already gave.
   }
-}
-
-/** The seqs this recipient has already been GIVEN (see the section note: not only T0s). */
-export function deliveredT0s(root: string, agentId: string): ReadonlySet<number> {
-  return DELIVERED_T0.get(root)?.get(agentId) ?? new Set<number>();
 }
 
 /** Forget a room's delivered-T0 registry (the room was disposed). */

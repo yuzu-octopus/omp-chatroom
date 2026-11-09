@@ -11,8 +11,6 @@ import type {
   AgentRegistryApi,
   AgentStatus,
 } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import { escapeHarnessTags } from "@oh-my-pi/pi-coding-agent/session/harness-tags";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
 import {
   describeWaitCall,
   describeWaitResult,
@@ -20,6 +18,7 @@ import {
   renderWaitResult,
 } from "../cards/tool-cards";
 import { hostSchema } from "../host-schema";
+import { safeRoomText } from "../onboarding/escape";
 import { type RoomStore, roomStoreFor } from "../store/room-store";
 import { clearWaitEdges, findWaitCycle, setWaitEdges } from "../store/wait-graph";
 import type { WaitOutcome } from "./wait-for-claim"; // K11 — declared once, there
@@ -56,7 +55,7 @@ export interface WaitForAgentDetails {
 export type WaitForAgentResult = AgentToolResult<WaitForAgentDetails>;
 
 /** K22/S1 — every room-authored / caller-supplied string reaching the model is sanitised. */
-const safe = (text: string): string => escapeHarnessTags(sanitizeText(text));
+const safe = safeRoomText;
 
 /** The schema's documented bounds are the contract; this is the one place they are applied. */
 const clamp = (value: number, lo: number, hi: number): number =>

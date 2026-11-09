@@ -406,21 +406,31 @@ export function unregisterSweepNotifier(root: string): void {
 }
 export function enforceRetention(store: RoomStore, now: number): RoomRecord | null {
   const cutoff = now - store.config.logMaxAgeMs;
-  let dropped = 0;
-  while (
-    store.records.length > 0 &&
-    (store.records.length > store.config.logMaxRecords || store.records[0].ts < cutoff)
-  ) {
-    const record = store.records.shift()!;
+  const countDrop = Math.max(0, store.records.length - store.config.logMaxRecords);
+  // O(N) age scan: find the first record not older than the cutoff. Records are seq/ts-ordered.
+  let ageDrop = 0;
+  if (store.records.length > 0 && store.records[0].ts < cutoff) {
+    let lo = 1;
+    let hi = store.records.length;
+    while (lo < hi) {
+      const mid = lo + Math.trunc((hi - lo) / 2);
+      if (store.records[mid].ts < cutoff) lo = mid + 1;
+      else hi = mid;
+    }
+    ageDrop = lo;
+  }
+  const dropped = Math.max(countDrop, ageDrop);
+  if (dropped === 0) return null;
+  // One splice removes the exact prefix; no second append primitive is introduced.
+  const removed = store.records.splice(0, dropped);
+  for (const record of removed) {
     store.byId.delete(record.id);
     // R7 — an idempotency key whose record was pruned must go with it: the key's promise is
     // "this post happened once", and the post it referred to no longer exists.
     if (record.kind === "msg" && record.idemKey !== undefined) {
       store.idemKeys.delete(idemIndexKey(record.from, record.idemKey));
     }
-    dropped++;
   }
-  if (dropped === 0) return null;
   // Tree positions are dense indices into `store.records`: the prune just shifted every survivor
   // under its summary, so the persisted tree is stale by construction. Invalidate it — the
   // compactor rebuilds lazily, and reads fall back to raw records meanwhile (T2/T3).

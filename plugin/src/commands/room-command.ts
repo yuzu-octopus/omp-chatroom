@@ -1,8 +1,7 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@oh-my-pi/pi-coding-agent";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent";
-import { escapeHarnessTags } from "@oh-my-pi/pi-coding-agent/session/harness-tags";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { resourceKey } from "../ids";
+import { safeRoomText } from "../onboarding/escape";
 import { openRoomPanel } from "../panel/panel";
 import { contended, grant, reclaimIfStale, release, renew } from "../store/claims";
 import {
@@ -45,10 +44,8 @@ const SUBCOMMAND_HELP: Readonly<Record<RoomSubcommand, string>> = {
 
 const USAGE = `usage: /room [<${ROOM_SUBCOMMANDS.join("|")}>]`;
 
-/** K22/S1 — the same escaping pair the tool uses; room text is untrusted wherever it is rendered. */
-function safe(text: string): string {
-  return escapeHarnessTags(sanitizeText(text));
-}
+/** K22/S1 — the shared escaper; room text is untrusted wherever it is rendered. */
+const safe = safeRoomText;
 
 /**
  * M7/§6.10 — tab-completable. Returns the subcommands filtered by prefix; ALWAYS an array

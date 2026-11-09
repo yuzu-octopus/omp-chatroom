@@ -628,6 +628,46 @@ test("enforceRetention drops the idempotency key with its pruned post", () => {
   expect(store.idemKeys.size).toBe(0);
 });
 
+test("enforceRetention at scale drops exactly one prefix behind one gap (mutation: wrong count or over-clear fails)", () => {
+  // Mutation target: dropping one short, clearing one extra, or emitting more than one gap
+  // changes `skipped`, the first surviving seq, or the byId/idem projection checked below.
+  const root = tempRoot();
+  const storeRoot = path.join(root, ".omp-room");
+  saveRoomConfig(storeRoot, { ...DEFAULT_ROOM_CONFIG, logMaxRecords: 50, logMaxAgeMs: 600_000 });
+  const ctx = {
+    cwd: root,
+    agent: { id: "A", kind: "main" },
+    localProtocolOptions: { root: storeRoot },
+    setInterval: () => 0,
+    clearInterval: () => {},
+  } as unknown as ExtensionContext;
+  const store = roomStoreFor(ctx);
+  const droppedIds: string[] = [];
+  for (let i = 0; i < 500; i++) {
+    const draft = {
+      kind: "msg",
+      from: "A",
+      topic: "t",
+      body: `b${i}`,
+      ...(i < 450 ? { idemKey: `k${i}` } : {}),
+    } as const;
+    const record = store.append(draft as Parameters<RoomStore["append"]>[0]);
+    if (i < 450) droppedIds.push(record.id);
+  }
+  const firstSurvivor = store.records[450].id;
+  const gap = enforceRetention(store, Date.now());
+  expect(gap).not.toBeNull();
+  if (gap === null || gap.kind !== "gap") throw new Error("expected one retention gap");
+  expect(gap.skipped).toBe(450);
+  expect(store.records.filter((r) => r.kind === "gap").length).toBe(1);
+  expect(store.records.filter((r) => r.kind !== "gap").length).toBe(50);
+  expect(store.records.at(-1)!.id).toBe(gap.id);
+  expect(store.records[0].id).toBe(firstSurvivor);
+  for (const id of droppedIds) expect(store.byId.has(id)).toBe(false);
+  expect(store.byId.size).toBe(store.records.length);
+  expect(store.idemKeys.size).toBe(0);
+});
+
 // --- F1: room tool registers card renderers ---
 
 test("room tool registers renderCall/renderResult/describeCall/describeResult", () => {

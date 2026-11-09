@@ -2021,10 +2021,15 @@ test("a ctx without the timer API still does not wait for the target's turn (F8)
   settle?.();
 });
 
-test("delivered-T0 registry evicts oldest entries past the cap instead of growing", () => {
-  // Lines 60-61: the registry is bounded at 256 — the oldest seqs drop so a
-  // long-lived room cannot accumulate an entry per delivered steer.
+// The registry is bounded at 256 when entries are no longer owed (cursor past them); a
+// long-lived room cannot accumulate an entry per delivered steer whose cursor has passed it.
+test("delivered-T0 registry evicts read entries past the cap instead of growing", () => {
   const root = `evict-${Date.now()}-${Math.random()}`;
+  const holder = globalThis as Record<string, unknown>;
+  holder.__roomStores ??= new Map<string, { cursors: Map<string, number> }>();
+  const stores = holder.__roomStores as Map<string, { cursors: Map<string, number> }>;
+  const prior = new Map(stores);
+  stores.set(root, { cursors: new Map([["A", 260]]) });
   try {
     for (let seq = 1; seq <= 260; seq++) markDeliveredT0(root, "A", seq);
     const kept = deliveredT0s(root, "A");
@@ -2034,6 +2039,29 @@ test("delivered-T0 registry evicts oldest entries past the cap instead of growin
     expect(kept.has(5)).toBe(true);
     expect(kept.has(260)).toBe(true);
   } finally {
+    stores.clear();
+    for (const [key, value] of prior) stores.set(key, value);
+    forgetDeliveredT0(root);
+  }
+});
+
+test("delivered-T0 registry keeps a still-owed sequence above the cursor floor", () => {
+  // Mutation target: count-only eviction drops seq 1 after 256 newer receives; the cursor
+  // floor must protect a still-owed seq even when the newer entries do not evict it.
+  const root = `floor-${Date.now()}-${Math.random()}`;
+  const holder = globalThis as Record<string, unknown>;
+  holder.__roomStores ??= new Map<string, { cursors: Map<string, number> }>();
+  const stores = holder.__roomStores as Map<string, { cursors: Map<string, number> }>;
+  const prior = new Map(stores);
+  stores.set(root, { cursors: new Map([["A", 0]]) });
+  try {
+    for (let seq = 1; seq <= 300; seq++) markDeliveredT0(root, "A", seq);
+    const kept = deliveredT0s(root, "A");
+    expect(kept.has(1)).toBe(true);
+    expect(kept.has(300)).toBe(true);
+  } finally {
+    stores.clear();
+    for (const [key, value] of prior) stores.set(key, value);
     forgetDeliveredT0(root);
   }
 });
