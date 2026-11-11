@@ -5,7 +5,10 @@
   "type": "module",
   "scripts": {
     "test": "bun test tests/",
+    "test:halves-a": "bun test tests/attention.test.ts tests/board-columns.test.ts tests/cards.test.ts tests/config.test.ts tests/drift.test.ts tests/e2e-room.test.ts tests/host-contract.test.ts tests/onboarding.test.ts tests/panel.test.ts",
+    "test:halves-b": "bun test tests/room-command.test.ts tests/room-root.test.ts tests/room-root-e2e.test.ts tests/room-tool.test.ts tests/store.test.ts tests/symbol-sets.test.ts tests/theme-fallback.test.ts tests/tree.test.ts tests/wait-tools.test.ts",
     "typecheck": "bunx --bun tsc --noEmit -p tsconfig.json",
+    "typecheck:fast": "bun check",
     "lint": "bunx --bun @biomejs/biome check src tests",
     "lint:fix": "bunx --bun @biomejs/biome check src tests --write"
   },
@@ -15,30 +18,7 @@
     "description": "In-process multi-agent chatroom: claim board, bounded chat, blocking waits",
     "extensions": [
       "./src/index.ts"
-    ],
-    "features": {
-      "room": {
-        "description": "Room store, claim board, and the room tool",
-        "default": true,
-        "extensions": [
-          "./src/index.ts"
-        ]
-      },
-      "wait-tools": {
-        "description": "Blocking wait tools (wait_for_claim, wait_for_agent, wait_for_message)",
-        "default": true,
-        "extensions": [
-          "./src/index.ts"
-        ]
-      },
-      "panel": {
-        "description": "TUI panel for the room (overlay, subcommands, board view)",
-        "default": true,
-        "extensions": [
-          "./src/index.ts"
-        ]
-      }
-    }
+    ]
   },
   "engines": {
     "bun": ">=1.4.4"
@@ -55,6 +35,7 @@
     "README.md"
   ],
   "devDependencies": {
+    "@biomejs/biome": "2.6.6",
     "@oh-my-pi/pi-ai": "18.18.1",
     "@oh-my-pi/pi-coding-agent": "18.18.1",
     "@oh-my-pi/pi-tui": "18.18.1",
