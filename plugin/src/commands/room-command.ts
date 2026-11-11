@@ -121,7 +121,10 @@ function boardLines(store: RoomStore, viewerId: string): string[] {
 }
 
 /** One `key=value` pair from `config set`; `null` = unknown key or unparseable value. */
-function coerceSetting(key: string, raw: string): { value: string | number; clampedFrom: number | null } | null {
+function coerceSetting(
+  key: string,
+  raw: string,
+): { value: string | number; clampedFrom: number | null } | null {
   const current = (DEFAULT_ROOM_CONFIG as unknown as Record<string, unknown>)[key];
   if (current === undefined) return null;
   if (typeof current === "number") {

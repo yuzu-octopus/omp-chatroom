@@ -130,3 +130,52 @@ test("loadRoomConfig coerces an invalid roomId back to mint-from-root", () => {
   saveRoomConfig(root, { ...DEFAULT_ROOM_CONFIG, roomId: "a/b" });
   expect(loadRoomConfig(root).roomId).toBe("");
 });
+
+// --- plan 024: numeric floors ------------------------------------------------
+
+test("loadRoomConfig clamps zero/negative counts and windows to their floors", () => {
+  const root = tempRoot();
+  const raw = {
+    ...DEFAULT_ROOM_CONFIG,
+    logMaxRecords: 0,
+    maxBodyBytes: 0,
+    claimSweepMs: -5_000,
+    claimTtlMs: 1, // below the 1 s write-path floor
+    coalesceMs: 0,
+    digestBudgetTokens: -10,
+    compactionCallsPerDay: 0,
+  };
+  fs.mkdirSync(path.join(root, "room"), { recursive: true });
+  fs.writeFileSync(configPath(root), JSON.stringify(raw), "utf-8");
+  const seen: Array<[string, number, number]> = [];
+  const loaded = loadRoomConfig(root, (key, from, to) => seen.push([key, from, to]));
+  // Assert EFFECTIVE values, not defaults confusion: floors, not DEFAULT_ROOM_CONFIG.
+  expect(loaded.logMaxRecords).toBe(1);
+  expect(loaded.maxBodyBytes).toBe(1);
+  expect(loaded.claimSweepMs).toBe(1_000);
+  expect(loaded.claimTtlMs).toBe(1_000);
+  expect(loaded.coalesceMs).toBe(1_000);
+  expect(loaded.digestBudgetTokens).toBe(1);
+  expect(loaded.compactionCallsPerDay).toBe(1);
+  // Every clamped field was reported with its raw and clamped values.
+  expect(new Map(seen.map(([key, from, to]) => [key, [from, to]])).get("logMaxRecords")).toEqual([
+    0, 1,
+  ]);
+  expect(seen.length).toBe(7);
+});
+
+test("loadRoomConfig clamps absurd ceilings and leaves in-range values alone", () => {
+  const root = tempRoot();
+  const raw = {
+    ...DEFAULT_ROOM_CONFIG,
+    claimTtlMs: 1e18, // a hand-written lease the write path could never mint
+    logMaxRecords: 5_000, // in range — untouched and unreported
+  };
+  fs.mkdirSync(path.join(root, "room"), { recursive: true });
+  fs.writeFileSync(configPath(root), JSON.stringify(raw), "utf-8");
+  const seen: string[] = [];
+  const loaded = loadRoomConfig(root, (key) => seen.push(key));
+  expect(loaded.claimTtlMs).toBe(86_400_000);
+  expect(loaded.logMaxRecords).toBe(5_000);
+  expect(seen).toEqual(["claimTtlMs"]);
+});

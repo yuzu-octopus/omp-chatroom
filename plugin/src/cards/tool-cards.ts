@@ -11,11 +11,11 @@ import {
 import { createCachedComponent } from "@oh-my-pi/pi-tui/render/render-utils";
 import { renderStatusLine } from "@oh-my-pi/pi-tui/render/status-line";
 import type { NativeToolHead, NativeToolView } from "@oh-my-pi/pi-tui/tools/renderer";
+import { safeRoomText } from "../onboarding/escape";
 import type { RoomParams, RoomToolDetails } from "../tools/room";
 import type { WaitForAgentDetails } from "../tools/wait-for-agent";
 import type { WaitForClaimDetails } from "../tools/wait-for-claim";
 import type { WaitForMessageDetails } from "../tools/wait-for-message";
-import { safeRoomText } from "../onboarding/escape";
 
 /**
  * Tool cards for `room` and the three wait tools (§7.5). Each pair has an ANSI renderer
@@ -60,7 +60,10 @@ function roomCallSummary(raw: unknown): string {
   // Room-authored (topic/key reach the model and persist into replayable transcripts): escape.
   const target =
     args.op === "claim" || args.op === "release"
-      ? [args.topic, args.key].filter(Boolean).map((part) => safeRoomText(part!)).join("/")
+      ? [args.topic, args.key]
+          .filter(Boolean)
+          .map((part) => safeRoomText(part!))
+          .join("/")
       : args.topic === undefined
         ? undefined
         : safeRoomText(args.topic);

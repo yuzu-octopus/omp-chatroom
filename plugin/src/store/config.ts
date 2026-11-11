@@ -47,7 +47,9 @@ export const DEFAULT_ROOM_CONFIG: RoomConfig = {
 // maxBodyBytes=0 refuses every post), so the floor is load-bearing; the ceiling only bounds
 // absurdity (a hand-edited 1e18 ttl must not hydrate a lease the write path could never mint).
 // claimTtlMs reuses the write path's own 1 s – 24 h pair (store/log.ts) — one source, not two.
-export const CONFIG_NUMERIC_BOUNDS: Readonly<Record<Exclude<keyof RoomConfig, "roomId">, { min: number; max: number }>> = {
+export const CONFIG_NUMERIC_BOUNDS: Readonly<
+  Record<Exclude<keyof RoomConfig, "roomId">, { min: number; max: number }>
+> = {
   maxT1PerTurn: { min: 1, max: 1_000_000 },
   maxT1Tokens: { min: 1, max: 1_000_000_000 },
   coalesceCount: { min: 1, max: 1_000_000 },
@@ -67,8 +69,13 @@ export const CONFIG_NUMERIC_BOUNDS: Readonly<Record<Exclude<keyof RoomConfig, "r
  * The ONE clamp (config.ts owns it; room-command.ts `config set` calls it rather than mirroring
  * the table — two tables drift). Returns the value and whether it moved.
  */
-export function clampNumericConfig(key: string, value: number): { value: number; clamped: boolean } {
-  const bounds = (CONFIG_NUMERIC_BOUNDS as Readonly<Record<string, { min: number; max: number }>>)[key];
+export function clampNumericConfig(
+  key: string,
+  value: number,
+): { value: number; clamped: boolean } {
+  const bounds = (CONFIG_NUMERIC_BOUNDS as Readonly<Record<string, { min: number; max: number }>>)[
+    key
+  ];
   if (bounds === undefined) return { value, clamped: false };
   const clamped = Math.min(bounds.max, Math.max(bounds.min, value));
   return { value: clamped, clamped: clamped !== value };
