@@ -5,6 +5,9 @@ import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { logPathFor, roomIdFor } from "../src/ids";
 import {
+  clampNumber,
+  clampTimeout,
+  coerceConfigValue,
   configPath,
   DEFAULT_ROOM_CONFIG,
   isValidRoomId,
@@ -265,4 +268,34 @@ test("post + delivery pass read the live store config, not the config file", asy
   } finally {
     spy.mockRestore();
   }
+});
+
+test("coerceConfigValue clamps through the ONE table: unknown keys rejected, floors held", () => {
+  // The convergence (027+032) moved the clamp here from room-command.ts so the two paths cannot
+  // drift — these pin the shared helper directly, not just its two callers. A mutant that
+  // re-forks the table in either caller stays green there but fails here.
+  // Unknown key → null (refused at both call sites). A string key with a string value passes
+  // (roomId IS settable); a type mismatch (number into a string key) is refused instead.
+  expect(coerceConfigValue("noSuchKey", 5)).toBeNull();
+  expect(coerceConfigValue("roomId", "abc")).toMatchObject({ value: "abc", clamped: false });
+  expect(coerceConfigValue("roomId", 5)).toBeNull();
+  // Floors and ceilings hold through the shared path.
+  const floored = coerceConfigValue("logMaxRecords", 0);
+  expect(floored).toMatchObject({ value: 1, clamped: true });
+  const kept = coerceConfigValue("logMaxRecords", 100);
+  expect(kept).toMatchObject({ value: 100, clamped: false });
+  const capped = coerceConfigValue("claimTtlMs", 1e18);
+  expect(capped?.value).toBeLessThan(1e18);
+  // The helper takes TYPED values (the /room CLI runs Number() first in coerceSetting — that
+  // parse is the CLI's half of the contract, pinned by the blank/NaN refusal tests in
+  // room-command.test.ts). A raw string into a numeric key is refused here, not coerced.
+  expect(coerceConfigValue("maxBodyBytes", "8192")).toBeNull();
+  // clampNumber/clampTimeout are the primitives the table stands on.
+  expect(clampNumber(5, 1, 10)).toBe(5);
+  expect(clampNumber(-1, 1, 10)).toBe(1);
+  expect(clampNumber(99, 1, 10)).toBe(10);
+  expect(clampTimeout(undefined, 3000, 1000, 9000)).toBe(3000);
+  expect(clampTimeout(500, 3000, 1000, 9000)).toBe(1000);
+  expect(clampTimeout(99_999, 3000, 1000, 9000)).toBe(9000);
+  expect(DEFAULT_ROOM_CONFIG.logMaxRecords).toBeGreaterThan(0);
 });

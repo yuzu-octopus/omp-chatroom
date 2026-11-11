@@ -51,6 +51,10 @@ import { notifyRecipients, type RoomToolResult, registerRoomTool } from "../src/
 const TMP: string[] = [];
 afterEach(() => {
   resetRoomStores();
+  // The registry is GLOBAL (host singleton): without a reset, a `registerSession` id from one
+  // test leaks into the next, and two tests in the same millisecond share a Date.now() suffix —
+  // the second `register` overwrites the first's session double. Reset per test, not per file.
+  AgentRegistry.resetGlobalForTests();
   for (const dir of TMP.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
 

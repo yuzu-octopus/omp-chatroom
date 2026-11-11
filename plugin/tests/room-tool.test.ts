@@ -33,7 +33,7 @@ import {
 } from "../src/store/room-store";
 import type { RoomRecord } from "../src/store/schema";
 import { viewPath } from "../src/store/tree-store";
-import { ROOM_DESCRIPTION, registerRoomTool } from "../src/tools/room";
+import { ROOM_DESCRIPTION, recallMissRate, registerRoomTool } from "../src/tools/room";
 import { zodStub } from "./zod-stub";
 
 // §3.1 — a real store over a real temp root; the real JSONL log is written (§3.3).
@@ -2191,4 +2191,25 @@ test("release without topic and key is refused", async () => {
   const { ctx } = newTestStore();
   const res = await invokeRoom(ctx, { op: "release" });
   expect(res.details).toMatchObject({ ok: false, error: "release requires topic and key" });
+});
+
+// --- recallMissRate: the miss-rate observatory (read-only aggregate) -------------------
+// `recall` tests above pin the per-call signal; these pin the AGGREGATE the trigger reads.
+// Without them a mutant that zeroes the counters (or divides by recalls+1) stays green.
+
+test("recallMissRate is null on a fresh store — no recalls, no rate, not 0%", () => {
+  const { store } = newTestStore();
+  // Null, not { rate: 0 }: 0% would claim healthy retrieval that never happened.
+  expect(recallMissRate(store)).toBeNull();
+});
+
+test("recallMissRate accumulates across recalls and reports the true fraction", async () => {
+  const { store, ctx } = newTestStore();
+  store.append({ kind: "msg", from: "AgentA", topic: "t", body: "hello world" });
+  await invokeRoom(ctx, { op: "recall", pattern: "hello" }); // hit
+  await invokeRoom(ctx, { op: "recall", pattern: "zzz-no-such-text" }); // miss
+  await invokeRoom(ctx, { op: "recall", pattern: "zzz-also-missing" }); // miss
+  const rate = recallMissRate(store);
+  expect(rate).toMatchObject({ recalls: 3, misses: 2 });
+  expect(rate?.rate).toBeCloseTo(2 / 3);
 });

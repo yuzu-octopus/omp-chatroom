@@ -22,6 +22,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { createAgentSession, SessionManager } from "@oh-my-pi/pi-coding-agent";
 import { ensureThemeSync, theme } from "@oh-my-pi/pi-tui";
+import { hostSchema } from "../src/host-schema";
 import roomExtension from "../src/index";
 
 test("the installed host carries the deep specifiers the plugin imports, with exports", async () => {
@@ -99,3 +100,12 @@ test(
   },
   HOST_CONTRACT_TIMEOUT_MS,
 );
+
+test("hostSchema hands the host the SAME schema object the plugin built (no copy, no wrap)", () => {
+  // The cast is load-bearing for `bun check` (64 false errors without it) and invisible at
+  // runtime — which is exactly why it needs a test: a future "simplification" that wraps or
+  // clones the schema (e.g. `{ ...schema }`) would strip the real zod prototype the host
+  // validates through, breaking every tool at first use in production.
+  const built = { __schemaSentinel: true };
+  expect(hostSchema(built)).toBe(built);
+});

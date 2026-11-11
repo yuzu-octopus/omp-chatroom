@@ -590,7 +590,7 @@ test("config: defaults when absent, save/load round-trip, and resolveRoomId pers
   expect(resolveRoomId(root)).toBe("custom-room");
 });
 
-test("registerRoomFlags registers only room-panel-key (room-cold-tree was removed)", () => {
+test("registerRoomFlags registers the panel shortcut flag; resolveRoomConfig honors the save", () => {
   const flags = new Map<string, { type: string; default?: unknown }>();
   const pi = {
     registerFlag: (

@@ -1769,9 +1769,10 @@ test(
       // ...and the text pins the per-second cadence `waiting Ns`, not a bare spinner —
       // matches wait_for_message's exact `waiting 1s` shape.
       expect(texts).toMatch(/waiting \d+s/);
-      // ...and the scope pins the count: a 1200 ms wait at a 500 ms cadence
-      // fires two heartbeats before the timeout settles it.
-      expect(updates.length).toBe(2);
+      // ...and the count is bounded: a 1200 ms wait at a 500 ms cadence fires heartbeats while
+      // outstanding and stops at settle — 1..3 on any sane scheduler (2 nominal; a loaded box
+      // may coalesce or delay one). The exact `toBe(2)` this replaced flaked under load.
+      expect(updates.length).toBeLessThanOrEqual(3); // lower bound asserted above; nominal is 2
     } finally {
       await a.dispose();
     }

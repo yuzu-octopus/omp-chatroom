@@ -206,105 +206,11 @@ test(
   E2E_TIMEOUT_MS,
 );
 
-test(
-  "B's wait_for_claim is still pending before A releases",
-  async () => {
-    const root = freshRoot();
-    const bus = new EventBus();
-    const registry = new AgentRegistry();
-    const a = await newSession(bus, registry, root, "AgentA");
-    const b = await newSession(bus, registry, root, "AgentB");
-    try {
-      await toolOf(a, "room").execute("c-claim", {
-        op: "claim",
-        topic: "t",
-        key: "k",
-        ttl: 300_000,
-      });
-      const waitP = toolOf(b, "wait_for_claim").execute("c-wait", {
-        resource: "t/k",
-        timeout: 5_000,
-      });
-      let done = false;
-      void waitP.then(() => {
-        done = true;
-      });
-      // One microtask turn: a settled promise would have flipped `done` by now.
-      await Promise.resolve();
-      expect(done).toBe(false);
-      await toolOf(a, "room").execute("c-release", { op: "release", topic: "t", key: "k" });
-      await Promise.race([waitP, Bun.sleep(2_000)]);
-      expect(done).toBe(true);
-    } finally {
-      await a.dispose();
-      await b.dispose();
-    }
-  },
-  E2E_TIMEOUT_MS,
-);
-
-test(
-  "it resolves details:{ok:true, outcome:'event', acquired:true, claim:{holder:'AgentB'}} after A's release",
-  async () => {
-    const root = freshRoot();
-    const bus = new EventBus();
-    const registry = new AgentRegistry();
-    const a = await newSession(bus, registry, root, "AgentA");
-    const b = await newSession(bus, registry, root, "AgentB");
-    try {
-      await toolOf(a, "room").execute("c-claim", {
-        op: "claim",
-        topic: "x",
-        key: "y",
-        ttl: 300_000,
-      });
-      const waitP = toolOf(b, "wait_for_claim").execute("c-wait", {
-        resource: "x/y",
-        ttl: 60_000,
-        timeout: 5_000,
-      });
-      await toolOf(a, "room").execute("c-release", { op: "release", topic: "x", key: "y" });
-      const winner = await Promise.race([waitP, Bun.sleep(2_000).then(() => null)]);
-      expect(winner!.details).toMatchObject({
-        ok: true,
-        outcome: "event",
-        acquired: true,
-        claim: { holder: "AgentB" },
-      });
-    } finally {
-      await a.dispose();
-      await b.dispose();
-    }
-  },
-  E2E_TIMEOUT_MS,
-);
-
-test(
-  "the JSONL at logPathFor(root, roomId) contains the claim line with from:'AgentA', resource:'build/step'",
-  async () => {
-    const root = freshRoot();
-    const bus = new EventBus();
-    const registry = new AgentRegistry();
-    const a = await newSession(bus, registry, root, "AgentA");
-    try {
-      await toolOf(a, "room").execute("c-claim", {
-        op: "claim",
-        topic: "build",
-        key: "step",
-        ttl: 300_000,
-      });
-      const lines = readLog(root);
-      expect(lines.find((l) => l.kind === "claim")).toMatchObject({
-        from: "AgentA",
-        resource: "build/step",
-        ttlMs: 300_000,
-      });
-    } finally {
-      await a.dispose();
-    }
-  },
-  E2E_TIMEOUT_MS,
-);
+// REMOVED (2026-11-11 audit): "B's wait_for_claim is still pending before A releases", "it
+// resolves … after A's release", and "the JSONL … contains the claim line …" — all three are
+// strict subsets of the §11.1 test above (pending-before-release, event-after-release, and the
+// durable claim line are each asserted there through the REAL host loop). Three sessions of
+// duplicate cost for zero new behavior.
 
 test(
   "a second claim from A returns details:{ok:false, holder:'AgentB'} (first-writer-wins)",
@@ -351,32 +257,29 @@ test(
 );
 
 test(
-  "every tool result carries a non-empty content array (K1 — never {outcome} alone)",
+  "the host loop delivers content arrays, not bare outcomes (K1 end-to-end)",
   async () => {
+    // NARROWED (2026-11-11 audit): the old version enumerated eight ops asserting each returns a
+    // non-empty content array — but the per-op content SHAPE is already pinned in room-tool.test.ts
+    // ("board content …", "topics/recall content …") through the same invokeRoom path, and the
+    // §11.1 test above already asserts winner.content through the real loop. What ONLY the real
+    // loop can prove is that the host's coercion preserves the array end-to-end (a direct
+    // execute() return never passes through it). One op is enough for that; the board is the one
+    // whose content the K1 defect actually hid.
     const root = freshRoot();
     const bus = new EventBus();
     const registry = new AgentRegistry();
     const a = await newSession(bus, registry, root, "AgentA");
     try {
       const room = toolOf(a, "room");
-      const wait = toolOf(a, "wait_for_claim");
-      const results: ToolResultEnvelope[] = [
-        await room.execute("c-join", { op: "join" }),
-        await room.execute("c-post", { op: "post", topic: "t", body: "hi" }),
-        await room.execute("c-read", { op: "read", limit: 10 }),
-        await room.execute("c-claim", { op: "claim", topic: "t", key: "k", ttl: 300_000 }),
-        await room.execute("c-board", { op: "board" }),
-        await room.execute("c-release", { op: "release", topic: "t", key: "k" }),
-        await room.execute("c-release2", { op: "release", topic: "t", key: "k" }), // unknown → ok:false
-        await wait.execute("c-wait", { resource: "t/k", timeout: 1_000 }), // timeout
-      ];
-      for (const res of results) {
-        expect(Array.isArray(res.content)).toBe(true);
-        expect(res.content.length).toBeGreaterThan(0);
-        expect(res.content[0]?.type).toBe("text");
-        expect(typeof res.content[0]?.text).toBe("string");
-        expect(typeof res.details?.ok).toBe("boolean");
-      }
+      await room.execute("c-claim", { op: "claim", topic: "build", key: "step", ttl: 300_000 });
+      const board = await room.execute("c-board", { op: "board" });
+      expect(Array.isArray(board.content)).toBe(true);
+      expect(board.content.length).toBeGreaterThan(0);
+      expect(board.content[0]?.type).toBe("text");
+      // The K1 defect's signature: a bare count with no holder. Through the real loop it must
+      // still name the holder.
+      expect(board.content[0]?.text).toContain("AgentA");
     } finally {
       await a.dispose();
     }
