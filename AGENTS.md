@@ -62,17 +62,29 @@ advanced on delivery into context, never on send.
 
 ```sh
 cd plugin
-bun test tests/                                 # whole suite (604 pass, 1 skip, 18 files)
+bun test tests/                                 # whole suite (607 pass, 1 skip, 18 files)
+bun run test:halves-a; bun run test:halves-b    # the same suite as two alphabetical halves (see below)
 bun test tests/ --coverage                      # the same run with a coverage table (not a gate)
 bun check                                       # native typecheck, ~95 ms (CI runs it first)
 bun run typecheck                               # the same check via tsc, the authoritative gate
+bun run typecheck:fast                          # script alias for `bun check` (a script literally named
+                                                # `check` would shadow the native command, so it is not used)
 bunx --bun @biomejs/biome check src tests       # lint + format
 bunx --bun @biomejs/biome check src tests --write   # apply fixes
 ```
 
-**If the one-shot suite blocks**, split it into the two alphabetical halves — every file passes
-alone and in halves; only all 18 in one process hang, and only while another omp session is live on
-the machine (reproduced on a stashed tree, so it is the environment, not a test):
+**If the one-shot suite blocks**, run the two alphabetical halves via their scripts
+(`bun run test:halves-a`, `bun run test:halves-b` — the exact file lists below, scripted so
+newcomers do not copy-paste nine filenames) — every file passes alone and in halves; only all 18
+in one process hang, and only while another omp session is live on the machine (reproduced on a
+stashed tree, so it is the environment, not a test):
+
+```sh
+bun run test:halves-a
+bun run test:halves-b
+```
+
+The script bodies (kept in sync with the halves):
 
 ```sh
 bun test tests/attention.test.ts tests/board-columns.test.ts tests/cards.test.ts tests/config.test.ts \

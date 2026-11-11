@@ -15,7 +15,7 @@ global room root, the linked-plugin route and the legacy migration are now verif
 | Declared host deps | `@oh-my-pi/pi-coding-agent`, `@oh-my-pi/pi-tui`, `@oh-my-pi/pi-ai`, **`@oh-my-pi/pi-utils`** (was imported by eight source files while undeclared) |
 | Room root | `getSessionsDir()/rooms/<16 hex of the project path>` — the global omp session store (`~/.omp/agent/sessions`, or `$XDG_DATA_HOME/omp/sessions`), **not** `<cwd>/.omp-room` |
 | Room-root exceptions | a project under the system temp dir stays project-local (a temp-dir project that is itself a git checkout may want its own `.omp-room/` ignore entry); a legacy `<cwd>/.omp-room` is MOVED into the global store once — copied there (its `config.json` travels with it, so the pinned `roomId` survives), verified, and then removed from the project tree, which keeps no `.omp-room` at all. A SKIPPED migration (the legacy room is held by a LIVE process, the pinned room id matches no log, or the target already has a room) removes nothing and leaves the legacy room byte-for-byte intact; the copy is taken under both rooms' locks |
-| Tests | **550 pass / 1 skip / 0 fail, 551 run, 18 files** (`bun test tests/`) |
+| Tests | **607 pass / 1 skip / 0 fail, 608 run, 18 files** (`bun test tests/`, or the `test:halves-a`/`test:halves-b` split; measured 2026-11-11) |
 | New test files | `plugin/tests/room-root.test.ts` (21 tests: global vs temp resolution, one-room-per-project, the migration, its no-clobber rule, its naming rules and its two locks) and `plugin/tests/room-root-e2e.test.ts` (2 tests: the room really lands in the global store, and a legacy room is migrated — both in a child process with a fresh XDG base) |
 | The ranked list, all ten | R1 (the fencing token) · R2 (renew-on-re-claim) · R3 (dependency-ordered claims) · R4 (the wait-for cycle check) · R5 (the measurement records) · R6 (the topic's status ledger, written by the topic's claim holder) · R7 (idempotency keys) · R8 (the Skill as four procedural modules; the always-on rule trimmed) · R9 (the board's who-is-blocked-on-what view) · R10 — **decided not to build** a retrieval tool. See `plans/020-effectiveness-round.md` |
 | The panel | Reviewed against the host's own TUI source (`pi-tui/src`): ten deviations fixed — the chat row budgets its width instead of guessing, the board's columns are the content's natural widths with the host's `fitWidths` semantics, the board's window is the host's `getMenuWindow` (the selection can no longer scroll away), the roster strip drops whole groups and says what it dropped, the FALLBACK theme defines every symbol the panel reads (it was missing four, so the strip painted the literal `undefined` into the frame title), every frame glyph comes from the theme, the row's clock is local time, and the card's body cap counts cells not characters. The split ratio is 0.52. 551 run / 550 pass / 1 skip |
@@ -24,7 +24,10 @@ global room root, the linked-plugin route and the legacy migration are now verif
 
 ### Verified in this round
 
-- The suite is green: 550 pass / 1 skip / 0 fail, 551 run across 18 files, plus `tsc --noEmit` 0 errors and
+- The suite is green: 607 pass / 1 skip / 0 fail, 608 run across 18 files (measured 2026-11-11
+  via the `test:halves-a`/`test:halves-b` split — halves-a 279 pass / 1 skip / 280 run, halves-b
+  328 pass / 328 run; the 1 skip is the pre-existing `test.skip` sweep-job case in
+  `tests/e2e-room.test.ts`), plus `tsc --noEmit` 0 errors and
   `biome check src tests` clean. The suite no longer depends on the provider: the session-based
   tests use SUBAGENT sessions, so the compactor (which only starts for a main session) never makes
   a real model call in a test.
@@ -43,6 +46,18 @@ global room root, the linked-plugin route and the legacy migration are now verif
 - The live verification below (2026-10-20) covers the parts the suite cannot: the plugin loading
   against the live host, the `room` tool in a real model turn, the global room root, the legacy
   migration and the `/room` panel in a real terminal.
+
+### Live-host delta (2026-11-11, host 18.18.1 pinned / 18.18.8 installed)
+
+The suite and typecheck gates above were measured on this date against the pinned host **18.18.1**
+(`bun check` 0 errors in 55 files, `tsc --noEmit` clean, `biome check src tests` clean on 57
+files, both halves green). No new live-model run was performed in this round: the live evidence in
+"Live verification (2026-10-20)" and "Unprompted discovery — MEASURED" is **carried over** from
+host 18.12.3 and still describes the panel, the global room root, the legacy migration and the
+discovery rate — re-running those trials is recorded as future work, not claimed here. One drift
+is reported honestly: the machine's installed global host is now **18.18.8** (`omp --version`),
+ahead of the 18.18.1 pin, so the drift gate's global-install leg fails locally while every repo
+leg passes. Re-pinning to 18.18.8 is a separate change with its own review.
 
 ### Live verification (2026-10-20)
 
@@ -334,7 +349,7 @@ nothing and leaves the legacy room byte-for-byte intact.
 |---|---|
 | `bunx --bun tsc --noEmit -p tsconfig.json` | **0 errors** |
 | `bun check` (Bun's own typecheck, the fast gate) | **0 errors in 55 files** |
-| `bun test tests/` | **550 pass / 1 skip / 0 fail, 551 run**, 18 files (as of 2026-10-21; the plan-008 skew pin is gone — retention now invalidates the tree) |
+| `bun test tests/` (or `test:halves-a` + `test:halves-b`) | **607 pass / 1 skip / 0 fail, 608 run**, 18 files (measured 2026-11-11: halves-a 279 pass / 1 skip / 280 run, halves-b 328 pass / 328 run; the plan-008 skew pin is gone — retention now invalidates the tree) |
 | `bunx --bun @biomejs/biome check src tests` | **0 errors, 0 warnings** (55 files; HEAD did not pass this until the 2026-10-20 lint fix) |
 | Remaining `not implemented` stubs | **0** |
 | Plugin loads in a real session | **0 extension errors**, all 4 tools + `/room` registered |
