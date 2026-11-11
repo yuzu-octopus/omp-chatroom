@@ -128,6 +128,36 @@ test("/room claim on another holder's live lease → denied with a contended rec
   // … and no new claim record.
   expect(store.records.filter((r) => r.kind === "claim")).toHaveLength(1);
 });
+test("/room claim with an unmet dependency is refused naming blocker and holder", async () => {
+  const notified: string[] = [];
+  const handler = captureHandler(notified);
+  const root = tempRoot();
+  const store = roomStoreForCwd(root);
+  store.append({ kind: "claim", from: "Other", resource: "build/schema", ttlMs: 60_000 });
+
+  await handler("claim build parser 60000 build/schema", headlessCtx(root, notified));
+
+  // The R3 refusal names the blocking resource and who holds it (the tool path's wording).
+  expect(notified.join("\n")).toContain("blocked — depends on build/schema (held by Other)");
+  expect(store.claims.has("build/parser")).toBe(false);
+  // … and the loss is still a measurement: one contended record on the attempted resource.
+  const contended = store.records.filter((r) => r.kind === "contended");
+  expect(contended).toHaveLength(1);
+  expect(contended[0]).toMatchObject({ from: "Main", resource: "build/parser", holder: "Other" });
+});
+
+test("/room claim with free dependencies grants and records them on the lease", async () => {
+  const notified: string[] = [];
+  const handler = captureHandler(notified);
+  const root = tempRoot();
+  const store = roomStoreForCwd(root);
+
+  await handler("claim build parser 60000 build/schema", headlessCtx(root, notified));
+
+  expect(notified.some((line) => line.includes("granted"))).toBe(true);
+  expect(store.claims.get("build/parser")?.holder).toBe("Main");
+  expect(store.claims.get("build/parser")?.dependsOn).toEqual(["build/schema"]);
+});
 
 test("/room claim renewal notifies the waiter but does not promote it", async () => {
   const notified: string[] = [];
