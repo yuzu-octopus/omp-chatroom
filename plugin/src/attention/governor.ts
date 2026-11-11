@@ -288,17 +288,49 @@ function memberFor(store: RoomStore, agentId: string): MemberState {
   return fresh;
 }
 
+// --- per-topic scan (one pass for board / topics / unread) ------------------
+//
+// `buildBoard`'s topic scan, the topics op and `unreadCounts` each walked the whole log. One
+// forward pass serves all three: per topic, in first-seen order, the last seq plus the unread
+// counts above the viewer's cursor. `unread` skips muted topics (the topics-op / unreadCounts
+// basis); `unreadAll` counts everything above the cursor (the board basis, which is mute-blind).
+
+export interface TopicScanRow {
+  topic: string;
+  lastSeq: number;
+  unread: number;
+  unreadAll: number;
+}
+
+export function scanTopics(store: RoomStore, viewer: MemberState): TopicScanRow[] {
+  const cursor = store.cursors.get(viewer.agentId) ?? 0;
+  const byTopic = new Map<string, TopicScanRow>();
+  const rows: TopicScanRow[] = [];
+  for (const record of store.records) {
+    if (record.kind !== "msg" && record.kind !== "note") continue;
+    let row = byTopic.get(record.topic);
+    if (!row) {
+      row = { topic: record.topic, lastSeq: record.seq, unread: 0, unreadAll: 0 };
+      byTopic.set(record.topic, row);
+      rows.push(row);
+    }
+    row.lastSeq = record.seq;
+    if (record.seq <= cursor) continue;
+    row.unreadAll++;
+    if (!isMuted(store, viewer, record)) row.unread++;
+  }
+  return rows;
+}
+
 // --- unread counts --------------------------------------------------------
 
 /** §5.2 — per-topic unread above the viewer's cursor; a muted topic contributes zero. */
 export function unreadCounts(store: RoomStore, viewer: MemberState): Map<string, number> {
-  const cursor = store.cursors.get(viewer.agentId) ?? 0;
+  // One shared pass (scanTopics): rows with zero unread contribute no entry, exactly as the old
+  // filter-then-count did.
   const counts = new Map<string, number>();
-  for (const record of store.records) {
-    if (record.seq <= cursor) continue;
-    if (record.kind !== "msg" && record.kind !== "note") continue;
-    if (isMuted(store, viewer, record)) continue;
-    counts.set(record.topic, (counts.get(record.topic) ?? 0) + 1);
+  for (const row of scanTopics(store, viewer)) {
+    if (row.unread > 0) counts.set(row.topic, row.unread);
   }
   return counts;
 }

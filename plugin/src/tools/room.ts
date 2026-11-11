@@ -9,12 +9,12 @@ import {
   moreLine,
   muteRoom,
   muteTopic,
+  scanTopics,
   selectT0,
   selectT1,
   truncateOversized,
   unmuteRoom,
   unmuteTopic,
-  unreadCounts,
 } from "../attention/governor";
 import { classify, type Tier } from "../attention/tiers";
 import {
@@ -422,20 +422,13 @@ function buildBoard(store: RoomStore, viewer: MemberState): BoardResult {
     lag: lagFor(store, member.agentId),
     topics: [...member.topics],
   }));
-  const cursor = cursorFor(store, viewer.agentId);
-  const byTopic = new Map<string, TopicRow>();
-  const topics: TopicRow[] = [];
-  for (const record of store.records) {
-    if (record.kind !== "msg" && record.kind !== "note") continue;
-    let row = byTopic.get(record.topic);
-    if (!row) {
-      row = { topic: record.topic, lastSeq: record.seq, unread: 0 };
-      byTopic.set(record.topic, row);
-      topics.push(row);
-    }
-    row.lastSeq = record.seq;
-    if (record.seq > cursor) row.unread++;
-  }
+  // The board's topic rows share the single-pass scan (scanTopics): the board basis is
+  // mute-blind, so it reads `unreadAll`. Shape, order and caps are unchanged.
+  const topics: TopicRow[] = scanTopics(store, viewer).map((row) => ({
+    topic: row.topic,
+    lastSeq: row.lastSeq,
+    unread: row.unreadAll,
+  }));
   return { ok: true, claims, roster, topics, deliveries: { ...store.deliveries } };
 }
 
@@ -1392,20 +1385,13 @@ export function registerRoomTool(pi: ExtensionAPI): void {
 
           case "topics": {
             const viewer = viewerStateFor(store, agentId);
-            const counts = unreadCounts(store, viewer);
-            const byTopic = new Map<string, TopicRow>();
-            const topics: TopicRow[] = [];
-            for (const record of store.records) {
-              if (record.kind !== "msg" && record.kind !== "note") continue;
-              let row = byTopic.get(record.topic);
-              if (!row) {
-                row = { topic: record.topic, lastSeq: record.seq, unread: 0 };
-                byTopic.set(record.topic, row);
-                topics.push(row);
-              }
-              row.lastSeq = record.seq;
-              row.unread = counts.get(record.topic) ?? 0;
-            }
+            // Same single-pass scan as the board: the topics basis is mute-aware, so it reads
+            // `unread`. Rows, order and counts are identical to the old scan + unreadCounts.
+            const topics: TopicRow[] = scanTopics(store, viewer).map((row) => ({
+              topic: row.topic,
+              lastSeq: row.lastSeq,
+              unread: row.unread,
+            }));
             return ok(
               { ok: true, op: "topics", topics },
               withRows(
