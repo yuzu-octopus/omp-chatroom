@@ -16,7 +16,7 @@ import { hostSchema } from "../host-schema";
 import { safeRoomText } from "../onboarding/escape";
 import { type RoomStore, roomStoreFor } from "../store/room-store";
 import type { RoomRecord } from "../store/schema";
-import { clearWaitEdges, findWaitCycle, setWaitEdges } from "../store/wait-graph";
+import { clearWaitEdges, findWaitCycle, setWaitEdges, type WaitTarget } from "../store/wait-graph";
 import {
   WAIT_DEFAULT_TIMEOUT_MS,
   WAIT_HEARTBEAT_MS,
@@ -149,11 +149,15 @@ async function waitForMessage(
 
   const startedAt = Date.now();
   // R4 — refuse a wait that would close a cycle. A wait for a message from an agent is a
-  // wait for THAT agent, so it can close a cycle with the other two mechanisms.
+  // wait for THAT agent, so it can close a cycle with the other two mechanisms. A filterless
+  // wait matches any sender (the `matches` predicate below), so its target names no `from` —
+  // any blocked agent keeps it deadlocked.
+  const waitTargets: [WaitTarget] =
+    from === undefined ? [{ kind: "message" }] : [{ kind: "message", from }];
   const cycle = findWaitCycle(
     store.root,
     agentId,
-    from === undefined ? [] : [{ kind: "message", from }],
+    waitTargets,
     (resource) => store.claims.get(resource)?.holder,
   );
   if (cycle !== null) {
@@ -220,8 +224,9 @@ async function waitForMessage(
     details: { ok: true, outcome: "event", message: record },
   });
 
-  // R4 — the wait edge goes in as the wait starts, so another agent's wait can see it.
-  if (from !== undefined) setWaitEdges(store.root, agentId, [{ kind: "message", from }]);
+  // R4 — the wait edge goes in as the wait starts, so another agent's wait can see it. A
+  // filterless wait is recorded in the same form the cycle check uses (no `from`).
+  setWaitEdges(store.root, agentId, waitTargets);
 
   const unsubscribe = store.addListener((record) => {
     if (record.kind === "msg" && matches(record)) finish(eventResult(record));

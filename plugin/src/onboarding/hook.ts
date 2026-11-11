@@ -113,10 +113,12 @@ export function registerHooks(pi: ExtensionAPI): void {
         }
       });
     }
-    // §3.5 — resume from the persisted cursor when it is higher than the fresh init.
+    // §3.5 — resume from the persisted cursor when it is higher than the fresh init, capped at
+    // the log head: a far-future value would otherwise pin the cursor past every record (and be
+    // re-persisted), so everything after it is silently never read.
     const persisted = restoreOwnCursor(ctx, store.roomId);
     if (persisted !== null && persisted > cursorFor(store, agentId)) {
-      bumpCursor(store, agentId, persisted);
+      bumpCursor(store, agentId, Math.min(persisted, store.seq));
     }
     const viewer: MemberState = store.members.get(agentId) ?? {
       agentId,

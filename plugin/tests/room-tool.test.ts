@@ -23,6 +23,7 @@ import {
 import { DEFAULT_ROOM_CONFIG, saveRoomConfig } from "../src/store/config";
 import {
   disposeRoomSession,
+  enforceRetention,
   type RoomStore,
   registerSweepNotifier,
   resetRoomStores,
@@ -368,6 +369,39 @@ test("R7: a retried post with the same key returns the first one instead of post
   // ...and the mismatch names the key, so the retrier learns WHICH key
   // collided instead of just "parameters differ".
   expect(JSON.stringify(mismatch.content)).toContain("finding-1");
+});
+test("R7: retrying a retention-pruned idempotency key fails naming the key — no duplicate post", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "room-tool-"));
+  const storeRoot = path.join(root, ".omp-room");
+  saveRoomConfig(storeRoot, { ...DEFAULT_ROOM_CONFIG, logMaxRecords: 3 });
+  const ctx = fakeCtx(root, "AgentA");
+  const store = roomStoreFor(ctx);
+
+  const first = await invokeRoom(ctx, {
+    op: "post",
+    topic: "build",
+    body: "the finding",
+    idemKey: "finding-1",
+  });
+  expect(first.details).toMatchObject({ ok: true, op: "post" });
+  // Push the keyed post out of the projection through retention.
+  for (let i = 0; i < 5; i++) {
+    store.append({ kind: "msg", from: "AgentA", topic: "t", body: `filler-${i}` });
+  }
+  enforceRetention(store, Date.now());
+  const recordsAfterPrune = store.records.length;
+
+  // The retry must NOT silently append a same-key duplicate (a double-wake): it fails naming
+  // the key, and the caller mints a fresh one.
+  const retry = await invokeRoom(ctx, {
+    op: "post",
+    topic: "build",
+    body: "the finding",
+    idemKey: "finding-1",
+  });
+  expect(retry.details).toMatchObject({ ok: false });
+  expect(JSON.stringify(retry.details)).toContain("finding-1");
+  expect(store.records.length).toBe(recordsAfterPrune);
 });
 
 test("R5: a lost claim is recorded, so contention is measurable", async () => {

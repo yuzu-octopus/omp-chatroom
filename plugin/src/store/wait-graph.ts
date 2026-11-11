@@ -27,6 +27,8 @@ export type WaitTarget =
 function candidatesOf(
   target: WaitTarget,
   holderOf: (resource: string) => string | undefined,
+  requester: string,
+  blockedAgents: readonly string[],
 ): string[] {
   switch (target.kind) {
     case "resource": {
@@ -36,7 +38,10 @@ function candidatesOf(
     case "agent":
       return [target.agentId];
     case "message":
-      return target.from === undefined ? [] : [target.from];
+      if (target.from !== undefined) return [target.from];
+      // A filterless wait matches any sender, so any OTHER blocked agent keeps it deadlocked;
+      // an unblocked agent will act. The requester is itself blocked, never its own satisfier.
+      return blockedAgents.filter((id) => id !== requester);
   }
 }
 
@@ -70,20 +75,20 @@ export function findWaitCycle(
   targets: readonly WaitTarget[],
   holderOf: (resource: string) => string | undefined,
 ): string[] | null {
+  // A missing edge map is an empty one: the requester's own targets are still walked, so the
+  // first waiter can detect a cycle it closes (e.g. waiting on itself) without prior edges.
   const edges = WAIT_EDGES.get(root);
-  if (edges === undefined) return null;
-
+  const blockedAgents = edges === undefined ? [] : [...edges.keys()];
   const seen = new Set<string>();
   const path: string[] = [];
-
   /** Walk one step: follow what an agent waits for to the agents that could satisfy it. */
   const step = (pending: readonly WaitTarget[]): string[] | null => {
     for (const target of pending) {
-      for (const next of candidatesOf(target, holderOf)) {
+      for (const next of candidatesOf(target, holderOf, agentId, blockedAgents)) {
         if (next === agentId) return [...path, next];
         if (seen.has(next)) continue;
         seen.add(next);
-        const nextTargets = edges.get(next);
+        const nextTargets = edges?.get(next);
         if (nextTargets === undefined) continue;
         path.push(next);
         const found = step(nextTargets);
@@ -93,7 +98,6 @@ export function findWaitCycle(
     }
     return null;
   };
-
   const found = step(targets);
   return found === null ? null : [agentId, ...found];
 }

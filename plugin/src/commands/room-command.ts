@@ -17,7 +17,7 @@ import { cursorFor, initCursor, lagFor } from "../store/cursors";
 // cannot mint a lease the log validator would quarantine on the next open.
 import { CLAIM_TTL_MAX_MS, CLAIM_TTL_MIN_MS } from "../store/log";
 import { type RoomStore, roomStoreFor } from "../store/room-store";
-import { appendedSince, notifyRecipients } from "../tools/room";
+import { appendedSince, DEPENDS_ON_MAX_BYTES, notifyRecipients, overListCap } from "../tools/room";
 
 export const ROOM_COMMAND_NAME = "room";
 
@@ -36,7 +36,7 @@ export interface RoomCompletion {
 const SUBCOMMAND_HELP: Readonly<Record<RoomSubcommand, string>> = {
   board: "claims, roster and per-agent lag",
   join: "join the room and mint your cursor",
-  claim: "claim <topic> <key> [ttlMs] — take exclusive ownership",
+  claim: "claim <topic> <key> [ttlMs] [dependsOn...] — take exclusive ownership",
   release: "release <topic> <key> — drop a claim you hold",
   post: "post <topic> <body> — append a message",
   config: "show the resolved config; `config set <key>=<value>` writes it",
@@ -211,9 +211,16 @@ export function registerRoomCommand(pi: ExtensionAPI): void {
         }
 
         case "claim": {
-          const [topic, key, ttlArg] = rest.split(/\s+/).filter(Boolean);
+          const [topic, key, ttlArg, ...dependsOn] = rest.split(/\s+/).filter(Boolean);
           if (!topic || !key) {
-            report(ctx, pi, "claim requires <topic> <key> [ttlMs]", "warning");
+            report(ctx, pi, "claim requires <topic> <key> [ttlMs] [dependsOn...]", "warning");
+            return;
+          }
+          // Dependencies ride after the lease (the tool path's `dependsOn: string[]`, same rule).
+          const dependsError =
+            dependsOn.length > 0 ? overListCap("dependsOn", dependsOn, DEPENDS_ON_MAX_BYTES) : null;
+          if (dependsError !== null) {
+            report(ctx, pi, `claim: ${dependsError}`, "warning");
             return;
           }
           const resource = resourceKey(topic, key);
@@ -236,9 +243,8 @@ export function registerRoomCommand(pi: ExtensionAPI): void {
             Math.max(CLAIM_TTL_MIN_MS, Math.trunc(requested)),
           );
           const before = store.seq;
-          const result = grant(store, resource, agentId, ttlMs);
+          const result = grant(store, resource, agentId, ttlMs, dependsOn);
           if (!result.ok) {
-            // The holder's own lease: RENEW it (the same rule as the tool path).
             if (result.holder === agentId) {
               const renewed = renew(store, resource, agentId, ttlMs);
               if (renewed.ok) {
@@ -266,6 +272,19 @@ export function registerRoomCommand(pi: ExtensionAPI): void {
               resource,
               holder: result.holder,
             });
+            // R3 — the same refusal as the tool path: name every blocker and its holder.
+            if ("blockedBy" in result && result.blockedBy.length > 0) {
+              const blockers = result.blockedBy
+                .map((b) => `${b.resource} (held by ${b.holder})`)
+                .join(", ");
+              report(
+                ctx,
+                pi,
+                `room claim ${safe(resource)} → blocked — depends on ${safe(blockers)}`,
+                "warning",
+              );
+              return;
+            }
             report(
               ctx,
               pi,

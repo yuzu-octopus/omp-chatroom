@@ -113,14 +113,12 @@ export function persistOwnCursor(pi: ExtensionAPI, roomId: string, seq: number):
 }
 
 function isCursorData(value: unknown): value is { roomId: string; seq: number } {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    "roomId" in value &&
-    typeof value.roomId === "string" &&
-    "seq" in value &&
-    typeof value.seq === "number"
-  );
+  if (typeof value !== "object" || value === null) return false;
+  if (!("roomId" in value) || typeof value.roomId !== "string") return false;
+  if (!("seq" in value)) return false;
+  // A persisted cursor is a log position: a finite, non-negative integer. NaN, negatives, and
+  // non-integers are corruption (or hostile), never a position — the resume walk skips them.
+  return Number.isInteger(value.seq) && (value.seq as number) >= 0;
 }
 
 export function restoreOwnCursor(ctx: ExtensionContext, roomId: string): number | null {

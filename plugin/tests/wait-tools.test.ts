@@ -469,6 +469,59 @@ test(
   },
   WAIT_TIMEOUT_MS,
 );
+test(
+  "R4: a filterless wait_for_message closes a cycle through a blocked claim-waiter",
+  async () => {
+    const root = freshRoot();
+    const bus = new EventBus();
+    const registry = new AgentRegistry();
+    const a = await newSession(bus, registry, root, "AgentA");
+    const b = await newSession(bus, registry, root, "AgentB");
+    try {
+      await toolOf(a, "room").execute("c-a-hold", {
+        op: "claim",
+        topic: "x",
+        key: "res",
+        ttl: 300_000,
+      });
+      await toolOf(b, "room").execute("c-b-hold", {
+        op: "claim",
+        topic: "y",
+        key: "res",
+        ttl: 300_000,
+      });
+
+      const waitAP = toolOf(a, "wait_for_claim").execute("c-wa", {
+        resource: "y/res",
+        ttl: 300_000,
+        timeout: 5_000,
+      });
+      await Bun.sleep(50);
+
+      // No `from`: the wait matches any sender, but it is still a wait on AgentA's
+      // claim-wait (A is blocked on y/res, held by B) — B → A → B closes the cycle.
+      const refused = await toolOf(b, "wait_for_message").execute("c-wb", {
+        timeout: 1_000,
+      });
+      expect(refused.details).toMatchObject({ ok: false, outcome: "aborted" });
+      const rawCycle = refused.details?.cycle;
+      const cycle: string[] = Array.isArray(rawCycle) ? (rawCycle as string[]) : [];
+      expect(cycle[0]).toBe("AgentB");
+      expect(cycle).toContain("AgentA");
+      expect(cycle).toContain("AgentB");
+
+      const stillWaiting = await Promise.race([
+        waitAP.then(() => "settled"),
+        Bun.sleep(50).then(() => "waiting"),
+      ]);
+      expect(stillWaiting).toBe("waiting");
+    } finally {
+      await a.dispose();
+      await b.dispose();
+    }
+  },
+  WAIT_TIMEOUT_MS,
+);
 
 test(
   "R5: a resolved wait is recorded, so wait productivity is measurable",
