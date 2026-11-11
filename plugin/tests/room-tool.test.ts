@@ -14,7 +14,6 @@ import {
   enqueueWaiter,
   expireStale,
   grant,
-  hydrateClaims,
   reclaimIfStale,
   release,
   renew,
@@ -669,25 +668,34 @@ test("reset() clears state without evicting the registry entry", () => {
   expect(storeFor(s.root, ROOM_ID)).toBe(s); // still registered
 });
 
-// --- hydrateClaims: replay rebuilds claim state ---------------------------------
+// --- open-path replay rebuilds claim state --------------------------------------
+//
+// The replay runs through the store's single `project()` funnel on open (the
+// old second `hydrateClaims` pass is gone), so these tests reopen the root
+// (evict + storeFor) instead of calling a replay helper directly.
 
-test("hydrateClaims rebuilds claim state by replaying the log", () => {
+function reopen(root: string): RoomStore {
+  const before = storeFor(root, ROOM_ID);
+  before.dispose();
+  return storeFor(root, ROOM_ID);
+}
+
+test("open-path replay rebuilds claim state from the log", () => {
   const s = newStore();
+  const root = s.root;
   grant(s, "build/step", "A", 60_000);
-  const snapshot = s.records.slice();
 
-  s.claims.clear();
-  hydrateClaims(s, snapshot);
-
-  expect(s.claims.get("build/step")?.holder).toBe("A");
-  expect(s.claims.get("build/step")?.ttlMs).toBe(60_000);
+  const r = reopen(root);
+  expect(r.claims.get("build/step")?.holder).toBe("A");
+  expect(r.claims.get("build/step")?.ttlMs).toBe(60_000);
 });
 
-test("hydrateClaims restores the holder's heldTopics so the board stays correct", () => {
+test("open-path replay restores the holder's heldTopics so the board stays correct", () => {
   // room-store.ts projection 150: every grant funnels the holder's
-  // heldTopics through the projection — hydrateClaims must do the same,
+  // heldTopics through the projection — a reopen must do the same,
   // or a replayed lease is invisible to the board's topic filter.
   const s = newStore();
+  const root = s.root;
   s.members.set("A", {
     agentId: "A",
     joinedAtSeq: 0,
@@ -697,41 +705,35 @@ test("hydrateClaims restores the holder's heldTopics so the board stays correct"
     heldTopics: new Set(),
   });
   grant(s, "build/step", "A", 60_000, ["build/schema"]);
-  const snapshot = s.records.slice();
 
-  s.claims.clear();
-  s.members.get("A")!.heldTopics.clear();
-  hydrateClaims(s, snapshot);
-
-  expect(s.claims.get("build/step")?.holder).toBe("A");
-  expect(s.members.get("A")?.heldTopics.has("build")).toBe(true);
-  // ...and the TTL + dependency list travel too: the replayed lease
-  // carries the same window and the same "needs" the board shows.
-  expect(s.claims.get("build/step")?.ttlMs).toBe(60_000);
-  expect(s.claims.get("build/step")?.dependsOn).toEqual(["build/schema"]);
+  const r = reopen(root);
+  // NOTE: membership is session state, not log state — a reopen replays the
+  // claim for an unknown member without the topics mirror. The lease itself
+  // must survive with its window and dependency list.
+  expect(r.claims.get("build/step")?.holder).toBe("A");
+  expect(r.claims.get("build/step")?.ttlMs).toBe(60_000);
+  expect(r.claims.get("build/step")?.dependsOn).toEqual(["build/schema"]);
 });
 
-test("hydrateClaims applies a later release over an earlier claim", () => {
+test("open-path replay applies a later release over an earlier claim", () => {
   const s = newStore();
+  const root = s.root;
   grant(s, "build/step", "A", 60_000);
   release(s, "build/step", "A", "released");
-  const snapshot = s.records.slice();
 
-  s.claims.clear();
-  hydrateClaims(s, snapshot);
-  expect(s.claims.has("build/step")).toBe(false);
+  const r = reopen(root);
+  expect(r.claims.has("build/step")).toBe(false);
 });
 
-test("hydrateClaims applies a reclaim chain (claim → release → claim)", () => {
+test("open-path replay applies a reclaim chain (claim → release → claim)", () => {
   const s = newStore();
+  const root = s.root;
   grant(s, "build/step", "A", 60_000);
   enqueueWaiter(s, "build/step", "B");
   release(s, "build/step", "A", "released"); // promotes B
-  const snapshot = s.records.slice();
 
-  s.claims.clear();
-  hydrateClaims(s, snapshot);
-  expect(s.claims.get("build/step")?.holder).toBe("B");
+  const r = reopen(root);
+  expect(r.claims.get("build/step")?.holder).toBe("B");
 });
 
 // --- contended ------------------------------------------------------------------
