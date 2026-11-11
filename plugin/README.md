@@ -276,24 +276,27 @@ and is not a config key. Unknown keys are ignored, wrong-typed values fall back 
 
 Every key in `<room root>/room/config.json`, with its default (`DEFAULT_ROOM_CONFIG`,
 `plugin/src/store/config.ts`). A wrong-typed value falls back to the default; `/room config` prints
-the effective values.
+the effective values. Every numeric key is clamped to its floor on load and on `config set`
+(`CONFIG_NUMERIC_BOUNDS` — one table, shared by both paths): a `0` or negative count/window would
+otherwise deny the room (no records kept, no post accepted), so it floors loudly — a `pi.logger.warn`
+on load, a warning line on `set` — instead of breaking silently.
 
-| Key | Default | What it does |
-|---|---|---|
-| `roomId` | minted | the room's identity; also the log's filename, so it is validated as `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` |
-| `maxT1PerTurn` | `10` | K — T1 records injected per recipient per turn; past it the overflow becomes one summary line |
-| `maxT1Tokens` | `2048` | B — the token budget for those records; the charge is the RENDERED line (topic + body), not the body alone |
-| `coalesceCount` | `20` | N — pending T2 records digested into one line once there are this many |
-| `coalesceMs` | `300000` | T — 5 min; a lag older than this is reported, and the digest rides the next delivery |
-| `postsPerWindow` | `1` | srTCM committed rate: posts per 2 s window before the producer's overflow is coalesced |
-| `burstPosts` | `10` | the burst allowance on top of `postsPerWindow` |
-| `claimTtlMs` | `300000` | default lease when a `claim` omits `ttl`; the write path clamps to 1 s – 24 h |
-| `claimSweepMs` | `5000` | how often expired leases are swept, with waiter promotion |
-| `maxBodyBytes` | `8192` | a post body's cap (refused, never truncated) |
-| `logMaxRecords` | `5000` | retention: records kept before the head is pruned behind a `gap` record |
-| `logMaxAgeMs` | `604800000` | retention by age: 7 days |
-| `compactionCallsPerDay` | `20000` | the cold-tree compactor's daily model-call rate cap (a rate, not a total) |
-| `digestBudgetTokens` | `3800` | how much of the per-turn digest may be spent on the tail |
+| Key | Default | Floor – ceiling | What it does |
+|---|---|---|---|
+| `roomId` | minted | — | the room's identity; also the log's filename, so it is validated as `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` |
+| `maxT1PerTurn` | `10` | `1` – `1000000` | K — T1 records injected per recipient per turn; past it the overflow becomes one summary line |
+| `maxT1Tokens` | `2048` | `1` – `1000000000` | B — the token budget for those records; the charge is the RENDERED line (topic + body), not the body alone |
+| `coalesceCount` | `20` | `1` – `1000000` | N — pending T2 records digested into one line once there are this many |
+| `coalesceMs` | `300000` | `1000` – `2592000000` | T — 5 min; a lag older than this is reported, and the digest rides the next delivery |
+| `postsPerWindow` | `1` | `1` – `1000000` | srTCM committed rate: posts per 2 s window before the producer's overflow is coalesced |
+| `burstPosts` | `10` | `1` – `1000000` | the burst allowance on top of `postsPerWindow` |
+| `claimTtlMs` | `300000` | `1000` – `86400000` | default lease when a `claim` omits `ttl`; the write path clamps to 1 s – 24 h |
+| `claimSweepMs` | `5000` | `1000` – `86400000` | how often expired leases are swept, with waiter promotion |
+| `maxBodyBytes` | `8192` | `1` – `1000000000` | a post body's cap (refused, never truncated) |
+| `logMaxRecords` | `5000` | `1` – `1000000` | retention: records kept before the head is pruned behind a `gap` record |
+| `logMaxAgeMs` | `604800000` | `1000` – `31536000000` | retention by age: 7 days |
+| `compactionCallsPerDay` | `20000` | `1` – `1000000000` | the cold-tree compactor's daily model-call rate cap (a rate, not a total) |
+| `digestBudgetTokens` | `3800` | `1` – `1000000000` | how much of the per-turn digest may be spent on the tail |
 
 `--room-panel-key` is best-effort: the host's `setupKeyHandlers()` runs only at editor build, so a
 late-loaded plugin has no shortcut until the next rebuild. The slash command is the primary route.

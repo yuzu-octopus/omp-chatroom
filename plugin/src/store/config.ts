@@ -42,14 +42,48 @@ export const DEFAULT_ROOM_CONFIG: RoomConfig = {
   digestBudgetTokens: 3_800,
 };
 
+// Every NUMERIC key with its sane range. A zero/negative count or window persisted in
+// config.json is a room-wide denial of service (logMaxRecords=0 prunes everything,
+// maxBodyBytes=0 refuses every post), so the floor is load-bearing; the ceiling only bounds
+// absurdity (a hand-edited 1e18 ttl must not hydrate a lease the write path could never mint).
+// claimTtlMs reuses the write path's own 1 s – 24 h pair (store/log.ts) — one source, not two.
+export const CONFIG_NUMERIC_BOUNDS: Readonly<Record<Exclude<keyof RoomConfig, "roomId">, { min: number; max: number }>> = {
+  maxT1PerTurn: { min: 1, max: 1_000_000 },
+  maxT1Tokens: { min: 1, max: 1_000_000_000 },
+  coalesceCount: { min: 1, max: 1_000_000 },
+  coalesceMs: { min: 1_000, max: 2_592_000_000 },
+  postsPerWindow: { min: 1, max: 1_000_000 },
+  burstPosts: { min: 1, max: 1_000_000 },
+  claimTtlMs: { min: 1_000, max: 86_400_000 },
+  claimSweepMs: { min: 1_000, max: 86_400_000 },
+  maxBodyBytes: { min: 1, max: 1_000_000_000 },
+  logMaxRecords: { min: 1, max: 1_000_000 },
+  logMaxAgeMs: { min: 1_000, max: 31_536_000_000 },
+  compactionCallsPerDay: { min: 1, max: 1_000_000_000 },
+  digestBudgetTokens: { min: 1, max: 1_000_000_000 },
+};
+
+/**
+ * The ONE clamp (config.ts owns it; room-command.ts `config set` calls it rather than mirroring
+ * the table — two tables drift). Returns the value and whether it moved.
+ */
+export function clampNumericConfig(key: string, value: number): { value: number; clamped: boolean } {
+  const bounds = (CONFIG_NUMERIC_BOUNDS as Readonly<Record<string, { min: number; max: number }>>)[key];
+  if (bounds === undefined) return { value, clamped: false };
+  const clamped = Math.min(bounds.max, Math.max(bounds.min, value));
+  return { value: clamped, clamped: clamped !== value };
+}
+
+/** A clamp report: which field moved and from what. Wired to `pi.logger.warn` where `pi` exists. */
+export type ConfigClampReport = (key: string, raw: number, clamped: number) => void;
+
 export function configPath(root: string): string {
   // <root>/room/config.json
   return `${root}/room/config.json`;
 }
-
 // Field-by-field coercion over the defaults: an unknown key is ignored and a wrong-typed value
 // falls back to its default. The plugin owns this file, but it is still on-disk input.
-function coerceConfig(raw: unknown): RoomConfig {
+function coerceConfig(raw: unknown, onClamp?: ConfigClampReport): RoomConfig {
   const config: RoomConfig = { ...DEFAULT_ROOM_CONFIG };
   if (typeof raw !== "object" || raw === null) return config;
   // Each entry is type-checked against the default's type before it is written; the cast lets the
@@ -60,7 +94,10 @@ function coerceConfig(raw: unknown): RoomConfig {
     if (typeof current === "string" && typeof value === "string") {
       target[key] = value;
     } else if (typeof current === "number" && typeof value === "number" && Number.isFinite(value)) {
-      target[key] = value;
+      // A persisted 0/negative count or window is a room-wide DoS — clamp to the floor, loudly.
+      const { value: clamped, clamped: moved } = clampNumericConfig(key, value);
+      target[key] = clamped;
+      if (moved) onClamp?.(key, value, clamped);
     }
   }
   // roomId becomes a filename (logPathFor), so a type check is not enough: an id containing
@@ -80,13 +117,13 @@ export function isValidRoomId(value: string): boolean {
   return ROOM_ID_RE.test(value);
 }
 
-export function loadRoomConfig(root: string): RoomConfig {
+export function loadRoomConfig(root: string, onClamp?: ConfigClampReport): RoomConfig {
   // H3 — config.json is READ for the room id and then (via `resolveRoomId`) WRITTEN. A planted
   // link must be refused here too: following it would read a foreign file, and the later save
   // would overwrite it. Refusal is outside the try — an absent file is defaults, a link is not.
   assertRoomWritePath(root, configPath(root));
   try {
-    return coerceConfig(JSON.parse(fs.readFileSync(configPath(root), "utf-8")));
+    return coerceConfig(JSON.parse(fs.readFileSync(configPath(root), "utf-8")), onClamp);
   } catch {
     return { ...DEFAULT_ROOM_CONFIG }; // absent or unreadable → defaults
   }
@@ -144,6 +181,10 @@ export function registerRoomFlags(pi: ExtensionAPI): void {
   });
 }
 
-export function resolveRoomConfig(_pi: ExtensionAPI, root: string): RoomConfig {
-  return loadRoomConfig(root);
+export function resolveRoomConfig(pi: ExtensionAPI, root: string): RoomConfig {
+  // The clamp is load-bearing (a floored value changes behavior), so it must not be silent
+  // where a logger exists: the tool/command paths resolve through here, not loadRoomConfig.
+  return loadRoomConfig(root, (key, raw, clamped) =>
+    pi.logger.warn(`omp-agent-chatroom: config ${key}=${raw} out of range, clamped to ${clamped}`),
+  );
 }
