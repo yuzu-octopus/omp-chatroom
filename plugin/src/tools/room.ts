@@ -1125,9 +1125,15 @@ export function registerRoomTool(pi: ExtensionAPI): void {
             // is a wake+steer. Stripe's contract, copyable: the saved response is returned, and a
             // key reused for DIFFERENT parameters is an error rather than a silent second post.
             if (p.idemKey !== undefined) {
-              const priorSeq = store.idemKeys.get(idemIndexKey(agentId, p.idemKey));
-              const prior =
-                priorSeq === undefined ? undefined : store.records.find((r) => r.seq === priorSeq);
+              const priorId = store.idemKeys.get(idemIndexKey(agentId, p.idemKey));
+              const prior = priorId === undefined ? undefined : store.byId.get(priorId);
+              // A dangling key (record pruned by retention, projection reset) must NOT append a
+              // same-key duplicate: the retry mints a fresh key, like the parameters-mismatch arm.
+              if (priorId !== undefined && (prior === undefined || prior.kind !== "msg")) {
+                return fail(
+                  `idemKey ${p.idemKey} was already used but its post is gone — retry with a fresh key`,
+                );
+              }
               if (prior !== undefined && prior.kind === "msg") {
                 if (prior.topic !== topic || prior.body !== storedBody) {
                   return fail(`idemKey ${p.idemKey} was already used for a different post`);

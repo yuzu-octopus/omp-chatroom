@@ -70,11 +70,12 @@ export interface RoomStore {
    */
   deliveries: { T0: number; T1: number; T2: number };
   /**
-   * R7 — the idempotency index: `<agent>+<key>` → the seq of the record that key produced. A
+   * R7 — the idempotency index: `<agent>+<key>` → the id of the record that key produced. A
    * repeat of a post with the same key returns that record instead of appending a second one:
    * a retried post would otherwise double-wake every mentioned peer, and a T0 is a wake+steer.
+   * Keyed by id (not seq) so the lookup is O(1) via `byId` and a pruned record reads as gone.
    */
-  idemKeys: Map<string, number>;
+  idemKeys: Map<string, string>;
 
   // K15 — the ONLY write path: mint seq/ts/v/id, append the line, project, notify listeners.
   // Without it every writer module would import this module at runtime and close a cycle.
@@ -128,7 +129,7 @@ function project(store: RoomStore, record: RoomRecord): void {
   // R7 — the idempotency index is projected HERE, so a replay rebuilds it: a retry after a restart
   // must still find the record its key produced.
   if (record.kind === "msg" && record.idemKey !== undefined) {
-    store.idemKeys.set(idemIndexKey(record.from, record.idemKey), record.seq);
+    store.idemKeys.set(idemIndexKey(record.from, record.idemKey), record.id);
   }
   if (record.kind === "member") {
     if (record.action === "join") {
