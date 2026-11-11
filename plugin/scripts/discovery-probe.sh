@@ -28,7 +28,7 @@ if ! timeout 500 omp --mode json "$PROMPT" > "$OUT" 2>"$TRIAL_DIR/stderr.txt"; t
   exit 2
 fi
 
-python3 - "$OUT" <<'EOF'
+uv run python - "$OUT" <<'EOF'
 import json, re, sys
 
 room_claim_at = None
