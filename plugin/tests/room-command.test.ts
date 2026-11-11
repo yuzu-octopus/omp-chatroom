@@ -784,3 +784,24 @@ test("/room config reset restores defaults through the save path", async () => {
   expect(store.config.maxBodyBytes).toBe(8192);
   expect(notified.some((line) => line.includes("reset to defaults"))).toBe(true);
 });
+
+test("/room board marks muted topics instead of hiding them", async () => {
+  // Human answer (asked 2026-11-11): dim, not hidden.
+  const notified: string[] = [];
+  const handler = captureHandler(notified);
+  const root = tempRoot();
+  const store = roomStoreForCwd(root);
+  store.append({ kind: "member", from: "Main", action: "join" });
+  store.append({ kind: "msg", from: "A", topic: "build", body: "hi" });
+  await handler("board", headlessCtx(root, notified));
+  expect(notified.some((line) => line.includes("topic build") && !line.includes("muted"))).toBe(
+    true,
+  );
+
+  store.members.get("Main")?.muted.add("build");
+  notified.length = 0;
+  await handler("board", headlessCtx(root, notified));
+  expect(notified.some((line) => line.includes("topic build") && line.includes("muted"))).toBe(
+    true,
+  );
+});

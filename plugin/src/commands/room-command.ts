@@ -114,7 +114,8 @@ function boardLines(store: RoomStore, viewerId: string): string[] {
   // The DATA is canonical (tools/room.ts `buildBoard`): one claim/roster/topic scan for both
   // surfaces, so a new field lands in both. Only the RENDERING differs — the human header and
   // the uncapped per-row countdown/counts vs the model's capped waiting/dependsOn lists.
-  const board = buildBoard(store, viewerStateFor(store, viewerId));
+  const viewer = viewerStateFor(store, viewerId);
+  const board = buildBoard(store, viewer);
   const lines = [
     `room ${safe(store.roomId)} — ${store.members.size} member(s) · ${store.claims.size} claim(s) · ${store.records.length} record(s)`,
   ];
@@ -137,8 +138,14 @@ function boardLines(store: RoomStore, viewerId: string): string[] {
   }
 
   if (board.topics.length === 0) lines.push("topics: none");
+  // Human answer to "muted topics on the board" (asked 2026-11-11): dim, not hidden — a muted
+  // topic still exists and still accrues unreads the model path won't push; the marker says why
+  // the board is quiet about it. Muted-whole-room ("") dims every topic row.
   for (const row of board.topics) {
-    lines.push(`topic ${safe(row.topic)} · last seq ${row.lastSeq} · unread ${row.unread}`);
+    const dimmed = viewer.muted.has("") || viewer.muted.has(row.topic);
+    lines.push(
+      `topic ${safe(row.topic)} · last seq ${row.lastSeq} · unread ${row.unread}${dimmed ? " · muted" : ""}`,
+    );
   }
   return lines;
 }
@@ -553,13 +560,18 @@ export function registerRoomCommand(pi: ExtensionAPI): void {
             const record = store.records[seq];
             return record !== undefined ? recordLine(record) : "";
           });
+          // Human answer to "zoom paging" (asked 2026-11-11): cap at 20 rows like the recall
+          // cap, with a narrow-the-range hint — a summary block can span hundreds of records.
           report(ctx, pi, `room zoom → ${children.length} child(ren)`);
-          for (const c of children) {
+          for (const c of children.slice(0, 20)) {
             report(
               ctx,
               pi,
               `[${c.lo},${c.hi}) size ${c.size} ${c.raw ? "raw" : "summary"} · ${safe(c.text)}`,
             );
+          }
+          if (children.length > 20) {
+            report(ctx, pi, `… +${children.length - 20} more — narrow lo/hi to page`);
           }
           return;
         }
