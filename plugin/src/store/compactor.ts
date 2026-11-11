@@ -1,6 +1,7 @@
 import type { AssistantMessage, Context } from "@oh-my-pi/pi-ai";
 import { streamSimple } from "@oh-my-pi/pi-ai"; // root export, NOT a deep import (K21/F3)
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { escapeHarnessTags } from "@oh-my-pi/pi-coding-agent/session/harness-tags";
 import { globalMap } from "../globals";
 import type { RoomStore } from "./room-store";
 import type { RoomRecord } from "./schema";
@@ -228,8 +229,11 @@ export async function summarizeBlock(
   if (hi - lo <= RAW_MAX) {
     const lines = store.records.slice(lo, hi).map(recordLine);
     if (lines.length < hi - lo) return "";
-    body = lines.map((line) => `  ${line}`).join("\n");
-    rawBytes = Buffer.byteLength(body, "utf-8");
+    // Escape AFTER measuring: the raw bytes feed the 5%-floor length check, and the escaped
+    // lines are what the summarizer sees — a forged harness block in a body must not reach the
+    // shared system-prompt cache entry as live markup.
+    rawBytes = Buffer.byteLength(lines.map((line) => `  ${line}`).join("\n"), "utf-8");
+    body = lines.map((line) => `  ${escapeHarnessTags(line)}`).join("\n");
   } else {
     const mid = (lo + hi) / 2;
     const tree = openTreeStore(store.treePath, store.records.length);

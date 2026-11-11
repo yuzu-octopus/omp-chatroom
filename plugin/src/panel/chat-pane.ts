@@ -1,6 +1,6 @@
 import { type LayoutRenderer, type Theme, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { classify, type Tier } from "../attention/tiers";
+import { safeRoomText } from "../onboarding/escape";
 import type { MemberState } from "../store/room-store";
 import type { RoomRecord, StatusObject } from "../store/schema";
 import { fitWidth } from "./chrome";
@@ -96,7 +96,7 @@ function chatRowOf(
     tier: classify(record, viewer),
     author: record.from,
     topic: record.topic,
-    body: sanitizeText(record.body),
+    body: safeRoomText(record.body),
     mention: record.kind === "msg" && (record.mention?.includes(viewer.agentId) ?? false),
     unread: record.seq > cursor,
     threadDepth: record.kind === "msg" ? threadDepthOf(record, byId) : 0,
@@ -298,8 +298,8 @@ export function renderChatRows(
     const badge = theme.fg(TIER_TONE[row.tier], theme.status[TIER_GLYPH[row.tier]]);
     const time = theme.fg("dim", clockOf(row.ts));
     const author = row.mention
-      ? theme.bold(theme.fg("accent", sanitizeText(row.author)))
-      : theme.bold(sanitizeText(row.author));
+      ? theme.bold(theme.fg("accent", safeRoomText(row.author)))
+      : theme.bold(safeRoomText(row.author));
     const indent =
       row.threadDepth > 0 ? theme.tree.vertical.repeat(row.threadDepth) + theme.tree.branch : "";
     // The visible cursor: the row the panel's actions address is the row the user can see. The
@@ -311,7 +311,7 @@ export function renderChatRows(
     // author and topic is `nav.selected`, a SymbolKey, not a hardcoded "›".
     const headText =
       `${marker}${unread}${badge} ${time} ${indent}${author}${theme.sep.dot}` +
-      `${theme.fg("muted", sanitizeText(row.topic))}${theme.nav.selected}`;
+      `${theme.fg("muted", safeRoomText(row.topic))}${theme.nav.selected}`;
     // R6 — the topic's status ledger, as the human sees it: is this topic looping, and who is next.
     // A ledger the panel cannot show is a ledger nobody reads.
     const status = row.status === undefined ? "" : statusLine(row.status, theme);
@@ -348,9 +348,9 @@ function statusLine(status: StatusObject, theme: Theme): string {
   if (status.is_in_loop.answer.toLowerCase() === "yes") {
     parts.push(theme.fg("error", "looping"));
   }
-  const next = sanitizeText(status.next_speaker.answer.trim());
+  const next = safeRoomText(status.next_speaker.answer.trim());
   if (next !== "") parts.push(theme.fg("muted", `next ${next}`));
-  const instruction = sanitizeText(status.instruction_or_question.answer.trim());
+  const instruction = safeRoomText(status.instruction_or_question.answer.trim());
   if (instruction !== "") parts.push(theme.fg("muted", instruction));
   if (parts.length === 0) return "";
   return ` ${parts.join(theme.sep.dot)}`;

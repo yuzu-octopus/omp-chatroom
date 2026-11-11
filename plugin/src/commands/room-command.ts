@@ -5,6 +5,7 @@ import { safeRoomText } from "../onboarding/escape";
 import { openRoomPanel } from "../panel/panel";
 import { contended, grant, reclaimIfStale, release, renew } from "../store/claims";
 import {
+  clampNumericConfig,
   configPath,
   DEFAULT_ROOM_CONFIG,
   loadRoomConfig,
@@ -120,7 +121,10 @@ function boardLines(store: RoomStore, viewerId: string): string[] {
 }
 
 /** One `key=value` pair from `config set`; `null` = unknown key or unparseable value. */
-function coerceSetting(key: string, raw: string): string | number | null {
+function coerceSetting(
+  key: string,
+  raw: string,
+): { value: string | number; clampedFrom: number | null } | null {
   const current = (DEFAULT_ROOM_CONFIG as unknown as Record<string, unknown>)[key];
   if (current === undefined) return null;
   if (typeof current === "number") {
@@ -128,9 +132,13 @@ function coerceSetting(key: string, raw: string): string | number | null {
     // claimTtlMs, …) silently breaks the room. Refuse it like garbage.
     if (raw.trim() === "") return null;
     const parsed = Number(raw);
-    return Number.isFinite(parsed) ? parsed : null;
+    if (!Number.isFinite(parsed)) return null;
+    // The file path clamps on load, so `set` clamps on write: the saved value is the
+    // effective value, and the caller reports the clamp (below) rather than staying silent.
+    const { value, clamped } = clampNumericConfig(key, parsed);
+    return { value, clampedFrom: clamped ? parsed : null };
   }
-  return raw;
+  return { value: raw, clampedFrom: null };
 }
 
 function configLines(pi: ExtensionAPI, store: RoomStore): string[] {
@@ -407,12 +415,20 @@ export function registerRoomCommand(pi: ExtensionAPI): void {
             return;
           }
           const next: RoomConfig = { ...loadRoomConfig(store.root) };
-          (next as unknown as Record<string, string | number>)[key] = coerced;
+          (next as unknown as Record<string, string | number>)[key] = coerced.value;
           saveRoomConfig(store.root, next);
+          if (coerced.clampedFrom !== null) {
+            report(
+              ctx,
+              pi,
+              `config: ${safe(key)}=${safe(String(coerced.clampedFrom))} out of range, clamped to ${safe(String(coerced.value))}`,
+              "warning",
+            );
+          }
           report(
             ctx,
             pi,
-            `room config → ${safe(key)}=${safe(String(coerced))} written to ${safe(configPath(store.root))}`,
+            `room config → ${safe(key)}=${safe(String(coerced.value))} written to ${safe(configPath(store.root))}`,
           );
           return;
         }

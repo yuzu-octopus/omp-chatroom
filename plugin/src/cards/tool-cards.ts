@@ -11,6 +11,7 @@ import {
 import { createCachedComponent } from "@oh-my-pi/pi-tui/render/render-utils";
 import { renderStatusLine } from "@oh-my-pi/pi-tui/render/status-line";
 import type { NativeToolHead, NativeToolView } from "@oh-my-pi/pi-tui/tools/renderer";
+import { safeRoomText } from "../onboarding/escape";
 import type { RoomParams, RoomToolDetails } from "../tools/room";
 import type { WaitForAgentDetails } from "../tools/wait-for-agent";
 import type { WaitForClaimDetails } from "../tools/wait-for-claim";
@@ -56,10 +57,16 @@ function roomCallSummary(raw: unknown): string {
   // Narrowed here, not in the signature: the hook receives raw pre-validation args, and Bun's
   // checker resolves the host's `Static<TParams>` for a runtime schema stub to `unknown`.
   const args = (raw ?? {}) as RoomParams;
+  // Room-authored (topic/key reach the model and persist into replayable transcripts): escape.
   const target =
     args.op === "claim" || args.op === "release"
-      ? [args.topic, args.key].filter(Boolean).join("/")
-      : args.topic;
+      ? [args.topic, args.key]
+          .filter(Boolean)
+          .map((part) => safeRoomText(part!))
+          .join("/")
+      : args.topic === undefined
+        ? undefined
+        : safeRoomText(args.topic);
   return [args.op, target, args.limit !== undefined ? `limit ${args.limit}` : undefined]
     .filter((part): part is string => !!part)
     .join(" ");
@@ -77,14 +84,21 @@ function waitCallSummary(raw: unknown): string {
   const args = (raw ?? {}) as Record<string, unknown>;
   const timeout =
     typeof args.timeout === "number" ? `timeout ${Math.round(args.timeout / 1000)}s` : undefined;
+  // Every interpolated string below is room-authored (agent ids, resource, from): escape.
   if (Array.isArray(args.agents))
-    return [`wait_for_agent`, (args.agents as string[]).join(", "), timeout]
+    return [
+      `wait_for_agent`,
+      (args.agents as string[]).map((id) => safeRoomText(String(id))).join(", "),
+      timeout,
+    ]
       .filter((p): p is string => !!p)
       .join(" ");
   if (typeof args.resource === "string")
-    return [`wait_for_claim`, args.resource, timeout].filter((p): p is string => !!p).join(" ");
+    return [`wait_for_claim`, safeRoomText(args.resource), timeout]
+      .filter((p): p is string => !!p)
+      .join(" ");
   const filter = [
-    typeof args.from === "string" ? `from ${args.from}` : undefined,
+    typeof args.from === "string" ? `from ${safeRoomText(args.from)}` : undefined,
     args.mention ? "mention" : undefined,
   ]
     .filter((p): p is string => !!p)

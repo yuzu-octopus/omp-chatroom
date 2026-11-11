@@ -13,7 +13,7 @@ import {
   type TUI,
   visibleWidth,
 } from "@oh-my-pi/pi-tui";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { safeRoomText } from "../onboarding/escape";
 import { contended, reclaimIfStale, release } from "../store/claims";
 import { cursorFor } from "../store/cursors";
 import { type MemberState, type RoomStore, roomStoreFor } from "../store/room-store";
@@ -517,7 +517,7 @@ export class RoomPanel implements Component {
     // The border's title budget: the split layout puts the title in the LEFT segment (the chat
     // pane's columns), the narrow layout in the whole rule.
     const budget = narrow ? Math.max(0, width - 6) : Math.max(0, chatWidth - 3);
-    const id = sanitizeText(this.#options.roomId);
+    const id = safeRoomText(this.#options.roomId);
     // The short id's "…" is TEXT, the same character the host's own truncation paints.
     const shortId = id.length > 9 ? `${id.slice(0, 8)}…` : id;
     for (const candidate of [id, shortId]) {
