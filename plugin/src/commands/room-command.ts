@@ -9,7 +9,6 @@ import {
   DEFAULT_ROOM_CONFIG,
   loadRoomConfig,
   type RoomConfig,
-  resolveRoomConfig,
   saveRoomConfig,
 } from "../store/config";
 import { cursorFor, initCursor, lagFor } from "../store/cursors";
@@ -134,7 +133,8 @@ function coerceSetting(key: string, raw: string): string | number | null {
 }
 
 function configLines(pi: ExtensionAPI, store: RoomStore): string[] {
-  const config = resolveRoomConfig(pi, store.root);
+  // 027 — display the live value: the save path refreshes `store.config`, so no re-read is needed.
+  const config = store.config;
   return [
     `room config — ${safe(configPath(store.root))}`,
     `live: roomId=${safe(config.roomId)} · claimTtlMs=${config.claimTtlMs}` +
@@ -217,8 +217,7 @@ export function registerRoomCommand(pi: ExtensionAPI): void {
             return;
           }
           const resource = resourceKey(topic, key);
-          const requested =
-            ttlArg === undefined ? resolveRoomConfig(pi, store.root).claimTtlMs : Number(ttlArg);
+          const requested = ttlArg === undefined ? store.config.claimTtlMs : Number(ttlArg);
           // Math.max/Math.min propagate NaN instead of clamping it: without this guard a typo'd
           // TTL appends a NaN lease, which JSON persists as ttlMs:null and replay quarantines as
           // gap{reason:"invalid"} — the claim silently never existed after a restart.
@@ -352,7 +351,8 @@ export function registerRoomCommand(pi: ExtensionAPI): void {
             return;
           }
           // K19 — the cap is enforced before the record is drafted; never truncated silently.
-          const maxBodyBytes = resolveRoomConfig(pi, store.root).maxBodyBytes;
+          // 027 — the live value: `/room config set` refreshes `store.config` below.
+          const maxBodyBytes = store.config.maxBodyBytes;
           if (Buffer.byteLength(body, "utf-8") > maxBodyBytes) {
             report(ctx, pi, `body exceeds maxBodyBytes (${maxBodyBytes})`, "error");
             return;
@@ -390,6 +390,9 @@ export function registerRoomCommand(pi: ExtensionAPI): void {
           const next: RoomConfig = { ...loadRoomConfig(store.root) };
           (next as unknown as Record<string, string | number>)[key] = coerced;
           saveRoomConfig(store.root, next);
+          // 027 — the live value follows the file: reload through the coercion path so the next
+          // op and pass see the written value (and never a hand-rolled object).
+          store.config = loadRoomConfig(store.root);
           report(
             ctx,
             pi,

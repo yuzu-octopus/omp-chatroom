@@ -894,6 +894,16 @@ function newTestStore(): { store: RoomStore; ctx: ExtensionContext } {
   return { store, ctx };
 }
 
+/**
+ * 027 — the save-path seam for tests: `saveRoomConfig` writes the file, and the live
+ * `store.config` follows it (the same refresh `/room config set` performs). Fixtures that
+ * configure the room AFTER opening it must go through here — the op path reads the live value.
+ */
+function saveTestConfig(store: RoomStore, config: typeof DEFAULT_ROOM_CONFIG): void {
+  saveRoomConfig(store.root, config);
+  store.config = { ...config };
+}
+
 // --- topics ---
 test("claim: claiming a resource you already hold renews it, it does not deny you", async () => {
   const { ctx } = newTestStore();
@@ -1575,7 +1585,7 @@ test("read: a 300-byte topic is accepted, and the budget charges the rendered li
   const { store, ctx } = newTestStore();
   // 250 tokens ≈ 1000 chars: room for a 900-char body ALONE, or for a 300-byte topic ALONE — not
   // for both. The two records are compared in ONE pass, so the window, not the clock, decides.
-  saveRoomConfig(store.root, { ...DEFAULT_ROOM_CONFIG, maxT1Tokens: 250 });
+  saveTestConfig(store, { ...DEFAULT_ROOM_CONFIG, maxT1Tokens: 250 });
   const longTopic = "t".repeat(300);
   const a = await invokeRoom(ctx, { op: "post", topic: longTopic, body: "hi" });
   expect(a.details).toMatchObject({ ok: true, op: "post" }); // 300 ≤ the 512-byte topic cap

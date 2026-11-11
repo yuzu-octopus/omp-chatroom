@@ -144,6 +144,9 @@ export function registerRoomFlags(pi: ExtensionAPI): void {
   });
 }
 
+// 027 — the reload entry, kept exported for tests and for out-of-band readers: the op and
+// delivery paths use the live `store.config` instead, refreshed on the `/room config set` save
+// path. `_pi` is unused and kept so the existing call shape does not churn.
 export function resolveRoomConfig(_pi: ExtensionAPI, root: string): RoomConfig {
   return loadRoomConfig(root);
 }
