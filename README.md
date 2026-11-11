@@ -113,7 +113,7 @@ Gates, all green:
 
 | Gate | Result |
 |---|---|
-| `bun test tests/` | **607 pass / 1 skip / 0 fail**, 608 run, 18 files |
+| `bun test tests/` | **641 pass / 1 skip / 0 fail**, 642 run, 18 files |
 | `bun check` (native, ~95 ms) | **0 errors**, 55 files |
 | `bunx --bun tsc --noEmit -p tsconfig.json` | **0 errors** |
 | `bunx --bun @biomejs/biome check src tests` | **0 errors, 0 warnings** |

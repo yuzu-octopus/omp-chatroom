@@ -32,16 +32,16 @@ Round-bd69c15 (2026-11-08): bun check 0 errors (native, ~90 ms), tsc 0 errors, b
 | 020 | The effectiveness round: five capabilities and four record kinds from the large-swarm research | P1 | L | — | DONE (331 tests / 15 files green; the room's effectiveness is the human's live check) |
 | 021 | The plugin's glyphs follow the host's symbol set (unicode/nerd/ascii), and the degraded theme is the host's own | P2 | M | — | DONE (`c9ebcd2`; 362 tests / 18 files green — the production topology is a live check) |
 | 022 | Adversarial round: five parallel audits (functional, UI, perf, docs-truth, security), 29 verified findings, six fix waves | P1 | L | 021 | [022-adversarial-round.md](022-adversarial-round.md) |
-| 023 | Fix replay double-projection, hydrate release pruning, and reset() leaks | P1 | M | — | REVIEWED — APPROVE (worktree /tmp/omp-improve-023, branch advisor/023-replay-reset-claims, commit 5769e53; out-of-scope room-tool.test.ts touch required + documented, tests mutation-checked) |
-| 024 | Escape room-authored text on every model/TUI surface and clamp config floors | P1 | S | — | REVIEWED — APPROVE (worktree /tmp/omp-improve-024, branch advisor/024-escape-and-config-floors, 5 commits; scope clean, gates green, tests meaningful) |
-| 025 | Stop entry-point and lookup divergences (claim deps, idempotency, wait edges) | P1 | M | — | REVIEWED — APPROVE (worktree /tmp/omp-improve-025, branch advisor/025-entry-point-divergences, 9 commits; tombstone extension plan-sanctioned, 2 updated tests assert new behavior, gates green) |
-| 026 | Lifecycle and lock integrity (dispose scope, global registries, lock liveness) | P1 | M | — | REVIEWED — APPROVE (worktree /tmp/omp-improve-026, 5 commits; stash cross-merge resolved cleanly, 023-merge import fix applied, scope clean, gates green) |
-| 027 | Use the store config instead of re-reading it from disk per op | P2 | S | — | REVIEWED — APPROVE (worktree /tmp/omp-improve-027, commit 6ff760d; STOP correctly raised + resolved by ruling, scope clean, gates green) |
-| 028 | Single-pass delivery fan-out and board scans | P2 | M | — | REVIEWED — APPROVE (worktree /tmp/omp-improve-028, 3 commits; bucket membership + all three topic bases verified identical, equivalence tests literal-pinned, gates green) |
-| 029 | Settle the deferred storage costs (digest cache, append batching decision, replay bound, tree fds) | P2 | M | — | REVIEWED — APPROVE (worktree /tmp/omp-improve-029, 6 commits incl. prune-staleness fix c352240; reviewer-caught cache bug fixed + tested, K19/I5 intact, gates green) |
-| 030 | Deduplicate formatters, helpers, and constants | P2 | M | — | PARTIAL — Step 1 APPROVED (worktree /tmp/omp-improve-030, commits 45adb41+59293f2; board converged, gates green); Steps 2–5 SUPERSEDED (Step 2 STOPPED correctly on K17 badge evidence; plan revised to field-selection switch + deferred remainder) |
-| 031 | Tooling, packaging, and docs truth (biome pin, scripts, features flags, HANDOFF, probe) | P3 | S | — | REVIEWED — APPROVE (worktree /tmp/omp-improve-031, 5 commits; counts measured 607/608, features DELETE plan-sanctioned with consequence noted, full suite green) |
-| 032 | Human surface gaps (recall/tree for operators, recallMiss aggregate) | P3 | S | — | BLOCKED (executor spawn fails: fresh worker gets "No model selected"; retry after current waves land) |
+| 023 | Fix replay double-projection, hydrate release pruning, and reset() leaks | P1 | M | — | DONE (merged) |
+| 024 | Escape room-authored text on every model/TUI surface and clamp config floors | P1 | S | — | DONE (merged) |
+| 025 | Stop entry-point and lookup divergences (claim deps, idempotency, wait edges) | P1 | M | — | DONE (merged; idem index is id-keyed, tombstones on prune) |
+| 026 | Lifecycle and lock integrity (dispose scope, global registries, lock liveness) | P1 | M | — | DONE (merged) |
+| 027 | Use the store config instead of re-reading it from disk per op | P2 | S | — | DONE (merged; save-path refresh is the mutation route) |
+| 028 | Single-pass delivery fan-out and board scans | P2 | M | — | DONE (merged; equivalence-pinned) |
+| 029 | Settle the deferred storage costs (digest cache, append batching decision, replay bound, tree fds) | P2 | M | — | DONE (merged; fsync KEEP verdict recorded, K19 intact) |
+| 030 | Deduplicate formatters, helpers, and constants | P2 | M | — | PARTIAL (Step 1 merged — board converged; Steps 2–5 superseded: field-selection switch + deferred remainder is future work) |
+| 031 | Tooling, packaging, and docs truth (biome pin, scripts, features flags, HANDOFF, probe) | P3 | S | — | DONE (merged; manifest honest — features block removed) |
+| 032 | Human surface gaps (recall/tree for operators, recallMiss aggregate) | P3 | S | — | BLOCKED (executor spawn fails in this env; single remaining TODO — execute as spike when a worker can spawn) |
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJECTED (with one-line rationale — finding fixed independently or approach abandoned)
 
 ## Merge order (all approved branches build on efc5211)
