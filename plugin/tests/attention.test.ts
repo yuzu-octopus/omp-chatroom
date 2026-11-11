@@ -2132,7 +2132,13 @@ test("single-pass bucketing admits the identical set: T0/T1/gap/mute/given pin",
   expect(failure).toBeUndefined();
   // Admitted seqs, in delivery order: the T0 first, then the T1 batch, then the carried gap last.
   const deliveredSeqs = calls.map((c) => (c.payload.details as RoomRecord).seq);
-  expect(deliveredSeqs).toEqual([t0.seq, batch[0]!.seq, batch[1]!.seq, batch[2]!.seq, gapRecord.seq]);
+  expect(deliveredSeqs).toEqual([
+    t0.seq,
+    batch[0]!.seq,
+    batch[1]!.seq,
+    batch[2]!.seq,
+    gapRecord.seq,
+  ]);
   // The muted record and the T2 chatter are never injected.
   expect(deliveredSeqs).not.toContain(muted.seq);
   expect(deliveredSeqs).not.toContain(t2.seq);

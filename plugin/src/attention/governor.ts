@@ -222,11 +222,17 @@ export function coalescePending(
   viewer: MemberState,
   now: number,
   caps: Caps = DEFAULT_CAPS,
+  // Pre-partitioned T2 slice (above the cursor, unmuted, log order): the delivery pass feeds its
+  // single-pass bucket so the digest costs no second log scan. Membership must mirror the filter
+  // below exactly — no given check here either.
+  t2Above?: readonly RoomRecord[],
 ): string | null {
   const cursor = store.cursors.get(viewer.agentId) ?? 0;
-  const t2 = store.records.filter(
-    (r) => r.seq > cursor && classify(r, viewer) === "T2" && !isMuted(store, viewer, r),
-  );
+  const t2 =
+    t2Above ??
+    store.records.filter(
+      (r) => r.seq > cursor && classify(r, viewer) === "T2" && !isMuted(store, viewer, r),
+    );
   if (t2.length === 0) return null;
   const lagMs = now - t2[0]!.ts;
   if (t2.length < caps.coalesceCount && lagMs < caps.coalesceMs) return null;
