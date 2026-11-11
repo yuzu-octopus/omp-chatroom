@@ -63,6 +63,48 @@ function oneLine(body: string): string {
   const flat = body.replace(/\s+/g, " ").trim();
   return flat.length > BACKLOG_BODY_CHARS ? `${flat.slice(0, BACKLOG_BODY_CHARS)}…` : flat;
 }
+// Step 2 — the per-turn watermark cache: an unchanged room re-renders byte-identically (the §3.3
+// fixity tests pin this), so the second build is a map lookup. The key is every input the render
+// reads: the room root + viewer (identity), the budget, the claims generation vector (any
+// grant/release/renew/expiry changes a gen or the size), the store seq (any append bumps it), the
+// census fingerprint (the registry is NOT projected — joins/leaves/status flips must invalidate),
+// and the TTL minute bucket (claim lines render a whole-minute bucket, so a render stays valid
+// only inside its bucket). A minute-boundary crossing changes the bucket and re-renders — the
+// line content the new bucket produces is still byte-identical to a fresh build, so correctness
+// never depends on the clock staying put. New digest inputs MUST join this key (maintenance note).
+type DigestCacheEntry = { key: string; rendered: string };
+const DIGEST_CACHE = globalMap<string, DigestCacheEntry>("__roomDigestCache");
+
+/**
+ * The census the roster renders from: every id, status, and session-liveness bit, in id order.
+ * `list()` returns a fresh array per call, so this is a pure read with no retained reference.
+ */
+function censusFingerprint(): string {
+  return AgentRegistry.global()
+    .list()
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    .map((ref) => `${ref.id}:${ref.status}:${ref.session === null ? 0 : 1}`)
+    .join(",");
+}
+
+function claimsFingerprint(store: RoomStore): string {
+  return [...store.claims.values()]
+    .sort((a, b) => (a.resource < b.resource ? -1 : a.resource > b.resource ? 1 : 0))
+    .map(
+      (claim) =>
+        `${claim.resource}=${claim.holder}@${claim.acquiredAt}+${claim.ttlMs}#${claim.gen}`,
+    )
+    .join(",");
+}
+
+/** Test seam: how many full renders ran since the last reset. */
+export let digestRenderCount = 0;
+
+/** Test seam: clear the cache and the render counter. */
+export function resetDigestCache(): void {
+  DIGEST_CACHE.clear();
+  digestRenderCount = 0;
+}
 
 // §5.4 items 1-6 ONLY. The routing rule is appended separately by the hook (K5), so the budget
 // never truncates it. Every room-authored string entering the digest is escaped (K22).
@@ -71,7 +113,39 @@ export function buildDigest(
   viewer: MemberState,
   budgetTokens = DIGEST_BUDGET_TOKENS,
 ): string {
+  // The watermark: the render below reads `now` only through the whole-minute TTL bucket (the
+  // expiry clock is a fixed per-claim timestamp, so it never moves), the registry only through
+  // the census, claims only through the sorted vector, and records only through `seq` + the
+  // RAW_TAIL_R tail. Everything the render reads is in the key; anything else changing re-renders.
   const now = Date.now();
+  const key = [
+    budgetTokens,
+    store.seq,
+    cursorFor(store, viewer.agentId),
+    claimsFingerprint(store),
+    censusFingerprint(),
+    room(store.roomId),
+    Math.floor(now / TTL_BUCKET_MS),
+  ].join("|");
+  const cacheKey = `${store.root}::${viewer.agentId}`;
+  const hit = DIGEST_CACHE.get(cacheKey);
+  if (hit !== undefined && hit.key === key) return hit.rendered;
+  digestRenderCount += 1;
+  const rendered = renderDigest(store, viewer, budgetTokens, now);
+  DIGEST_CACHE.set(cacheKey, { key, rendered });
+  return rendered;
+}
+
+/**
+ * The full render. Pure given its arguments: `now` is passed in so the cache computes the key
+ * from the same instant the render uses.
+ */
+function renderDigest(
+  store: RoomStore,
+  viewer: MemberState,
+  budgetTokens: number,
+  now: number,
+): string {
   const cursor = cursorFor(store, viewer.agentId);
   const lag = lagFor(store, viewer.agentId);
 
