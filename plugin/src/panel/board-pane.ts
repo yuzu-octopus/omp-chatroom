@@ -7,7 +7,8 @@ import {
   type Theme,
   visibleWidth,
 } from "@oh-my-pi/pi-tui";
-import { formatDuration, sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatDuration } from "@oh-my-pi/pi-utils";
+import { safeRoomText } from "../onboarding/escape";
 import type { ClaimRow } from "../store/schema";
 import { fitWidth } from "./chrome";
 
@@ -175,9 +176,9 @@ function holderText(row: BoardRow): string {
  * with the "+N" count, which is why the resource column declares a 30-cell natural width.
  */
 function resourceText(row: BoardRow, theme: Theme): string {
-  const name = sanitizeText(row.resource);
+  const name = safeRoomText(row.resource);
   if (row.dependsOn.length === 0) return name;
-  const first = sanitizeText(row.dependsOn[0]!);
+  const first = safeRoomText(row.dependsOn[0]!);
   const more = row.dependsOn.length > 1 ? ` +${row.dependsOn.length - 1}` : "";
   return `${name} ${theme.nav.back} ${first}${more}`;
 }
@@ -229,7 +230,7 @@ export function projectClaims(
         style: dim ? (text) => theme.fg("muted", text) : undefined,
       },
       {
-        text: sanitizeText(holderText(row)),
+        text: safeRoomText(holderText(row)),
         style: (text) =>
           theme.fg(row.waiting.length > 0 ? "warning" : dim ? "muted" : "text", text),
       },
