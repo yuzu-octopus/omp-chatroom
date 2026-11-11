@@ -27,6 +27,7 @@ import rule from "../src/onboarding/routing-rule.md" with { type: "text" };
 import {
   type MemberState,
   type RoomStore,
+  enforceRetention,
   resetRoomStores,
   roomStoreFor,
   roomTimers,
@@ -256,6 +257,27 @@ test("every watermark input invalidates the cache: append, claim, census, and cu
   buildDigest(store, v);
   expect(digestRenderCount).toBe(5);
 });
+test("a retention prune invalidates the cache: same seq, new tail, cache miss", () => {
+  // The staleness bug: enforceRetention splices the head without moving store.seq, and the
+  // prune's own gap record can restore the length — so seq alone AND length alone both miss it.
+  // Head seq moves on every prune, which is why it joins the key.
+  resetDigestCache();
+  for (let i = 0; i < 10; i++) post(i, `prune-msg-${i}`);
+  const v = viewer("AgentA");
+  const before = buildDigest(store, v);
+  expect(digestRenderCount).toBe(1);
+  store.config.logMaxRecords = 5;
+  const gap = enforceRetention(store, Date.now());
+  expect(gap).not.toBeNull();
+  const after = buildDigest(store, v);
+  expect(digestRenderCount).toBe(2);
+  expect(after).not.toBe(before);
+  expect(after).toContain("skipped");
+  // And the cached render equals a genuinely fresh build, not just "different".
+  resetDigestCache();
+  expect(buildDigest(store, v)).toBe(after);
+});
+
 
 // ---------------------------------------------------------------------------------------------
 // 3. K22 regression: room content cannot forge a harness tag or close the untrusted region.

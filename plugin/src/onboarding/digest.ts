@@ -115,12 +115,17 @@ export function buildDigest(
 ): string {
   // The watermark: the render below reads `now` only through the whole-minute TTL bucket (the
   // expiry clock is a fixed per-claim timestamp, so it never moves), the registry only through
-  // the census, claims only through the sorted vector, and records only through `seq` + the
-  // RAW_TAIL_R tail. Everything the render reads is in the key; anything else changing re-renders.
+  // the census, claims only through the sorted vector, and records only through the RAW_TAIL_R
+  // tail. Everything the render reads is in the key; anything else changing re-renders. The tail
+  // needs BOTH length and head seq: a retention prune splices the head without moving `seq`, so
+  // neither alone invalidates — length misses a prune that appends its own gap record back to the
+  // same length, and head-seq alone misses nothing here but guards the shape explicitly.
   const now = Date.now();
   const key = [
     budgetTokens,
     store.seq,
+    store.records.length,
+    store.records.length > 0 ? store.records[0]!.seq : -1,
     cursorFor(store, viewer.agentId),
     claimsFingerprint(store),
     censusFingerprint(),
