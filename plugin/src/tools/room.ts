@@ -28,7 +28,7 @@ import { hostSchema } from "../host-schema";
 import { buildDigest, DIGEST_CLAIMS_CAP, estimateTokens, ROSTER_CAP } from "../onboarding/digest";
 import { safeRoomText } from "../onboarding/escape";
 import { contended, grant, reclaimIfStale, release, renew, staleGen } from "../store/claims";
-import { type RoomConfig, resolveRoomConfig } from "../store/config";
+import type { RoomConfig } from "../store/config";
 import {
   bumpCursor,
   cursorFor,
@@ -558,7 +558,9 @@ async function deliverPass(
   records: readonly RoomRecord[],
   actorId: string,
 ): Promise<string | undefined> {
-  const config = resolveRoomConfig(pi, store.root);
+  // 027 — the open store already holds the parsed config (`createStore` loads it once); the live
+  // value is refreshed on the save path (`/room config set`), so a pass never re-reads the file.
+  const config = store.config;
   let failure: string | undefined;
   try {
     // §5.2 — the producer's bucket, consumed once per appended post (claim/release are not posts).
@@ -962,7 +964,9 @@ export function registerRoomTool(pi: ExtensionAPI): void {
         return fail(error instanceof Error ? error.message : "room file corrupt");
       }
       const agentId = ctx.agent.id;
-      const config = resolveRoomConfig(pi, store.root);
+      // 027 — the open store already holds the parsed config; the save path refreshes the live
+      // value, so an op never re-reads the file.
+      const config = store.config;
       try {
         switch (p.op) {
           case "join": {

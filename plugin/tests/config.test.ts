@@ -1,6 +1,8 @@
-import { afterAll, expect, test } from "bun:test";
+import { afterAll, afterEach, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
+import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { logPathFor, roomIdFor } from "../src/ids";
 import {
   configPath,
@@ -10,6 +12,13 @@ import {
   resolveRoomId,
   saveRoomConfig,
 } from "../src/store/config";
+import { resetRoomStores, roomStoreFor } from "../src/store/room-store";
+import { registerRoomTool } from "../src/tools/room";
+import { zodStub } from "./zod-stub";
+
+afterEach(() => {
+  resetRoomStores();
+});
 
 // --- fixtures -------------------------------------------------------------
 
@@ -178,4 +187,82 @@ test("loadRoomConfig clamps absurd ceilings and leaves in-range values alone", (
   expect(loaded.claimTtlMs).toBe(86_400_000);
   expect(loaded.logMaxRecords).toBe(5_000);
   expect(seen).toEqual(["claimTtlMs"]);
+});
+// --- plan 027 — the live config --------------------------------------------
+
+/**
+ * 027 — a post plus its delivery pass performs zero config-file reads after open, while a
+ * config write still changes the effective value for the next op. The seam is `fs.readFileSync`
+ * filtered to the config path (the log replay's reads must not count); the counter is the
+ * established `spyOn(fs, …)` shape from store.test.ts. The poster is the room's only member, so
+ * the pass has no recipients to side-channel through — its config use is the live value only.
+ */
+test("post + delivery pass read the live store config, not the config file", async () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "omp-config-live-"));
+  TMP.push(project);
+  const ctx = {
+    agent: { kind: "main", id: "AgentA", name: "main", depth: 0 },
+    cwd: project,
+    localProtocolOptions: {
+      getArtifactsDir: () => project,
+      getSessionId: () => "AgentA",
+    },
+    sessionManager: {
+      getArtifactsDir: () => project,
+      getSessionId: () => "AgentA",
+      getEntries: () => [],
+    },
+    setInterval: () => 0 as unknown as Timer,
+    clearTimer: () => {},
+  } as unknown as ExtensionContext;
+  const store = roomStoreFor(ctx);
+  const cfgPath = configPath(store.root);
+
+  const realRead = fs.readFileSync;
+  let configReads = 0;
+  const spy = spyOn(fs, "readFileSync");
+  spy.mockImplementation(((target: unknown, ...rest: unknown[]) => {
+    if (String(target) === cfgPath) configReads++;
+    return (realRead as (...args: never[]) => unknown)(target as never, ...(rest as never[]));
+  }) as typeof fs.readFileSync);
+  try {
+    let tool:
+      | {
+          execute: (
+            id: string,
+            params: Record<string, unknown>,
+            signal: AbortSignal,
+            onUpdate: (u: unknown) => void,
+            ctx: ExtensionContext,
+          ) => Promise<{ details?: Record<string, unknown> }>;
+        }
+      | undefined;
+    const pi = {
+      zod: zodStub,
+      registerTool: (def: { name: string; execute: NonNullable<typeof tool>["execute"] }) => {
+        if (def.name === "room") tool = def as typeof tool;
+      },
+    } as unknown as ExtensionAPI;
+    registerRoomTool(pi);
+    if (!tool) throw new Error("room tool not registered");
+
+    const posted = await tool.execute(
+      "test-call",
+      { op: "post", topic: "build", body: "hello" },
+      new AbortController().signal,
+      () => {},
+      ctx,
+    );
+    expect(posted.details).toMatchObject({ ok: true, op: "post" });
+    expect(configReads).toBe(0);
+
+    // A hand-edited file mid-session is invisible by design (save-path reload is the only
+    // mutation route); the save path refreshes the live value the next op reads.
+    const next = { ...store.config, maxBodyBytes: 16 };
+    saveRoomConfig(store.root, next);
+    store.config = loadRoomConfig(store.root);
+    expect(store.config.maxBodyBytes).toBe(16);
+  } finally {
+    spy.mockRestore();
+  }
 });
