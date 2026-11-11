@@ -9,12 +9,12 @@ import {
   moreLine,
   muteRoom,
   muteTopic,
+  scanTopics,
   selectT0,
   selectT1,
   truncateOversized,
   unmuteRoom,
   unmuteTopic,
-  unreadCounts,
 } from "../attention/governor";
 import { classify, type Tier } from "../attention/tiers";
 import {
@@ -426,20 +426,13 @@ function buildBoard(store: RoomStore, viewer: MemberState): BoardResult {
     lag: lagFor(store, member.agentId),
     topics: [...member.topics],
   }));
-  const cursor = cursorFor(store, viewer.agentId);
-  const byTopic = new Map<string, TopicRow>();
-  const topics: TopicRow[] = [];
-  for (const record of store.records) {
-    if (record.kind !== "msg" && record.kind !== "note") continue;
-    let row = byTopic.get(record.topic);
-    if (!row) {
-      row = { topic: record.topic, lastSeq: record.seq, unread: 0 };
-      byTopic.set(record.topic, row);
-      topics.push(row);
-    }
-    row.lastSeq = record.seq;
-    if (record.seq > cursor) row.unread++;
-  }
+  // The board's topic rows share the single-pass scan (scanTopics): the board basis is
+  // mute-blind, so it reads `unreadAll`. Shape, order and caps are unchanged.
+  const topics: TopicRow[] = scanTopics(store, viewer).map((row) => ({
+    topic: row.topic,
+    lastSeq: row.lastSeq,
+    unread: row.unreadAll,
+  }));
   return { ok: true, claims, roster, topics, deliveries: { ...store.deliveries } };
 }
 
@@ -611,17 +604,45 @@ async function deliverToTarget(
     // window slot spent on a record the target already has (until `selectT1` admits nothing new).
     // The same registry keeps a given seq out of the owed floor below.
     const given = deliveredT0s(store.root, target);
+    // Single-pass bucketing: ONE forward pass over the log above the cursor computes
+    // `tier` + `muted` ONCE per record and partitions into the buckets below. The buckets hold
+    // the same refs in the same log order the stacked filters produced, so every admitted set,
+    // summary line and cursor cap is identical — with one scan instead of six. A new tier or
+    // mute rule must update the partition arms here (maintenance note).
     // The recipient's whole pending set, minus muted, cursor-only T2, and given: exactly what a
     // push may show. T0 is exempt from K/B; T1 is admitted oldest-first by `selectT1`.
-    const pending = store.records.filter(
-      (r) =>
-        r.seq > cursor &&
-        !given.has(r.seq) &&
-        !isMuted(store, viewer, r) &&
-        classify(r, viewer) !== "T2",
-    );
+    const t0Pending: RoomRecord[] = [];
+    const t1Pending: RoomRecord[] = [];
+    const gapPending: RoomRecord[] = [];
+    // The T2 slice above the cursor (muted out, GIVEN kept): `coalescePending`'s own filter has
+    // no given check, so this must not either — it is fed in pre-partitioned below.
+    const t2Above: RoomRecord[] = [];
+    // classify/isMuted per seq for this pass's batch lookups below (the T1-admit loop, the
+    // deliver loop and the T2 tail all re-asked for the same records).
+    const classBySeq = new Map<number, { tier: Tier; muted: boolean }>();
+    for (const r of store.records) {
+      if (r.seq <= cursor) continue;
+      const muted = isMuted(store, viewer, r);
+      const tier = classify(r, viewer);
+      classBySeq.set(r.seq, { tier, muted });
+      if (muted) continue;
+      if (tier === "T2") {
+        t2Above.push(r);
+        continue;
+      }
+      if (given.has(r.seq)) continue;
+      if (r.kind === "gap") gapPending.push(r);
+      else if (tier === "T0") t0Pending.push(r);
+      else t1Pending.push(r);
+    }
+    // A batch record missing from the map (not in the log above the cursor) is classified live —
+    // the same predicates the stacked filters applied.
+    const classOf = (record: RoomRecord): { tier: Tier; muted: boolean } =>
+      classBySeq.get(record.seq) ?? {
+        tier: classify(record, viewer),
+        muted: isMuted(store, viewer, record),
+      };
     // N5 — past its ceiling the T0 set batches into ONE digest interrupt, never dropped.
-    const t0Pending = pending.filter((r) => classify(r, viewer) === "T0");
     const t0 = selectT0(t0Pending);
     const admitted = [...t0.injected];
     // The T1 window is computed ONCE for this target: the admitted set cannot change within the
@@ -633,9 +654,8 @@ async function deliverToTarget(
     // cursor never moves, and the backlog grows — forever. The data stays readable, but the push
     // is dead and the recipient was never told. The hint is the difference between a starved agent
     // and a deaf one.
-    const t1Pending = pending.filter(
-      (r) => classify(r, viewer) === "T1" && r.kind !== "gap" && !isMuted(store, viewer, r),
-    );
+    // t1Pending is the bucket from the single pass above (T1, non-gap, unmuted, above the
+    // cursor, never given) — the same membership the old re-filter computed.
     // S3 — same cost basis as `read`: the recipient is shown the rendered line, so the budget
     // charges that line, not the body `roomBodyOf` alone would price.
     const t1 = selectT1(store, viewer, t1Pending, {
@@ -643,8 +663,9 @@ async function deliverToTarget(
       costOf: (record) => estimateTokens(recordLine(record)),
     });
     for (const record of records) {
-      if (isMuted(store, viewer, record)) continue;
-      if (classify(record, viewer) !== "T1") continue;
+      const cls = classOf(record);
+      if (cls.muted) continue;
+      if (cls.tier !== "T1") continue;
       if (!coalesced && t1.injected.some((r) => r.seq === record.seq)) admitted.push(record);
     }
     // A `gap` record is a promised notify (T1 for every viewer) that the retention prune
@@ -654,21 +675,22 @@ async function deliverToTarget(
     // interrupt storm). So the gap is CARRIED here, on the T1 path, and it is exempt from the
     // K/B cap (like T0): the one notice that says "the log lost records" must never be starved
     // by a busy turn.
-    const owedOthers = pending.filter(
-      (r) => r.kind !== "gap" && !admitted.some((a) => a.seq === r.seq),
-    );
-    const owedFloorOthers = owedOthers.reduce(
-      (min, r) => Math.min(min, r.seq),
-      Number.POSITIVE_INFINITY,
-    );
+    // `owedOthers` was the non-gap pending set minus admitted; only its MINIMUM is used (the
+    // floor below the oldest still-owed record), computed here from the non-gap buckets.
+    const admittedSeqs = new Set<number>(admitted.map((a) => a.seq));
+    let owedFloorOthers = Number.POSITIVE_INFINITY;
+    for (const bucket of [t0Pending, t1Pending] as const) {
+      for (const r of bucket) {
+        if (!admittedSeqs.has(r.seq) && r.seq < owedFloorOthers) owedFloorOthers = r.seq;
+      }
+    }
     // The gap may only be carried when nothing the recipient still OWES sits BELOW it: telling
     // the gap moves the cursor to its seq, and that must not cross an owed record — otherwise
     // `room{op:"read"}` (which starts at the cursor) could never return it. While a gap waits
     // behind a refusal it stays owed, but it never lowers the floor: the refusal below it
     // already sets a lower one.
-    const gaps = pending.filter(
-      (r) => r.kind === "gap" && !records.some((x) => x.seq === r.seq) && r.seq < owedFloorOthers,
-    );
+    const batchSeqs = new Set<number>(records.map((r) => r.seq));
+    const gaps = gapPending.filter((r) => !batchSeqs.has(r.seq) && r.seq < owedFloorOthers);
     // Last in the batch: the T0/T1 deliveries go first, so a failed one aborts the pass before
     // the gap is told (the gap is retried on the next pass) and the gap's cursor bump never
     // crosses a record whose delivery just failed.
@@ -683,17 +705,27 @@ async function deliverToTarget(
     // of `pending` above, so they never pin the floor — but the T0 batch `selectT0` is about to
     // collapse still counts as owed until its summary is ISSUED (below), so nothing bumps the
     // cursor past records the recipient has not been told about yet.
-    const owed = pending.filter((r) => !admitted.some((a) => a.seq === r.seq));
-    const owedFloor = owed.reduce((min, r) => Math.min(min, r.seq), Number.POSITIVE_INFINITY);
+    for (const g of gaps) admittedSeqs.add(g.seq);
+    // `owed` was the pending set minus admitted; only its MINIMUM is used. A carried gap was
+    // told, so it never pins the floor — which is exactly what removing it from the owed set
+    // means here.
+    let owedFloor = Number.POSITIVE_INFINITY;
+    for (const bucket of [t0Pending, t1Pending, gapPending] as const) {
+      for (const r of bucket) {
+        if (!admittedSeqs.has(r.seq) && r.seq < owedFloor) owedFloor = r.seq;
+      }
+    }
     const cursorCap = owedFloor - 1;
-    // N/T — the T2 backlog rides the next T0/T1 for this recipient as ONE line.
+    // N/T — the T2 backlog rides the next T0/T1 for this recipient as ONE line. The T2 slice is
+    // fed in pre-partitioned (no second log scan); its membership mirrors coalescePending's own
+    // filter exactly.
     const digest =
       admitted.length > 0 || t0.summaryLine !== null
-        ? coalescePending(store, viewer, Date.now(), config)
+        ? coalescePending(store, viewer, Date.now(), config, t2Above)
         : null;
     let extra = digest !== null ? [digest] : [];
     for (const record of admitted) {
-      await deliver(pi, ctx, target, record, classify(record, viewer), extra, cursorCap);
+      await deliver(pi, ctx, target, record, classOf(record).tier, extra, cursorCap);
       extra = [];
     }
     if (t0.summaryLine !== null) {
@@ -722,7 +754,7 @@ async function deliverToTarget(
     // A non-coalesced T2 is cursor-only — never injected, and consumed on arrival.
     if (coalesced) return undefined;
     for (const record of records) {
-      if (classify(record, viewer) === "T2") {
+      if (classOf(record).tier === "T2") {
         await deliver(pi, ctx, target, record, "T2", [], cursorCap);
       }
     }
@@ -1371,20 +1403,13 @@ export function registerRoomTool(pi: ExtensionAPI): void {
 
           case "topics": {
             const viewer = viewerStateFor(store, agentId);
-            const counts = unreadCounts(store, viewer);
-            const byTopic = new Map<string, TopicRow>();
-            const topics: TopicRow[] = [];
-            for (const record of store.records) {
-              if (record.kind !== "msg" && record.kind !== "note") continue;
-              let row = byTopic.get(record.topic);
-              if (!row) {
-                row = { topic: record.topic, lastSeq: record.seq, unread: 0 };
-                byTopic.set(record.topic, row);
-                topics.push(row);
-              }
-              row.lastSeq = record.seq;
-              row.unread = counts.get(record.topic) ?? 0;
-            }
+            // Same single-pass scan as the board: the topics basis is mute-aware, so it reads
+            // `unread`. Rows, order and counts are identical to the old scan + unreadCounts.
+            const topics: TopicRow[] = scanTopics(store, viewer).map((row) => ({
+              topic: row.topic,
+              lastSeq: row.lastSeq,
+              unread: row.unread,
+            }));
             return ok(
               { ok: true, op: "topics", topics },
               withRows(

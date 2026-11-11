@@ -2083,3 +2083,126 @@ test("forgetDeliveredT0 drops exactly that room — other rooms keep theirs", ()
     forgetDeliveredT0(b);
   }
 });
+
+// --- 13. single-pass delivery bucketing: admitted-set equivalence (plan 028) ---
+//
+// The delivery pass must classify once per record and partition into buckets with byte-identical
+// admitted sets. These tests pin the OBSERVABLE outcomes on the base commit (seqs delivered in
+// order, summary lines, cursor position, tier counters) — the bucketing refactor must reproduce
+// them exactly. The literals below were captured by running this scenario pre-change.
+
+test("single-pass bucketing admits the identical set: T0/T1/gap/mute/given pin", async () => {
+  const root = tempRoot();
+  const ctx = fakeCtx(root, "Sender");
+  const store = roomStoreFor(ctx);
+  const R = `attn-bucket-${Date.now()}`;
+  store.append({ kind: "member", from: R, action: "join" }); // seq 1: T2 presence, never pushed
+  store.members.get(R)!.topics.add("build");
+  muteTopic(store, R, "chat");
+  // seq 2: T1 the recipient was already GIVEN — never re-selected, never pins the floor.
+  const m1 = store.append({ kind: "msg", from: "Sender", topic: "build", body: "m1" });
+  // seq 3: muted topic, no mention — never pushed, never owed.
+  const muted = store.append({ kind: "msg", from: "Sender", topic: "chat", body: "muted-out" });
+  // seq 4: mention promotes through the mute → T0 steer.
+  const t0 = store.append({
+    kind: "msg",
+    from: "Sender",
+    topic: "chat",
+    body: "hey",
+    mention: [R],
+  });
+  // seq 5: unfollowed topic → T2 chatter, cursor-only, never injected.
+  const t2 = store.append({ kind: "msg", from: "Sender", topic: "random", body: "chatter" });
+  // seq 6: retention gap — carried on the T1 path, exempt from the K/B cap.
+  const gapRecord = noteGap(store, 3, "retention");
+  // seqs 7-9: this pass's batch — T1s the window admits.
+  const batch: RoomRecord[] = [0, 1, 2].map((i) =>
+    store.append({ kind: "msg", from: "Sender", topic: "build", body: `b${i}` }),
+  );
+  markDeliveredT0(store.root, R, m1.seq);
+  const calls: Send[] = [];
+  registerSession(R, calls);
+  const { pi } = fakePi();
+  // `store.deliveries` is store-global and ambient live refs from earlier tests in this process
+  // receive traffic on this store too — pin DELTAS across the pass, not totals.
+  const before = { ...store.deliveries };
+
+  const failure = await notifyRecipients(pi, ctx, store, batch, "Sender");
+
+  expect(failure).toBeUndefined();
+  // Admitted seqs, in delivery order: the T0 first, then the T1 batch, then the carried gap last.
+  const deliveredSeqs = calls.map((c) => (c.payload.details as RoomRecord).seq);
+  expect(deliveredSeqs).toEqual([
+    t0.seq,
+    batch[0]!.seq,
+    batch[1]!.seq,
+    batch[2]!.seq,
+    gapRecord.seq,
+  ]);
+  // The muted record and the T2 chatter are never injected.
+  expect(deliveredSeqs).not.toContain(muted.seq);
+  expect(deliveredSeqs).not.toContain(t2.seq);
+  // The given record is never re-sent.
+  expect(deliveredSeqs).not.toContain(m1.seq);
+  // Tiers ride the payload: T0 steers, T1 (batch + carried gap) is an aside.
+  expect(calls[0]!.options).toMatchObject({ deliverAs: "steer", triggerTurn: true });
+  expect(String(calls[0]!.payload.content).startsWith("[T0]")).toBe(true);
+  for (const call of calls.slice(1)) {
+    expect(call.options).toMatchObject({ deliverAs: "aside" });
+    expect(String(call.payload.content).startsWith("[T1]")).toBe(true);
+  }
+  // No overflow and no digest: exactly the five deliveries, no summary notices.
+  expect(calls.length).toBe(5);
+  expect(store.cursors.get(R)).toBe(batch[2]!.seq);
+  // R's exact T1 share is pinned by its four [T1] calls above. The store-global T1 counter also
+  // counts the carried gap going to every ambient live ref from earlier tests (a gap is T1 for
+  // every viewer, K12), so only the T0 delta is airtight here: no record is T0 for anyone but R.
+  expect(store.deliveries.T0 - before.T0).toBe(1);
+});
+
+test("single-pass bucketing preserves the K/B overflow hint: oldest admitted, newest refused+TOLD", async () => {
+  const root = tempRoot();
+  const ctx = fakeCtx(root, "Sender");
+  const store = roomStoreFor(ctx);
+  const R = `attn-bucketover-${Date.now()}`;
+  store.append({ kind: "member", from: R, action: "join" }); // seq 1
+  store.members.get(R)!.topics.add("build");
+  // 13 backlog T1s (seqs 2-14) build up while the recipient has no session: every pass skips it
+  // without advancing its cursor.
+  for (let i = 0; i < 13; i++) {
+    const record = store.append({
+      kind: "msg",
+      from: "Sender",
+      topic: "build",
+      body: `filler ${i}`,
+    });
+    await notifyRecipients(fakePi().pi, ctx, store, [record], "Sender");
+  }
+  expect(store.cursors.get(R) ?? 0).toBe(0);
+  // The recipient comes back; the newest post (seq 15) triggers the pass. Pin delivery DELTAS:
+  // ambient refs make totals order-dependent.
+  const calls: Send[] = [];
+  registerSession(R, calls);
+  const newest = store.append({ kind: "msg", from: "Sender", topic: "build", body: "the newest" });
+  const before = { ...store.deliveries };
+  const failure = await notifyRecipients(fakePi().pi, ctx, store, [newest], "Sender");
+
+  expect(failure).toBeUndefined();
+  // Only this pass's batch can be delivered — and the newest (seq 15) is refused by the window,
+  // so NOTHING is delivered this pass: the backlog stays above the cursor, readable via `read`.
+  const delivered = calls.filter((c) => c.payload.details !== undefined);
+  expect(delivered).toEqual([]);
+  // ...but the refusal is TOLD: the exact summary line names the refused count and the resume point.
+  const hints = calls.filter((c) => c.payload.details === undefined);
+  expect(hints.length).toBe(1);
+  expect(hints[0]!.options).toMatchObject({ deliverAs: "aside" });
+  expect(String(hints[0]!.payload.content)).toBe(
+    '+4 more room messages — read with room{op:"read", since:0}',
+  );
+  // The floor holds under the refusals: the cursor does not move at all.
+  expect(store.cursors.get(R) ?? 0).toBe(0);
+  // R itself got nothing injected (only the summary notice, which is not a delivery): the T0
+  // delta is airtight at zero — no record is T0 for anyone. (The T1/T2 counters also count
+  // ambient refs' T2 cursor bumps on this store, so they are not pinned.)
+  expect(store.deliveries.T0 - before.T0).toBe(0);
+});
