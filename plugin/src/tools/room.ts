@@ -359,7 +359,13 @@ function recordLine(record: RoomRecord): string {
 
 /** One model-facing board claim row — the waiting/dependsOn shape both surfaces share. §4.5.1. */
 export function claimLine(
-  claim: { resource: string; holder: string; expiresAt: number; waiting: string[]; dependsOn: string[] },
+  claim: {
+    resource: string;
+    holder: string;
+    expiresAt: number;
+    waiting: string[];
+    dependsOn: string[];
+  },
   now: number = Date.now(),
 ): string {
   const left = Math.max(0, Math.round((claim.expiresAt - now) / 1000));
@@ -368,13 +374,16 @@ export function claimLine(
     claim.waiting.length > 0 ? ` · waiting: ${claim.waiting.map(safe).join(", ")}` : "";
   const depends =
     claim.dependsOn.length > 0 ? ` · needs ${claim.dependsOn.map(safe).join(", ")}` : "";
-  return (
-    `claim ${safe(claim.resource)} · ${safe(claim.holder)} · ${left}s left${waiting}${depends}`
-  );
+  return `claim ${safe(claim.resource)} · ${safe(claim.holder)} · ${left}s left${waiting}${depends}`;
 }
 
 /** One model-facing board roster row — the agent · status · lag shape both surfaces share. */
-export function rosterLine(member: { agentId: string; status: string; lag: number; topics: string[] }): string {
+export function rosterLine(member: {
+  agentId: string;
+  status: string;
+  lag: number;
+  topics: string[];
+}): string {
   const topics = member.topics.length > 0 ? ` · ${member.topics.map(safe).join(", ")}` : "";
   return `${safe(member.agentId)} · ${member.status} · lag ${member.lag}${topics}`;
 }
