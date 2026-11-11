@@ -1408,10 +1408,14 @@ export function registerRoomTool(pi: ExtensionAPI): void {
             // F3 — the persisted view, loaded (and saved on first use), never rebuilt from the log.
             // F5 — `loadView` tiles with a minimum block of 2, so no block covers a single message.
             const tiling = loadView(store.treePath, n, COVER_BUDGET_LINES);
+            // Step 5 — one open per level for the whole tiling, not one per block.
+            const nonRaw = tiling.filter(([, hi2], i) => hi2 - tiling[i]![0]! > RAW_MAX);
+            const summaries = tree.getNodes(nonRaw);
+            let cursor = 0;
             const blocks = tiling.map(([lo, hi]) => {
               const size = hi - lo;
               const raw = size <= RAW_MAX;
-              const summary = raw ? undefined : (tree.getNode(lo, hi) ?? undefined);
+              const summary = raw ? undefined : (summaries[cursor++] ?? undefined);
               return { lo, hi, size, raw, ...(summary !== undefined ? { summary } : {}) };
             });
             return ok(

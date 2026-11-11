@@ -1,4 +1,4 @@
-import { afterAll, expect, test } from "bun:test";
+import { afterAll, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -633,6 +633,44 @@ test("zoom descends one level and validateZoomRange rejects a non-block range", 
   ]);
   // An unbuilt node reads as an empty summary, never a throw.
   expect(zoom(tree, 4, 8)[0]).toEqual({ lo: 4, hi: 6, size: 2, raw: false, text: "" });
+});
+
+test("Step 5: getNodes agrees with getNode and opens once per level, not per block", () => {
+  // Measured 2026-11-11: a 96-block tree op at N=5000 paid 38 opens (one per non-raw block);
+  // the batch pays one per LEVEL (~5). Correctness first: every element equals the getNode read.
+  const { treePath } = tmpRootTree();
+  const N = 64;
+  const tree = openTreeStore(treePath, N);
+  for (let lo = 0; lo < N; lo += 2) tree.putNode(lo, lo + 2, `s${lo}`);
+  for (let lo = 0; lo < N; lo += 4) tree.putNode(lo, lo + 4, `m${lo}`);
+  for (let lo = 0; lo < N; lo += 8) tree.putNode(lo, lo + 8, `l${lo}`);
+  const blocks: Array<[number, number]> = [
+    [0, 2],
+    [2, 4],
+    [0, 4],
+    [4, 8],
+    [8, 16],
+    [16, 32],
+    [40, 48],
+    [48, 56],
+  ];
+  const batch = tree.getNodes(blocks);
+  expect(batch).toEqual(blocks.map(([lo, hi]) => tree.getNode(lo, hi)));
+  expect(batch[0]).toBe("s0");
+  expect(batch[2]).toBe("m0");
+  expect(batch[4]).toBe("l8");
+  // Unbuilt and invalid shapes read null, never throw — the getNode contract.
+  // (Level 8 holds [0,8)..[56,64): [56,64) IS built, so the unbuilt probe is wider.)
+  expect(tree.getNodes([[0, 16]])).toEqual([null]);
+  expect(tree.getNodes([[1, 5]])).toEqual([null]);
+  // One open per level (sizes 2/4/8/16 = 4 opens), not one per block (8 opens).
+  const openSpy = spyOn(fs, "openSync");
+  try {
+    tree.getNodes(blocks);
+    expect(openSpy.mock.calls.length).toBe(4);
+  } finally {
+    openSpy.mockRestore();
+  }
 });
 
 // --- 8. main session only --------------------------------------------------

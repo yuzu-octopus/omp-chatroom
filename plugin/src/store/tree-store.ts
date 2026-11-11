@@ -7,6 +7,15 @@ export interface TreeStore {
   getNode(lo: number, hi: number): string | null;
   putNode(lo: number, hi: number, summary: string): boolean;
   /**
+   * Step 5 — the batched read: one open per LEVEL for the whole block list, instead of one
+   * open-read-close per `getNode` call. Pure read path: returns the summary per block, null
+   * for any block not built yet (same contract as `getNode`). Level files are append-only
+   * dense prefixes read with positional reads, so holding the fd across the batch changes
+   * nothing observable — and the fd is always closed before return (never retained across
+   * a prune, which rm-rfs the tree: a cached read fd would go stale under invalidateTree).
+   */
+  getNodes(blocks: Array<readonly [number, number]>): Array<string | null>;
+  /**
    * OptMem `pending(d, T)` — every unbuilt block, smallest-first. The reference work list (the
    * tests build against it); the compactor uses `ready` (F13) so it never scans for work.
    */
@@ -134,6 +143,30 @@ function encodeRecord(summary: string): Buffer {
 function decodeRecord(buf: Buffer): string | null {
   const text = buf.toString("utf-8").replace(/\s+$/, "");
   return text.length === 0 ? null : text;
+}
+
+/**
+ * The single-block read `getNode` is built on: open/read/close per call. `getNodes` batches
+ * across calls but reads through this same decode, so both paths agree byte-for-byte.
+ */
+function readOne(treePath: string, lo: number, hi: number): string | null {
+  if (!isBlock(lo, hi)) return null;
+  const size = hi - lo;
+  const p = levelPath(treePath, size);
+  let fd: number;
+  try {
+    fd = fs.openSync(p, "r");
+  } catch {
+    return null; // not built yet; any other failure is real and must surface
+  }
+  try {
+    const buf = Buffer.alloc(TREE_REC);
+    const read = fs.readSync(fd, buf, 0, TREE_REC, (lo / size) * TREE_REC);
+    if (read < TREE_REC) return null;
+    return decodeRecord(buf);
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 // --- §4 F13 — the ready queue ----------------------------------------------
@@ -375,23 +408,46 @@ export function openTreeStore(treePath: string, logLength = 0): TreeStore {
     logLength,
 
     getNode(lo: number, hi: number): string | null {
-      if (!isBlock(lo, hi)) return null;
-      const size = hi - lo;
-      const p = levelPath(treePath, size);
-      let fd: number;
-      try {
-        fd = fs.openSync(p, "r");
-      } catch {
-        return null; // not built yet; any other failure is real and must surface
+      return readOne(treePath, lo, hi);
+    },
+
+    getNodes(blocks: Array<readonly [number, number]>): Array<string | null> {
+      // Group offsets by level file: one open per level, positional reads per block. A level
+      // that fails to open reads null for its whole group (not built yet — same as getNode).
+      const groups = new Map<number, number[]>();
+      const shapes: Array<{ size: number; pos: number } | null> = blocks.map(([lo, hi]) => {
+        if (!isBlock(lo, hi)) return null;
+        const size = hi - lo;
+        const pos = (lo / size) * TREE_REC;
+        const group = groups.get(size);
+        if (group === undefined) groups.set(size, [pos]);
+        else group.push(pos);
+        return { size, pos };
+      });
+      const byLevel = new Map<number, Map<number, string | null>>();
+      for (const [size, positions] of groups) {
+        const level = new Map<number, string | null>();
+        byLevel.set(size, level);
+        let fd: number;
+        try {
+          fd = fs.openSync(levelPath(treePath, size), "r");
+        } catch {
+          for (const pos of positions) level.set(pos, null);
+          continue;
+        }
+        try {
+          for (const pos of positions) {
+            const buf = Buffer.alloc(TREE_REC);
+            const read = fs.readSync(fd, buf, 0, TREE_REC, pos);
+            level.set(pos, read < TREE_REC ? null : decodeRecord(buf));
+          }
+        } finally {
+          fs.closeSync(fd);
+        }
       }
-      try {
-        const buf = Buffer.alloc(TREE_REC);
-        const read = fs.readSync(fd, buf, 0, TREE_REC, (lo / size) * TREE_REC);
-        if (read < TREE_REC) return null;
-        return decodeRecord(buf);
-      } finally {
-        fs.closeSync(fd);
-      }
+      return shapes.map((shape) =>
+        shape === null ? null : (byLevel.get(shape.size)?.get(shape.pos) ?? null),
+      );
     },
 
     putNode(lo: number, hi: number, summary: string): boolean {
@@ -541,13 +597,17 @@ export function zoom(
   rawAt?: (seq: number) => string,
 ): Array<{ lo: number; hi: number; size: number; raw: boolean; text: string }> {
   const mid = (lo + hi) / 2;
-  return [
+  const pairs: Array<[number, number]> = [
     [lo, mid],
     [mid, hi],
-  ].map(([a, b]) => {
+  ];
+  // Step 5 — the two children share one batched read (one open per level, not per child).
+  const fetched = tree.getNodes(pairs.filter(([, b], i) => b - pairs[i]![0]! !== 1));
+  let cursor = 0;
+  return pairs.map(([a, b]) => {
     const size = b - a;
     return size === 1
       ? { lo: a, hi: b, size, raw: true, text: rawAt?.(a) ?? "" }
-      : { lo: a, hi: b, size, raw: false, text: tree.getNode(a, b) ?? "" };
+      : { lo: a, hi: b, size, raw: false, text: fetched[cursor++] ?? "" };
   });
 }
