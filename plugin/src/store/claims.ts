@@ -1,5 +1,4 @@
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent";
-import { topicOf } from "../ids";
 import type { RoomStore } from "./room-store"; // type-only — breaks the runtime cycle
 import type { RoomRecord } from "./schema";
 // §3.4 — verbatim
@@ -94,8 +93,7 @@ export function grant(
  * gets the next generation; a RENEWAL by the same holder keeps it. The
  * counter survives the release (it lives beside the claim map, not inside
  * it), so a re-grant never reuses a generation. The projection
- * (room-store.ts) and the replay (hydrateClaims) each apply this same rule
- * — the RECORD carries no `gen` field.
+ * (room-store.ts) applies this rule — the RECORD carries no `gen` field.
  */
 /**
  * R1 — the generation a caller claims to hold, and whether it is stale.
@@ -230,32 +228,6 @@ export function expireStale(
     );
   }
   return out;
-}
-
-// §3.4 "claim state is rebuilt by replaying the log on first open"
-export function hydrateClaims(store: RoomStore, records: readonly RoomRecord[]): void {
-  for (const record of records) {
-    if (record.kind === "claim") {
-      // R1 — the same rule the projection applies, so a replay reproduces the generations.
-      const current = store.claimGens.get(record.resource) ?? 0;
-      const previous = store.claims.get(record.resource);
-      const ownershipChanges = previous === undefined || previous.holder !== record.from;
-      const gen = ownershipChanges ? current + 1 : Math.max(current, 1);
-      store.claimGens.set(record.resource, gen);
-      store.claims.set(record.resource, {
-        resource: record.resource,
-        holder: record.from,
-        ttlMs: record.ttlMs,
-        acquiredAt: record.ts,
-        seq: record.seq,
-        gen,
-        dependsOn: record.dependsOn ?? [],
-      });
-      store.members.get(record.from)?.heldTopics.add(topicOf(record.resource));
-    } else if (record.kind === "release") {
-      store.claims.delete(record.resource);
-    }
-  }
 }
 
 // §4.4 — the in-store condition variable for wait_for_claim.

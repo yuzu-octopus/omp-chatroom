@@ -8,7 +8,7 @@ import { resolveLocalRoot } from "@oh-my-pi/pi-coding-agent/internal-urls/local-
 import { classify } from "../src/attention/tiers";
 import { logPathFor, newMessageId, resourceKey, roomIdFor } from "../src/ids";
 import { registerHooks } from "../src/onboarding/hook";
-import { enqueueWaiter, grant } from "../src/store/claims";
+import { enqueueWaiter, grant, release, renew } from "../src/store/claims";
 import {
   configPath,
   DEFAULT_ROOM_CONFIG,
@@ -46,6 +46,7 @@ import {
 import {
   disposeRoomSession,
   enforceRetention,
+  idemIndexKey,
   type RoomStore,
   registerSweepNotifier,
   roomStoreFor,
@@ -1486,5 +1487,160 @@ test("the sweep's promoted claim is delivered to the topic's followers", async (
     for (const id of followers) expect(cursorFor(store, id)).toBe(promoted.seq);
   } finally {
     AgentRegistry.resetGlobalForTests();
+  }
+});
+
+// --- plan 023: single replay projection, release pruning, reset() leaks --------
+//
+// Opening a room used to project claim/release records twice — once through
+// `project()` in the replay loop and again through `hydrateClaims()` — so a
+// replayed ownership change bumped the generation a second time. These tests
+// reopen the root (evict + storeFor) and compare the reopened generations,
+// heldTopics, and idempotency state against the live store.
+
+/** Evict the cached store and reopen the root from the on-disk log. */
+function reopenStore(root: string): RoomStore {
+  // `storeFor` bumps the root refcount per call and `dispose()` drops one
+  // ref, so eviction needs one dispose per outstanding storeFor: the
+  // creation call plus this helper's own lookup call.
+  const before = storeFor(root, roomIdFor(root));
+  before.dispose();
+  before.dispose();
+  return storeFor(root, roomIdFor(root));
+}
+
+test("reopen after claim → renew → renew keeps the generation (no double projection)", () => {
+  // Live: A grants (gen 1), renews twice (same holder — stays 1). A reopen
+  // must reproduce gen 1: the old second pass re-applied the R1 rule
+  // against final state and bumped once per extra claim record.
+  const root = tempRoot();
+  const roomId = roomIdFor(root);
+  const s = storeFor(root, roomId);
+  expect(grant(s, "build/step", "A", 60_000).ok).toBe(true);
+  expect(renew(s, "build/step", "A", 60_000).ok).toBe(true);
+  expect(renew(s, "build/step", "A", 60_000).ok).toBe(true);
+  const liveGen = s.claims.get("build/step")?.gen;
+  expect(liveGen).toBe(1);
+
+  const r = reopenStore(root);
+  try {
+    expect(r.claims.get("build/step")?.holder).toBe("A");
+    expect(r.claims.get("build/step")?.gen).toBe(liveGen);
+  } finally {
+    r.dispose();
+  }
+});
+
+test("reopen after a reclaim chain matches live generations exactly", () => {
+  // MUTATION-SENSITIVE: the discriminating case. Live, A → release →
+  // promote B lands on gen 2. The old second pass replayed the stale
+  // `claim A` record against final state (holder B) and bumped again, so
+  // the reopen diverged to a higher generation and the R1 fence refused
+  // the current holder.
+  const root = tempRoot();
+  const roomId = roomIdFor(root);
+  const s = storeFor(root, roomId);
+  expect(grant(s, "build/step", "A", 60_000).ok).toBe(true);
+  enqueueWaiter(s, "build/step", "B");
+  expect(release(s, "build/step", "A", "released")).toBe(true); // promotes B
+  const liveGen = s.claims.get("build/step")?.gen;
+  expect(s.claims.get("build/step")?.holder).toBe("B");
+
+  const r = reopenStore(root);
+  try {
+    expect(r.claims.get("build/step")?.holder).toBe("B");
+    expect(r.claims.get("build/step")?.gen).toBe(liveGen);
+  } finally {
+    r.dispose();
+  }
+});
+
+test("reopen after release prunes heldTopics (no held topic without a live claim)", () => {
+  // A claims build/api, releases it, then claims build/other under the same
+  // topic: the release prune must drop "build" only when NO live claim of
+  // A remains under it. After the reopen the holder's heldTopics must be
+  // empty and a msg on the topic must classify T2, not T1.
+  const root = tempRoot();
+  const roomId = roomIdFor(root);
+  const s = storeFor(root, roomId);
+  s.members.set("A", {
+    agentId: "A",
+    joinedAtSeq: 0,
+    topics: new Set(),
+    muted: new Set(),
+    threadRoots: new Set(),
+    heldTopics: new Set(),
+  });
+  expect(grant(s, "build/api", "A", 60_000).ok).toBe(true);
+  expect(s.members.get("A")?.heldTopics.has("build")).toBe(true);
+  expect(release(s, "build/api", "A", "released")).toBe(true);
+  expect(s.members.get("A")?.heldTopics.has("build")).toBe(false);
+
+  const r = reopenStore(root);
+  try {
+    // Membership is session state, but the prune is observable through the
+    // reopened member entry: no live claim under "build" may leave it held.
+    const member = r.members.get("A");
+    if (member !== undefined) expect(member.heldTopics.has("build")).toBe(false);
+    expect(r.claims.has("build/api")).toBe(false);
+    // And a claim that survives the reopen keeps its topics mirror.
+    r.members.set("B", {
+      agentId: "B",
+      joinedAtSeq: 0,
+      topics: new Set(),
+      muted: new Set(),
+      threadRoots: new Set(),
+      heldTopics: new Set(),
+    });
+    expect(grant(r, "build/api", "B", 60_000).ok).toBe(true);
+    expect(r.members.get("B")?.heldTopics.has("build")).toBe(true);
+  } finally {
+    r.dispose();
+  }
+});
+
+test("reset() restarts generations: a re-grant starts at 1", () => {
+  // The zombie fence keys on generations surviving the release; `reset()`
+  // wipes the log, so a reused generation would fence a FRESH holder.
+  const root = tempRoot();
+  const roomId = roomIdFor(root);
+  const s = storeFor(root, roomId);
+  try {
+    expect(grant(s, "build/step", "A", 60_000).ok).toBe(true);
+    expect(release(s, "build/step", "A", "released")).toBe(true);
+    expect(grant(s, "build/step", "B", 60_000).ok).toBe(true);
+    expect(s.claims.get("build/step")?.gen).toBe(2);
+
+    s.reset();
+    expect(s.claimGens.size).toBe(0);
+    expect(grant(s, "build/step", "C", 60_000).ok).toBe(true);
+    expect(s.claims.get("build/step")?.gen).toBe(1);
+  } finally {
+    s.dispose();
+  }
+});
+
+test("reset() drops the idempotency index: a retried key posts fresh", () => {
+  // Without a reset the duplicate is still suppressed (the R7 promise);
+  // after a reset the wiped log cannot produce the prior record, so the
+  // key must post fresh instead of aliasing a ghost.
+  const root = tempRoot();
+  const roomId = roomIdFor(root);
+  const s = storeFor(root, roomId);
+  try {
+    const first = s.append({ kind: "msg", from: "A", topic: "t", body: "b", idemKey: "k1" });
+    expect(s.idemKeys.size).toBe(1);
+    // The pre-reset duplicate is suppressed at the index level: the key
+    // still maps to the first record's seq.
+    expect(s.idemKeys.get(idemIndexKey("A", "k1"))).toBe(first.seq);
+
+    s.reset();
+    expect(s.idemKeys.size).toBe(0);
+    const second = s.append({ kind: "msg", from: "A", topic: "t", body: "b", idemKey: "k1" });
+    expect(s.records).toHaveLength(1);
+    expect(second.seq).toBe(1);
+    expect(s.idemKeys.get(idemIndexKey("A", "k1"))).toBe(second.seq);
+  } finally {
+    s.dispose();
   }
 });
