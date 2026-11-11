@@ -539,9 +539,13 @@ export async function notifyRecipients(
   );
   return pass;
 }
-
 /** The delivery chain, one per room root. */
 const DELIVERY_CHAIN = globalMap<string, Promise<void>>("__roomDeliveryChain");
+
+/** Forget a room's delivery chain (the room was disposed). */
+export function forgetDeliveryChain(root: string): void {
+  DELIVERY_CHAIN.delete(root);
+}
 
 async function deliverPass(
   pi: ExtensionAPI,

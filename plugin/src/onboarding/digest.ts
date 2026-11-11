@@ -240,6 +240,11 @@ export function resetDigestTurns(): void {
   PREV_DIGESTS.clear();
 }
 
+/** Forget one room's previous render (the room was disposed). */
+export function forgetDigestTurn(root: string): void {
+  PREV_DIGESTS.delete(root);
+}
+
 type DigestTurnLine = DigestStats & { room: string; seq: number; at: number };
 
 /**

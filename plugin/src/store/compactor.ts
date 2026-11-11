@@ -123,6 +123,12 @@ export function withWriteMutex<T>(root: string, criticalSection: () => Promise<T
   return result;
 }
 
+/** Forget a room's compaction registries (the room was disposed). */
+export function forgetCompactionRegistries(root: string): void {
+  SPEND.delete(root);
+  MUTEX.delete(root);
+}
+
 // --- summarisation ---------------------------------------------------------
 
 /** The model-facing line for one record (kind-first, so no arm reads a field its kind lacks). */

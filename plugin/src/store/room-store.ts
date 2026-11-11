@@ -8,9 +8,10 @@ import { logPathFor, newMessageId, topicOf } from "../ids";
 // keeping a second copy of the rule. Safe against the tools/room → store/room-store cycle: it is
 // only called from the timer callback, long after both module bodies have evaluated, and neither
 // module touches the other's bindings at module scope.
-import { appendedSince } from "../tools/room";
+import { appendedSince, forgetDeliveryChain } from "../tools/room";
+import { forgetDigestTurn } from "../onboarding/digest";
 import { type ClaimState, expireStale, hydrateClaims } from "./claims";
-import { startCompactor, stopCompactor } from "./compactor";
+import { forgetCompactionRegistries, startCompactor, stopCompactor } from "./compactor";
 import { loadRoomConfig, type RoomConfig, resolveRoomId } from "./config";
 import { forgetDeliveredT0 } from "./cursors";
 import {
@@ -23,7 +24,7 @@ import {
 } from "./log";
 import { legacyRoomRoot, openMigratedRoom, roomRootFor } from "./room-root";
 import type { RoomRecord, RoomRecordDraft } from "./schema";
-import { invalidateTree } from "./tree-store";
+import { forgetTreeQueue, invalidateTree } from "./tree-store";
 import { forgetWaitEdges } from "./wait-graph";
 
 // K11 — MemberState is declared ONCE, here (the store owns it); imported by tiers, governor,
@@ -343,6 +344,19 @@ export function disposeRoomSession(ctx: ExtensionContext): void {
   if (STORES.has(root) || SESSIONS.has(root)) return;
   forgetDeliveredT0(root);
   forgetWaitEdges(root);
+  evictRootRegistries(root);
+}
+
+/**
+ * Evict every per-root global registry the dispose/reset paths own. `treePath` defaults to the
+ * layout `createStore` mints (`<root>/room/tree/`); `resetRoomStores` passes the live store's
+ * path instead so a caller that overrode it still evicts the right queue.
+ */
+function evictRootRegistries(root: string, treePath = `${root}/room/tree/`): void {
+  forgetDeliveryChain(root);
+  forgetCompactionRegistries(root);
+  forgetTreeQueue(treePath);
+  forgetDigestTurn(root);
 }
 
 export function resetRoomStores(): void {
@@ -353,6 +367,7 @@ export function resetRoomStores(): void {
     closeRoomLog(root, store.roomId);
     forgetDeliveredT0(root);
     forgetWaitEdges(root);
+    evictRootRegistries(root, store.treePath);
   }
   STORES.clear();
   REFS.clear();

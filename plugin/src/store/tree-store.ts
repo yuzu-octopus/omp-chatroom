@@ -341,6 +341,11 @@ export function loadView(treePath: string, T: number, budget: number): Array<[nu
   return computed;
 }
 
+/** Forget a tree directory's ready queue (the room was disposed). */
+export function forgetTreeQueue(treePath: string): void {
+  QUEUES.delete(treePath);
+}
+
 /**
  * Drop every persisted summary and the saved view, and reset the in-memory ready queue.
  * Called by retention AFTER the head is pruned: tree positions are dense indices into
