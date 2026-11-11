@@ -361,6 +361,42 @@ function recordLine(record: RoomRecord): string {
   }
 }
 
+/** One model-facing board claim row — the waiting/dependsOn shape both surfaces share. §4.5.1. */
+export function claimLine(
+  claim: {
+    resource: string;
+    holder: string;
+    expiresAt: number;
+    waiting: string[];
+    dependsOn: string[];
+  },
+  now: number = Date.now(),
+): string {
+  const left = Math.max(0, Math.round((claim.expiresAt - now) / 1000));
+  // R9 — who is blocked on what: the waiters, and what this claim itself waits on.
+  const waiting =
+    claim.waiting.length > 0 ? ` · waiting: ${claim.waiting.map(safe).join(", ")}` : "";
+  const depends =
+    claim.dependsOn.length > 0 ? ` · needs ${claim.dependsOn.map(safe).join(", ")}` : "";
+  return `claim ${safe(claim.resource)} · ${safe(claim.holder)} · ${left}s left${waiting}${depends}`;
+}
+
+/** One model-facing board roster row — the agent · status · lag shape both surfaces share. */
+export function rosterLine(member: {
+  agentId: string;
+  status: string;
+  lag: number;
+  topics: string[];
+}): string {
+  const topics = member.topics.length > 0 ? ` · ${member.topics.map(safe).join(", ")}` : "";
+  return `${safe(member.agentId)} · ${member.status} · lag ${member.lag}${topics}`;
+}
+
+/** One model-facing board topic row — the unread/last-seq shape both surfaces share. */
+export function topicLine(topic: { topic: string; unread: number; lastSeq: number }): string {
+  return `topic ${safe(topic.topic)} · ${topic.unread} unread · last seq ${topic.lastSeq}`;
+}
+
 /**
  * The board as MODEL-FACING lines. `details.board` never reaches the model — `coerceToolResult`
  * (pi-agent-core `agent-loop.ts:540`) keeps only `content` on the wire, so a counts-only content
@@ -371,29 +407,20 @@ function boardLines(board: BoardResult): string[] {
   const lines: string[] = [];
   const claims = board.claims.slice(0, DIGEST_CLAIMS_CAP);
   for (const claim of claims) {
-    const left = Math.max(0, Math.round((claim.expiresAt - Date.now()) / 1000));
-    // R9 — who is blocked on what: the waiters, and what this claim itself waits on.
-    const waiting =
-      claim.waiting.length > 0 ? ` · waiting: ${claim.waiting.map(safe).join(", ")}` : "";
-    const depends =
-      claim.dependsOn.length > 0 ? ` · needs ${claim.dependsOn.map(safe).join(", ")}` : "";
-    lines.push(
-      `claim ${safe(claim.resource)} · ${safe(claim.holder)} · ${left}s left${waiting}${depends}`,
-    );
+    lines.push(claimLine(claim, Date.now()));
   }
   if (board.claims.length > claims.length)
     lines.push(`… +${board.claims.length - claims.length} more claim(s)`);
 
   const roster = board.roster.slice(0, ROSTER_CAP);
   for (const member of roster) {
-    const topics = member.topics.length > 0 ? ` · ${member.topics.map(safe).join(", ")}` : "";
-    lines.push(`${safe(member.agentId)} · ${member.status} · lag ${member.lag}${topics}`);
+    lines.push(rosterLine(member));
   }
   if (board.roster.length > roster.length)
     lines.push(`… +${board.roster.length - roster.length} more member(s)`);
 
   for (const topic of board.topics) {
-    lines.push(`topic ${safe(topic.topic)} · ${topic.unread} unread · last seq ${topic.lastSeq}`);
+    lines.push(topicLine(topic));
   }
   return lines;
 }
@@ -403,8 +430,8 @@ function withRows(line: string, rows: readonly string[], more?: string): string 
   if (rows.length === 0) return line;
   return [line, ...rows, ...(more !== undefined ? [more] : [])].join("\n");
 }
-
-function buildBoard(store: RoomStore, viewer: MemberState): BoardResult {
+/** The board DATA both surfaces render: claims + roster + topics for this viewer. §4.1. */
+export function buildBoard(store: RoomStore, viewer: MemberState): BoardResult {
   const claims = [...store.claims.values()].map((claim) => ({
     resource: claim.resource,
     holder: claim.holder,
