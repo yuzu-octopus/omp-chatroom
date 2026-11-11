@@ -370,15 +370,85 @@ function readAllLines(fd: number): string[] {
   }
   return buf.toString("utf-8", 0, read).split("\n");
 }
+// Step 4 — the bounded tail reader. `readAllLines` above stays the small-file path; this reads
+// at most `maxBytes` from the END of the file plus the line fragment before it (a tail read that
+// starts mid-line would lose the first record). Returns the lines and whether the head was cut.
+function readTailLines(fd: number, maxBytes: number): { lines: string[]; truncated: boolean } {
+  const size = fs.fstatSync(fd).size;
+  if (size <= maxBytes) {
+    return { lines: readAllLines(fd), truncated: false };
+  }
+  const start = size - maxBytes;
+  const buf = Buffer.allocUnsafe(maxBytes);
+  let read = 0;
+  while (read < maxBytes) {
+    const n = fs.readSync(fd, buf, read, maxBytes - read, start + read);
+    if (n === 0) break;
+    read += n;
+  }
+  const tail = buf.toString("utf-8", 0, read);
+  // The first chunk may start mid-line AND mid-code-point: the slice before the first newline is
+  // dropped (its record's head is in the unread prefix), and a replacement char at the seam is
+  // the cut code point's other half — dropping the fragment drops it too.
+  const lines = tail.split("\n");
+  lines.shift();
+  return { lines, truncated: true };
+}
 
 // §3.3 — skip malformed lines and CONTINUE (C1). A torn line must never drop later records.
 // A skipped line emits one `gap` record; its `seq` is the preceding record's seq so it never
 // consumes a number and cannot shift later cursors (M-2).
-export function replay(fd: number): { records: RoomRecord[]; skipped: number } {
+export function replay(
+  fd: number,
+  opts?: { maxRecords?: number; tailBytes?: number },
+): { records: RoomRecord[]; skipped: number } {
+  if (opts?.maxRecords === undefined && opts?.tailBytes === undefined) {
+    return replayLines(readAllLines(fd), false);
+  }
+  // The bound covers the retention cap plus margin (maintenance note): the projection after open
+  // must agree with retention about the head, or open and the first prune disagree. callers pass
+  // logMaxRecords + margin for maxRecords; tailBytes caps the read when records are large.
+  const maxRecords = opts.maxRecords ?? Number.POSITIVE_INFINITY;
+  const { lines, truncated } =
+    opts.tailBytes === undefined
+      ? { lines: readAllLines(fd), truncated: false }
+      : readTailLines(fd, opts.tailBytes);
+  const { records, skipped } = replayLines(lines, truncated);
+  if (records.length <= maxRecords) return { records, skipped };
+  // Drop from BEHIND the leading prefix marker (index 0 when the tail was cut): the marker is
+  // the projection's notice that the head is missing, and the maxRecords cut extends that same
+  // notice — so the marker absorbs the extra drop instead of a second gap appearing. Its
+  // `skipped` is recomputed from the new head (first.seq - 1), the same dense-seq count the
+  // marker used at creation.
+  const hasMarker = truncated && records.length > 0 && records[0]!.kind === "gap";
+  const keepFrom = hasMarker ? 1 : 0;
+  const drop = records.length - keepFrom - maxRecords;
+  const kept = [...records.slice(0, keepFrom), ...records.slice(keepFrom + drop)];
+  if (kept[1] !== undefined && kept[0]!.kind === "gap") {
+    const newSkipped = kept[1]!.seq - 1;
+    kept[0] = { ...kept[0], seq: kept[1]!.seq, ts: kept[1]!.ts, skipped: newSkipped };
+  } else if (!hasMarker && kept[0] !== undefined && drop > 0) {
+    // The byte tail did not cut but maxRecords did: the dropped prefix still needs its notice,
+    // or the projection silently disagrees with the file about the head.
+    kept.unshift(retentionGapRecord(kept[0]!));
+  }
+  return { records: kept, skipped: skipped + drop };
+}
+
+/**
+ * The line parser both replay paths share. `prefixCut` is true when the caller read a bounded
+ * tail: the skipped prefix is recorded as ONE leading `gap{reason:"retention"}`-style marker so
+ * the projection knows the head is missing, exactly the shape retention's own prune produces.
+ * The JSONL is never truncated (K19 intact); only the in-memory projection is bounded.
+ */
+function replayLines(
+  lines: string[],
+  prefixCut: boolean,
+): { records: RoomRecord[]; skipped: number } {
   const records: RoomRecord[] = [];
   let skipped = 0;
   let lastSeq = 0;
-  for (const line of readAllLines(fd)) {
+  for (const line of lines) {
     if (line.length === 0) continue;
     let parsed: unknown;
     try {
@@ -399,6 +469,20 @@ export function replay(fd: number): { records: RoomRecord[]; skipped: number } {
     }
     records.push(record);
     lastSeq = record.seq;
+  }
+  if (prefixCut && records.length > 0) {
+    // The leading marker must not consume a seq (M-2): it reuses the first kept record's seq —
+    // the way C1's per-line gaps reuse the preceding record's seq. `first.seq - 1` is the count
+    // of records the projection does not hold, NOT a stored head count: seqs are dense (minted
+    // as store.seq + 1), and a quarantined line inside the unread prefix only makes this an
+    // over-count, never an under-count — the same direction retention's own `skipped` errs when
+    // the dropped prefix held invalid lines.
+    const first = records[0]!;
+    const skippedCount = first.seq - 1;
+    if (skippedCount > 0) {
+      records.unshift(retentionGapRecord(first));
+      skipped += skippedCount;
+    }
   }
   return { records, skipped };
 }
@@ -585,6 +669,22 @@ function gapRecord(seq: number, reason: "corrupt" | "invalid"): RoomRecord {
     from: "system",
     skipped: 1,
     reason,
+  };
+}
+// The bounded-replay prefix marker: the same shape retention's own prune produces (a `gap` with
+// `reason:"retention"` and the count of records the projection does not hold). Anchored on the
+// first KEPT record — same seq (consumes nothing, M-2), earlier ts — so cursor resume and the
+// read path see the head exactly as if retention had pruned it.
+function retentionGapRecord(firstKept: RoomRecord): RoomRecord {
+  return {
+    v: 1,
+    seq: firstKept.seq,
+    ts: firstKept.ts,
+    kind: "gap",
+    id: newMessageId(),
+    from: "system",
+    skipped: firstKept.seq - 1,
+    reason: "retention",
   };
 }
 
