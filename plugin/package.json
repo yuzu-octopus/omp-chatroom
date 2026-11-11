@@ -5,7 +5,10 @@
   "type": "module",
   "scripts": {
     "test": "bun test tests/",
+    "test:halves-a": "bun test tests/attention.test.ts tests/board-columns.test.ts tests/cards.test.ts tests/config.test.ts tests/drift.test.ts tests/e2e-room.test.ts tests/host-contract.test.ts tests/onboarding.test.ts tests/panel.test.ts",
+    "test:halves-b": "bun test tests/room-command.test.ts tests/room-root.test.ts tests/room-root-e2e.test.ts tests/room-tool.test.ts tests/store.test.ts tests/symbol-sets.test.ts tests/theme-fallback.test.ts tests/tree.test.ts tests/wait-tools.test.ts",
     "typecheck": "bunx --bun tsc --noEmit -p tsconfig.json",
+    "typecheck:fast": "bun check",
     "lint": "bunx --bun @biomejs/biome check src tests",
     "lint:fix": "bunx --bun @biomejs/biome check src tests --write"
   },
