@@ -12,10 +12,12 @@ import {
   DIGEST_CLAIMS_CAP,
   DIGEST_STATS_ENV,
   DIGEST_STATS_PATH_ENV,
+  digestRenderCount,
   digestStats,
   estimateTokens,
   ROSTER_CAP,
   recordDigestTurn,
+  resetDigestCache,
   resetDigestTurns,
   UNTRUSTED_CLOSE,
   UNTRUSTED_OPEN,
@@ -25,6 +27,7 @@ import rule from "../src/onboarding/routing-rule.md" with { type: "text" };
 import {
   type MemberState,
   type RoomStore,
+  enforceRetention,
   resetRoomStores,
   roomStoreFor,
   roomTimers,
@@ -65,6 +68,7 @@ function occurrences(haystack: string, needle: string): number {
 beforeEach(() => {
   AgentRegistry.resetGlobalForTests();
   resetRoomStores();
+  resetDigestCache();
   artifactsDir = fs.mkdtempSync(path.join(os.tmpdir(), "room-onboarding-"));
   // The room root is `ctx.cwd`, so the fixture's store must sit on the same key the fake ctx
   // reports — otherwise `roomStoreFor(ctx)` and this `store` are two different stores.
@@ -74,6 +78,7 @@ beforeEach(() => {
 
 afterEach(() => {
   resetRoomStores();
+  resetDigestCache();
   AgentRegistry.resetGlobalForTests();
   fs.rmSync(artifactsDir, { recursive: true, force: true });
 });
@@ -183,6 +188,96 @@ test("truncation cascades from backlog to claims to roster before the floor", ()
   expect(tight).toContain("Your cursor:");
   expect(tight).toContain("Caps:");
 });
+// ---------------------------------------------------------------------------------------------
+// 2b. Step 2 — the watermark cache: an unchanged room re-renders from cache; any input change
+// re-renders. The render counter is the observable seam (identical strings alone cannot tell a
+// cache hit from a second render).
+// ---------------------------------------------------------------------------------------------
+
+test("an unchanged room serves the second build from cache with a byte-identical string", () => {
+  resetDigestCache();
+  for (let i = 0; i < 5; i++) post(i, `msg-${i}`);
+  store.claims.set("build/step", {
+    resource: "build/step",
+    holder: "AgentB",
+    ttlMs: 300_000,
+    acquiredAt: Date.now(),
+    seq: store.seq,
+    gen: 1,
+    dependsOn: [],
+  });
+  const first = buildDigest(store, viewer("AgentA"));
+  expect(digestRenderCount).toBe(1);
+  const second = buildDigest(store, viewer("AgentA"));
+  expect(second).toBe(first);
+  expect(digestRenderCount).toBe(1);
+});
+
+test("every watermark input invalidates the cache: append, claim, census, and cursor", () => {
+  resetDigestCache();
+  AgentRegistry.global().register({
+    id: "agent-0",
+    displayName: "agent 0",
+    kind: "sub",
+    session: null,
+    status: "running",
+  });
+  for (let i = 0; i < 3; i++) post(i, `msg-${i}`);
+  const v = viewer("AgentA");
+  buildDigest(store, v);
+  expect(digestRenderCount).toBe(1);
+  // An append bumps seq: re-render.
+  post(3, "msg-3");
+  const afterAppend = buildDigest(store, v);
+  expect(digestRenderCount).toBe(2);
+  expect(afterAppend).toContain("msg-3");
+  // A new claim changes the generation vector: re-render.
+  store.claims.set("build/other", {
+    resource: "build/other",
+    holder: "AgentB",
+    ttlMs: 60_000,
+    acquiredAt: Date.now(),
+    seq: store.seq,
+    gen: 1,
+    dependsOn: [],
+  });
+  buildDigest(store, v);
+  expect(digestRenderCount).toBe(3);
+  // A census change (status flip) changes the fingerprint: re-render.
+  AgentRegistry.global().setStatus("agent-0", "idle");
+  const afterStatus = buildDigest(store, v);
+  expect(digestRenderCount).toBe(4);
+  expect(afterStatus).toContain("[idle]");
+  // A cursor move changes the footer: re-render.
+  store.cursors.set("AgentA", store.seq);
+  const afterCursor = buildDigest(store, v);
+  expect(digestRenderCount).toBe(5);
+  expect(afterCursor).toContain(`Your cursor: ${store.seq}`);
+  // Still: no recompute when nothing changed.
+  buildDigest(store, v);
+  expect(digestRenderCount).toBe(5);
+});
+test("a retention prune invalidates the cache: same seq, new tail, cache miss", () => {
+  // The staleness bug: enforceRetention splices the head without moving store.seq, and the
+  // prune's own gap record can restore the length — so seq alone AND length alone both miss it.
+  // Head seq moves on every prune, which is why it joins the key.
+  resetDigestCache();
+  for (let i = 0; i < 10; i++) post(i, `prune-msg-${i}`);
+  const v = viewer("AgentA");
+  const before = buildDigest(store, v);
+  expect(digestRenderCount).toBe(1);
+  store.config.logMaxRecords = 5;
+  const gap = enforceRetention(store, Date.now());
+  expect(gap).not.toBeNull();
+  const after = buildDigest(store, v);
+  expect(digestRenderCount).toBe(2);
+  expect(after).not.toBe(before);
+  expect(after).toContain("skipped");
+  // And the cached render equals a genuinely fresh build, not just "different".
+  resetDigestCache();
+  expect(buildDigest(store, v)).toBe(after);
+});
+
 
 // ---------------------------------------------------------------------------------------------
 // 3. K22 regression: room content cannot forge a harness tag or close the untrusted region.

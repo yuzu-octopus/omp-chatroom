@@ -63,6 +63,48 @@ function oneLine(body: string): string {
   const flat = body.replace(/\s+/g, " ").trim();
   return flat.length > BACKLOG_BODY_CHARS ? `${flat.slice(0, BACKLOG_BODY_CHARS)}…` : flat;
 }
+// Step 2 — the per-turn watermark cache: an unchanged room re-renders byte-identically (the §3.3
+// fixity tests pin this), so the second build is a map lookup. The key is every input the render
+// reads: the room root + viewer (identity), the budget, the claims generation vector (any
+// grant/release/renew/expiry changes a gen or the size), the store seq (any append bumps it), the
+// census fingerprint (the registry is NOT projected — joins/leaves/status flips must invalidate),
+// and the TTL minute bucket (claim lines render a whole-minute bucket, so a render stays valid
+// only inside its bucket). A minute-boundary crossing changes the bucket and re-renders — the
+// line content the new bucket produces is still byte-identical to a fresh build, so correctness
+// never depends on the clock staying put. New digest inputs MUST join this key (maintenance note).
+type DigestCacheEntry = { key: string; rendered: string };
+const DIGEST_CACHE = globalMap<string, DigestCacheEntry>("__roomDigestCache");
+
+/**
+ * The census the roster renders from: every id, status, and session-liveness bit, in id order.
+ * `list()` returns a fresh array per call, so this is a pure read with no retained reference.
+ */
+function censusFingerprint(): string {
+  return AgentRegistry.global()
+    .list()
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    .map((ref) => `${ref.id}:${ref.status}:${ref.session === null ? 0 : 1}`)
+    .join(",");
+}
+
+function claimsFingerprint(store: RoomStore): string {
+  return [...store.claims.values()]
+    .sort((a, b) => (a.resource < b.resource ? -1 : a.resource > b.resource ? 1 : 0))
+    .map(
+      (claim) =>
+        `${claim.resource}=${claim.holder}@${claim.acquiredAt}+${claim.ttlMs}#${claim.gen}`,
+    )
+    .join(",");
+}
+
+/** Test seam: how many full renders ran since the last reset. */
+export let digestRenderCount = 0;
+
+/** Test seam: clear the cache and the render counter. */
+export function resetDigestCache(): void {
+  DIGEST_CACHE.clear();
+  digestRenderCount = 0;
+}
 
 // §5.4 items 1-6 ONLY. The routing rule is appended separately by the hook (K5), so the budget
 // never truncates it. Every room-authored string entering the digest is escaped (K22).
@@ -71,7 +113,44 @@ export function buildDigest(
   viewer: MemberState,
   budgetTokens = DIGEST_BUDGET_TOKENS,
 ): string {
+  // The watermark: the render below reads `now` only through the whole-minute TTL bucket (the
+  // expiry clock is a fixed per-claim timestamp, so it never moves), the registry only through
+  // the census, claims only through the sorted vector, and records only through the RAW_TAIL_R
+  // tail. Everything the render reads is in the key; anything else changing re-renders. The tail
+  // needs BOTH length and head seq: a retention prune splices the head without moving `seq`, so
+  // neither alone invalidates — length misses a prune that appends its own gap record back to the
+  // same length, and head-seq alone misses nothing here but guards the shape explicitly.
   const now = Date.now();
+  const key = [
+    budgetTokens,
+    store.seq,
+    store.records.length,
+    store.records.length > 0 ? store.records[0]!.seq : -1,
+    cursorFor(store, viewer.agentId),
+    claimsFingerprint(store),
+    censusFingerprint(),
+    room(store.roomId),
+    Math.floor(now / TTL_BUCKET_MS),
+  ].join("|");
+  const cacheKey = `${store.root}::${viewer.agentId}`;
+  const hit = DIGEST_CACHE.get(cacheKey);
+  if (hit !== undefined && hit.key === key) return hit.rendered;
+  digestRenderCount += 1;
+  const rendered = renderDigest(store, viewer, budgetTokens, now);
+  DIGEST_CACHE.set(cacheKey, { key, rendered });
+  return rendered;
+}
+
+/**
+ * The full render. Pure given its arguments: `now` is passed in so the cache computes the key
+ * from the same instant the render uses.
+ */
+function renderDigest(
+  store: RoomStore,
+  viewer: MemberState,
+  budgetTokens: number,
+  now: number,
+): string {
   const cursor = cursorFor(store, viewer.agentId);
   const lag = lagFor(store, viewer.agentId);
 
@@ -148,28 +227,80 @@ export function buildDigest(
   // which appends its own `gap` record). Nothing here re-derives or re-orders a surviving line.
   const backlog = store.records.slice(-RAW_TAIL_R).map((r) => `[${r.seq}] ${room(recordLine(r))}`);
 
+  // The section headers render only when their section is non-empty; the length math below
+  // reuses these exact strings so the arithmetic can never drift from the render.
+  const ROSTER_HEAD = "Roster:";
+  const CLAIMS_HEAD = "Open claims:";
+  const RECENT_HEAD = "Recent:";
   const render = (rosterCount: number, claimCount: number, backlogDropped: number): string => {
     const lines = [...header, UNTRUSTED_OPEN];
-    if (rosterCount > 0) lines.push("Roster:", ...roster.slice(0, rosterCount));
-    if (claimCount > 0) lines.push("Open claims:", ...claims.slice(0, claimCount));
-    if (backlogDropped < backlog.length) lines.push("Recent:", ...backlog.slice(backlogDropped));
+    if (rosterCount > 0) lines.push(ROSTER_HEAD, ...roster.slice(0, rosterCount));
+    if (claimCount > 0) lines.push(CLAIMS_HEAD, ...claims.slice(0, claimCount));
+    if (backlogDropped < backlog.length) lines.push(RECENT_HEAD, ...backlog.slice(backlogDropped));
     lines.push(UNTRUSTED_CLOSE, ...footer);
     return lines.join("\n");
   };
 
+  // §5.4 U8 truncation order, linearized: the old loop re-rendered the whole digest per dropped
+  // unit (up to ~90 full renders per turn). Each line is measured once; the drop point is found
+  // with exact length arithmetic — chars plus the join newlines, so `Math.ceil(len / 4)` agrees
+  // with the loop's whole-string `estimateTokens` check bit-for-bit — and the digest renders ONCE.
+  // The search order is the loop's order (oldest backlog → shortest-TTL claims → roster tail),
+  // so the surviving lines are identical, not just equivalent.
+  const cum = (lens: readonly number[]): number[] => {
+    const out = new Array<number>(lens.length + 1).fill(0);
+    for (let i = 0; i < lens.length; i++) out[i + 1] = out[i]! + lens[i]!;
+    return out;
+  };
+  const rosterCum = cum(roster.map((line) => line.length));
+  const claimCum = cum(claims.map((line) => line.length));
+  const backlogCum = cum(backlog.map((line) => line.length));
+  const floorChars =
+    header[0]!.length +
+    UNTRUSTED_OPEN.length +
+    UNTRUSTED_CLOSE.length +
+    footer[0]!.length +
+    footer[1]!.length;
+  const lenFor = (rosterCount: number, claimCount: number, backlogDropped: number): number => {
+    let chars = floorChars;
+    let lines = 5; // header + open + close + the two footer lines; join adds lines - 1 newlines
+    if (rosterCount > 0) {
+      chars += ROSTER_HEAD.length + rosterCum[rosterCount]!;
+      lines += 1 + rosterCount;
+    }
+    if (claimCount > 0) {
+      chars += CLAIMS_HEAD.length + claimCum[claimCount]!;
+      lines += 1 + claimCount;
+    }
+    const kept = backlog.length - backlogDropped;
+    if (kept > 0) {
+      chars += RECENT_HEAD.length + (backlogCum[backlog.length]! - backlogCum[backlogDropped]!);
+      lines += 1 + kept;
+    }
+    return chars + (lines - 1);
+  };
+  const fits = (rosterCount: number, claimCount: number, backlogDropped: number): boolean =>
+    Math.ceil(lenFor(rosterCount, claimCount, backlogDropped) / 4) <= budgetTokens;
+
   let rosterCount = roster.length;
   let claimCount = claims.length;
   let backlogDropped = 0;
-  let out = render(rosterCount, claimCount, backlogDropped);
-  // §5.4 U8 truncation order: oldest backlog records → shortest-TTL claims → idle roster.
-  while (estimateTokens(out) > budgetTokens) {
-    if (backlogDropped < backlog.length) backlogDropped += 1;
-    else if (claimCount > 0) claimCount -= 1;
-    else if (rosterCount > 0) rosterCount -= 1;
-    else break; // the untruncatable floor alone exceeds the budget — keep the floor
-    out = render(rosterCount, claimCount, backlogDropped);
+  if (!fits(rosterCount, claimCount, backlogDropped)) {
+    let bd = backlogDropped + 1;
+    while (bd <= backlog.length && !fits(rosterCount, claimCount, bd)) bd += 1;
+    backlogDropped = Math.min(bd, backlog.length);
+    if (!fits(rosterCount, claimCount, backlogDropped)) {
+      let cc = claimCount - 1;
+      while (cc > 0 && !fits(rosterCount, cc, backlogDropped)) cc -= 1;
+      claimCount = Math.max(cc, 0);
+      if (!fits(rosterCount, claimCount, backlogDropped)) {
+        let rc = rosterCount - 1;
+        while (rc > 0 && !fits(rc, claimCount, backlogDropped)) rc -= 1;
+        rosterCount = Math.max(rc, 0);
+      }
+    }
   }
-  return out;
+  return render(rosterCount, claimCount, backlogDropped);
 }
 
 // F6 — the per-turn gauge that turns "digest cost at real cadence" into numbers: bytes and the

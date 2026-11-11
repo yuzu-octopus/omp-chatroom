@@ -1867,3 +1867,90 @@ test("resetRoomStores evicts every per-root global registry", async () => {
   resetRoomStores();
   expectRegistriesEvicted(store.root, store.treePath);
 });
+// --- Step 4: bounded replay without truncating history -----------------------
+
+test("bounded replay holds the tail plus one gap and skips the whole-file read", () => {
+  // A fixture log longer than the bound: the projection holds the tail + a leading
+  // gap{reason:retention} marker, the JSONL keeps every line (K19), and the read is bounded
+  // (asserted via an fstat-size-independent seam: spy on readSync's byte counts).
+  const root = tempRoot();
+  const roomId = roomIdFor(root);
+  const fd = roomLogFd(root, roomId);
+  const N = 60;
+  for (let i = 1; i <= N; i++) appendLine(fd, `${JSON.stringify(msg(i))}\n`);
+  const readSpy = spyOn(fs, "readSync");
+  try {
+    const bound = 10;
+    const { records, skipped } = replay(fd, { maxRecords: bound, tailBytes: 4096 });
+    // Tail + exactly one leading marker; the marker reuses the first kept seq (M-2).
+    expect(records).toHaveLength(bound + 1);
+    expect(records[0]!.kind).toBe("gap");
+    if (records[0]!.kind !== "gap") throw new Error("expected a leading gap");
+    expect(records[0]!.reason).toBe("retention");
+    expect(records[0]!.skipped).toBe(N - bound);
+    expect(records[0]!.seq).toBe(N - bound + 1);
+    expect(records.slice(1).map((r) => r.seq)).toEqual(
+      Array.from({ length: bound }, (_, i) => N - bound + 1 + i),
+    );
+    expect(skipped).toBe(N - bound);
+    // Bounded: never asked for more than the tail window in one read. The typed tuple only
+    // names the 3-arg form, so index through unknown for the (fd, buf, off, len, pos) shape.
+    const maxAsked = Math.max(
+      ...readSpy.mock.calls.map((c) => {
+        const len = (c as unknown as ArrayLike<unknown>)[3];
+        return typeof len === "number" ? len : 0;
+      }),
+    );
+    expect(maxAsked).toBeLessThanOrEqual(4096);
+  } finally {
+    readSpy.mockRestore();
+    closeRoomLog(root, roomId);
+  }
+  // K19: the file still holds every line.
+  expect(readLines(logPathFor(root, roomId))).toHaveLength(N);
+});
+
+test("bounded replay falls back to full replay when the file is small", () => {
+  const root = tempRoot();
+  const roomId = roomIdFor(root);
+  const fd = roomLogFd(root, roomId);
+  for (let i = 1; i <= 5; i++) appendLine(fd, `${JSON.stringify(msg(i))}\n`);
+  const { records, skipped } = replay(fd, { maxRecords: 100, tailBytes: 1_048_576 });
+  expect(records.map((r) => r.seq)).toEqual([1, 2, 3, 4, 5]);
+  expect(records.some((r) => r.kind === "gap")).toBe(false);
+  expect(skipped).toBe(0);
+  closeRoomLog(root, roomId);
+});
+
+test("reopen past the bound replays the tail: seq survives, head is a gap", () => {
+  // The retention interaction, end to end: open with a tiny cap, so the projection holds the
+  // tail + gap; the next append still mints store.seq + 1 (no seq reuse), and retention agrees
+  // about the head on the next prune. 200 records so the log exceeds the
+  // logMaxRecords(5) + REPLAY_TAIL_MARGIN(100) bound and the head is actually cut.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "room-store-"));
+  TMP.push(dir);
+  const root = `${dir}/.omp-room`;
+  saveRoomConfig(root, { ...DEFAULT_ROOM_CONFIG, logMaxRecords: 5 });
+  const roomId = roomIdFor(root);
+  const fd = roomLogFd(root, roomId);
+  const N = 200;
+  for (let i = 1; i <= N; i++) appendLine(fd, `${JSON.stringify(msg(i))}\n`);
+  closeRoomLog(root, roomId);
+  resetRoomStores();
+  const ctx = {
+    cwd: dir,
+    agent: { id: "A", kind: "main" },
+  } as unknown as ExtensionContext;
+  const store = roomStoreFor(ctx);
+  try {
+    expect(store.seq).toBe(N);
+    expect(store.records[0]!.kind).toBe("gap");
+    expect(store.records.at(-1)!.seq).toBe(N);
+    const next = store.append({ kind: "msg", from: "A", topic: "t", body: "after" });
+    expect(next.seq).toBe(N + 1);
+    const gap = enforceRetention(store, Date.now());
+    expect(gap).not.toBeNull();
+  } finally {
+    store.dispose();
+  }
+});

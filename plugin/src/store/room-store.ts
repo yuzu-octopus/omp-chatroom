@@ -3,7 +3,7 @@ import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { noteGap } from "../attention/governor";
 import { globalMap } from "../globals";
 import { logPathFor, newMessageId, topicOf } from "../ids";
-import { forgetDigestTurn } from "../onboarding/digest";
+import { forgetDigestTurn, RAW_TAIL_R } from "../onboarding/digest";
 // The sweep carries EVERY record it appends (see the tick below); `appendedSince` is the one
 // watermark slice the op paths already use (tools/room.ts:617), so the sweep reuses it rather than
 // keeping a second copy of the rule. Safe against the tools/room → store/room-store cycle: it is
@@ -13,7 +13,7 @@ import { appendedSince, forgetDeliveryChain } from "../tools/room";
 import { type ClaimState, expireStale } from "./claims";
 import { forgetCompactionRegistries, startCompactor, stopCompactor } from "./compactor";
 import { loadRoomConfig, type RoomConfig, resolveRoomId } from "./config";
-import { forgetDeliveredT0 } from "./cursors";
+import { forgetDeliveredT0, JOIN_BACKLOG } from "./cursors";
 import {
   appendLine,
   closeRoomLog,
@@ -268,7 +268,17 @@ function createStore(root: string, roomId: string): RoomStore {
   // `project()` is the single funnel: it applies claim/release generations, heldTopics, and the
   // idempotency index, so there is no second claim pass (a second pass re-applied the R1 rule
   // against final state and diverged generations whenever ownership had changed).
-  const { records } = replay(fd);
+  // The replay reads a bounded tail (plan 029): the last logMaxRecords + REPLAY_TAIL_MARGIN
+  // records plus a leading retention-style gap for the skipped prefix. The JSONL stays
+  // append-only (K19); only the in-memory projection is bounded. Small files fall back to the
+  // full read inside replay (no cut, no marker). The margin covers the two readers that reach
+  // behind the retention head (digest backlog + join window), so open and the first prune agree
+  // about the head — and a resumed cursor above the projection still clamps into the log (S2),
+  // while the gap marker tells the reader the head is missing.
+  const { records } = replay(fd, {
+    maxRecords: config.logMaxRecords + REPLAY_TAIL_MARGIN,
+    tailBytes: REPLAY_TAIL_BYTES,
+  });
   for (const record of records) {
     store.records.push(record);
     store.byId.set(record.id, record);
@@ -378,6 +388,12 @@ export function resetRoomStores(): void {
   REFS.clear();
   SESSIONS.clear();
 }
+// Step 4 — the replay bound stays consistent with `logMaxRecords` (maintenance note): the margin
+// covers the digest's RAW_TAIL_R backlog plus the JOIN_BACKLOG join window, the two readers that
+// reach behind the retention head. REPLAY_TAIL_BYTES caps the open read when records are large
+// (maxBodyBytes 8192 × (logMaxRecords + margin) would otherwise size the whole file read).
+export const REPLAY_TAIL_MARGIN = RAW_TAIL_R + JOIN_BACKLOG;
+export const REPLAY_TAIL_BYTES = 4_194_304;
 
 // §3.6 S5 pruning job — in-memory records array ONLY; the JSONL file is never truncated (K19).
 export const PRUNE_INTERVAL_MS = 60_000; // [invented]
