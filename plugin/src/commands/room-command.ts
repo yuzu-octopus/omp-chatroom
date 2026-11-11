@@ -1,9 +1,8 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@oh-my-pi/pi-coding-agent";
-import { AgentRegistry } from "@oh-my-pi/pi-coding-agent";
 import { resourceKey } from "../ids";
 import { safeRoomText } from "../onboarding/escape";
 import { openRoomPanel } from "../panel/panel";
-import { contended, grant, reclaimIfStale, release, renew } from "../store/claims";
+import { grant, reclaimIfStale, release, renew } from "../store/claims";
 import {
   configPath,
   DEFAULT_ROOM_CONFIG,
@@ -12,12 +11,12 @@ import {
   resolveRoomConfig,
   saveRoomConfig,
 } from "../store/config";
-import { cursorFor, initCursor, lagFor } from "../store/cursors";
+import { cursorFor, initCursor } from "../store/cursors";
 // §3.4 — the canonical lease bounds, shared with the tool and with replay, so a widened command
 // cannot mint a lease the log validator would quarantine on the next open.
 import { CLAIM_TTL_MAX_MS, CLAIM_TTL_MIN_MS } from "../store/log";
 import { type RoomStore, roomStoreFor } from "../store/room-store";
-import { appendedSince, notifyRecipients } from "../tools/room";
+import { appendedSince, buildBoard, notifyRecipients, viewerStateFor } from "../tools/room";
 
 export const ROOM_COMMAND_NAME = "room";
 
@@ -76,45 +75,34 @@ function report(
 
 /** §4.1 board return shape, rendered for a human instead of for `details`. */
 function boardLines(store: RoomStore, viewerId: string): string[] {
-  const registry = AgentRegistry.global();
+  // The DATA is canonical (tools/room.ts `buildBoard`): one claim/roster/topic scan for both
+  // surfaces, so a new field lands in both. Only the RENDERING differs — the human header and
+  // the uncapped per-row countdown/counts vs the model's capped waiting/dependsOn lists.
+  const board = buildBoard(store, viewerStateFor(store, viewerId));
   const lines = [
     `room ${safe(store.roomId)} — ${store.members.size} member(s) · ${store.claims.size} claim(s) · ${store.records.length} record(s)`,
   ];
 
-  if (store.claims.size === 0) lines.push("claims: none");
-  for (const claim of store.claims.values()) {
-    const left = Math.max(0, Math.round((claim.acquiredAt + claim.ttlMs - Date.now()) / 1000));
-    const waiting = contended(store, claim.resource).length;
+  if (board.claims.length === 0) lines.push("claims: none");
+  for (const claim of board.claims) {
+    const left = Math.max(0, Math.round((claim.expiresAt - Date.now()) / 1000));
     lines.push(
       `claim ${safe(claim.resource)} · holder ${safe(claim.holder)} · ${left}s left` +
-        (waiting > 0 ? ` · ${waiting} waiting` : ""),
+        (claim.waiting.length > 0 ? ` · ${claim.waiting.length} waiting` : ""),
     );
   }
 
-  if (store.members.size === 0) lines.push("roster: empty");
-  for (const member of store.members.values()) {
-    const status = registry.get(member.agentId)?.status ?? "unknown";
+  if (board.roster.length === 0) lines.push("roster: empty");
+  for (const member of board.roster) {
     lines.push(
-      `member ${safe(member.agentId)} [${status}] · cursor ${cursorFor(store, member.agentId)}` +
-        ` · lag ${lagFor(store, member.agentId)}`,
+      `member ${safe(member.agentId)} [${member.status}] · cursor ${member.cursor}` +
+        ` · lag ${member.lag}`,
     );
   }
 
-  const cursor = cursorFor(store, viewerId);
-  const topics = new Map<string, { lastSeq: number; unread: number }>();
-  for (const record of store.records) {
-    if (record.kind !== "msg" && record.kind !== "note") continue;
-    let row = topics.get(record.topic);
-    if (!row) {
-      row = { lastSeq: record.seq, unread: 0 };
-      topics.set(record.topic, row);
-    }
-    row.lastSeq = record.seq;
-    if (record.seq > cursor) row.unread += 1;
-  }
-  if (topics.size === 0) lines.push("topics: none");
-  for (const [topic, row] of topics) {
-    lines.push(`topic ${safe(topic)} · last seq ${row.lastSeq} · unread ${row.unread}`);
+  if (board.topics.length === 0) lines.push("topics: none");
+  for (const row of board.topics) {
+    lines.push(`topic ${safe(row.topic)} · last seq ${row.lastSeq} · unread ${row.unread}`);
   }
   return lines;
 }
