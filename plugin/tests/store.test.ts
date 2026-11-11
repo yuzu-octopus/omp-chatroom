@@ -1312,9 +1312,10 @@ test("findWaitCycle detects a first-waiter self-cycle with no prior edges", () =
   // No setWaitEdges call: the root has no edge map at all. A wait for a message from oneself
   // still closes a cycle (only the waiter could satisfy it, and it is blocked).
   const root = tempRoot();
-  expect(
-    findWaitCycle(root, "A", [{ kind: "message", from: "A" }], () => undefined),
-  ).toEqual(["A", "A"]);
+  expect(findWaitCycle(root, "A", [{ kind: "message", from: "A" }], () => undefined)).toEqual([
+    "A",
+    "A",
+  ]);
   // … while an unsatisfiable-by-anyone wait with no self-reference stays clean.
   expect(findWaitCycle(root, "B", [{ kind: "message", from: "C" }], () => undefined)).toBeNull();
 });
@@ -1326,13 +1327,14 @@ test("findWaitCycle follows a filterless message wait to any other blocked agent
   const root = tempRoot();
   setWaitEdges(root, "A", [{ kind: "message" }]);
   setWaitEdges(root, "B", [{ kind: "message", from: "R" }]);
-  expect(
-    findWaitCycle(root, "R", [{ kind: "message", from: "A" }], () => undefined),
-  ).toEqual(["R", "A", "B", "R"]);
+  expect(findWaitCycle(root, "R", [{ kind: "message", from: "A" }], () => undefined)).toEqual([
+    "R",
+    "A",
+    "B",
+    "R",
+  ]);
   // … while an outsider whose wait resolves via an unblocked agent stays clean.
-  expect(
-    findWaitCycle(root, "C", [{ kind: "message", from: "D" }], () => undefined),
-  ).toBeNull();
+  expect(findWaitCycle(root, "C", [{ kind: "message", from: "D" }], () => undefined)).toBeNull();
 });
 test("disposeRoomSession forgets delivered-T0 marks, so a later room re-sends owed steers", () => {
   const root = tempRoot();

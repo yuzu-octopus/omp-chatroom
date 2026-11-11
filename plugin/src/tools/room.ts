@@ -273,7 +273,11 @@ function overCap(field: string, value: string, max: number): string | null {
  * longer than the roster — a list longer than the agents that exist names nobody.
  * The entries are untrusted at this boundary, so a non-string is refused rather than coerced.
  */
-export function overListCap(field: string, values: readonly unknown[], idMax: number): string | null {
+export function overListCap(
+  field: string,
+  values: readonly unknown[],
+  idMax: number,
+): string | null {
   if (values.length > ROSTER_CAP) {
     return `${field} names ${values.length} entries; the cap is ${ROSTER_CAP} (the roster cap)`;
   }
