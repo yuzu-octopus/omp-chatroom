@@ -236,7 +236,12 @@ export function acquireRoomLock(root: string): void {
             error.message.startsWith("room is per-process"))
         )
           throw error;
-        // ESRCH: owner dead → stale lock, fall through and reap it.
+        // ESRCH: no such pid, the owner is dead → stale lock, fall through and reap it. Any
+        // OTHER kill failure (EPERM: the pid belongs to another user and is alive; EINVAL and
+        // anything unexpected) proves nothing about death — treat the owner as LIVE and refuse.
+        if (errnoCode(error) !== "ESRCH") {
+          throw new Error(`room file locked by pid ${found.owner}`);
+        }
       }
     } else if (found.ageMs < LOCK_MID_CREATE_MS) {
       // Another writer is between create and write (an old-format creator) or crashed within
@@ -250,6 +255,15 @@ export function acquireRoomLock(root: string): void {
       continue;
     }
     // Stale: a dead pid, non-file garbage, or an unreadable file past the freshness window.
+    // Re-inspect BEFORE unlinking: the file may have been replaced since `found` was read — a
+    // live writer's lock could be standing on the name by now, and unlinking it would let two
+    // processes mint colliding seqs. Only unlink when the lock still names the same dead owner
+    // (or the same unreadable shape); anything else loops back to the top for a fresh decision.
+    const again = inspectLock(lockPath);
+    const sameOwner =
+      found.kind === "owner" && again.kind === "owner" && again.owner === found.owner;
+    const sameGarbage = found.kind === "unreadable" && again.kind === "unreadable";
+    if (!sameOwner && !sameGarbage) continue;
     fs.rmSync(lockPath, { force: true, recursive: true });
   }
 }

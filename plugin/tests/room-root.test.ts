@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -546,4 +546,82 @@ test("migration refuses a symlinked legacy room dir before taking its lock", () 
   expect(migrateLegacyRoom(legacy, target)).toBe(false);
   expect(snapshotTree(outside)).toEqual(before);
   expect(fs.existsSync(path.join(target, "room"))).toBe(false);
+});
+
+// --- plan 026: lock liveness + reap identity --------------------------------------
+
+/** A kill failure with an errno code, shaped like the kernel's (errnoCode reads `.code`). */
+function killError(code: string, pid: number): NodeJS.ErrnoException {
+  const error = new Error(`kill ${pid}: ${code}`) as NodeJS.ErrnoException;
+  error.code = code;
+  return error;
+}
+
+test("a lock whose owner kill rejects with EPERM is live, never reaped", () => {
+  // EPERM means the pid belongs to another user and is ALIVE: reaping it would hand the room to
+  // two writers. Only ESRCH (no such pid) proves death.
+  const root = tempRoot();
+  const lockPath = lockPathFor(root);
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+  const otherPid = 999_999_998; // no such pid: the stub decides liveness, not the kernel
+  fs.writeFileSync(lockPath, String(otherPid));
+  const realKill = process.kill.bind(process);
+  const killSpy = spyOn(process, "kill");
+  killSpy.mockImplementation(((pid: number) => {
+    if (pid === otherPid) throw killError("EPERM", pid);
+    return realKill(pid, 0);
+  }) as never);
+  const rmSpy = spyOn(fs, "rmSync");
+  try {
+    let message = "";
+    try {
+      acquireRoomLock(root);
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toBe(`room file locked by pid ${otherPid}`);
+    expect(fs.readFileSync(lockPath, "utf-8")).toBe(String(otherPid)); // never reaped
+    expect(rmSpy.mock.calls.some((call) => call[0] === lockPath)).toBe(false);
+  } finally {
+    killSpy.mockRestore();
+    rmSpy.mockRestore();
+  }
+});
+
+test("a stale lock replaced by a live lock before the reap is not unlinked", () => {
+  // The reap window: the kill stub publishes a live writer's lock between the liveness check and
+  // the unlink. The re-inspect must see the new owner, loop back, and refuse on the LIVE lock —
+  // unlinking it would let two processes mint colliding seqs.
+  const root = tempRoot();
+  const lockPath = lockPathFor(root);
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+  const deadPid = 999_999_999; // no such pid
+  fs.writeFileSync(lockPath, String(deadPid));
+  const livePid = process.ppid;
+  const realKill = process.kill.bind(process);
+  const killSpy = spyOn(process, "kill");
+  killSpy.mockImplementation(((pid: number) => {
+    if (pid === deadPid) {
+      fs.writeFileSync(lockPath, String(livePid)); // the race, simulated inside the window
+      throw killError("ESRCH", pid);
+    }
+    return realKill(pid, 0);
+  }) as never);
+  const rmSpy = spyOn(fs, "rmSync");
+  try {
+    let message = "";
+    try {
+      acquireRoomLock(root);
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    // The re-check saw a different owner, looped back, and refused on the live lock (EPERM on the
+    // parent and a live check agree here: either way the owner counts as live, same message).
+    expect(message).toBe(`room file locked by pid ${livePid}`);
+    expect(fs.readFileSync(lockPath, "utf-8")).toBe(String(livePid)); // never unlinked
+    expect(rmSpy.mock.calls.some((call) => call[0] === lockPath)).toBe(false);
+  } finally {
+    killSpy.mockRestore();
+    rmSpy.mockRestore();
+  }
 });

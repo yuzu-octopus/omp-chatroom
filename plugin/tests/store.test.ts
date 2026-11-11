@@ -7,8 +7,14 @@ import { AgentRegistry, type ExtensionAPI, type ExtensionContext } from "@oh-my-
 import { resolveLocalRoot } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
 import { classify } from "../src/attention/tiers";
 import { logPathFor, newMessageId, resourceKey, roomIdFor } from "../src/ids";
+import {
+  DIGEST_STATS_ENV,
+  DIGEST_STATS_PATH_ENV,
+  recordDigestTurn,
+} from "../src/onboarding/digest";
 import { registerHooks } from "../src/onboarding/hook";
 import { enqueueWaiter, grant, release, renew } from "../src/store/claims";
+import { __compactTest, withWriteMutex } from "../src/store/compactor";
 import {
   configPath,
   DEFAULT_ROOM_CONFIG,
@@ -49,13 +55,15 @@ import {
   idemIndexKey,
   type RoomStore,
   registerSweepNotifier,
+  resetRoomStores,
   roomStoreFor,
   roomTimers,
   storeFor,
 } from "../src/store/room-store";
 import type { RoomRecord } from "../src/store/schema";
+import { openTreeStore } from "../src/store/tree-store";
 import { findWaitCycle, setWaitEdges } from "../src/store/wait-graph";
-import { registerRoomTool } from "../src/tools/room";
+import { notifyRecipients, registerRoomTool } from "../src/tools/room";
 import { zodStub } from "./zod-stub";
 
 // --- fixtures -------------------------------------------------------------
@@ -1745,4 +1753,117 @@ test("reset() drops the idempotency index: a retried key posts fresh", () => {
   } finally {
     s.dispose();
   }
+});
+// --- plan 026: dispose scope + per-root registry eviction ----------------------
+
+/** A session ctx on one shared cwd (→ one shared room root), differing only by agent id. */
+function sessionOn(root: string, id: string): ExtensionContext {
+  return {
+    cwd: root,
+    agent: { id, kind: "main" },
+    localProtocolOptions: { root },
+    setInterval: () => 0,
+    clearInterval: () => {},
+  } as unknown as ExtensionContext;
+}
+
+/** White-box leak probe: the per-root global maps are globalThis-anchored by design (I2/K9), so a test can ask whether a root still holds an entry without new production surface. */
+function hasRegistryEntry(mapKey: string, entryKey: string): boolean {
+  const map = (globalThis as Record<string, unknown>)[mapKey];
+  return map instanceof Map ? map.has(entryKey) : false;
+}
+
+test("disposing one of two sessions keeps the survivor's delivered marks and wait edges", () => {
+  // The first session to leave must not wipe per-ROOT state a still-live session depends on:
+  // GIVEN marks (the next pass would re-send T0s as a wake+steer storm) or wait edges (blinding
+  // cycle detection for still-waiting peers).
+  const root = tempRoot();
+  const ctxA = sessionOn(root, "A");
+  const ctxB = sessionOn(root, "B");
+  const store = roomStoreFor(ctxA);
+  roomStoreFor(ctxB);
+  markDeliveredT0(store.root, "B", 7);
+  setWaitEdges(store.root, "A", [{ kind: "agent", agentId: "B" }]);
+  setWaitEdges(store.root, "B", [{ kind: "agent", agentId: "A" }]);
+  expect(
+    findWaitCycle(store.root, "A", [{ kind: "agent", agentId: "B" }], () => undefined),
+  ).not.toBeNull();
+
+  disposeRoomSession(ctxA);
+  // B still lives: its marks and the graph survive A's departure.
+  expect(deliveredT0s(store.root, "B").has(7)).toBe(true);
+  expect(
+    findWaitCycle(store.root, "A", [{ kind: "agent", agentId: "B" }], () => undefined),
+  ).not.toBeNull();
+
+  disposeRoomSession(ctxB); // last session → evicted
+  expect(deliveredT0s(store.root, "B").size).toBe(0);
+  expect(
+    findWaitCycle(store.root, "A", [{ kind: "agent", agentId: "B" }], () => undefined),
+  ).toBeNull();
+});
+
+/** Seed every per-root global registry for the eviction tests below. */
+async function seedRootRegistries(store: RoomStore, ctx: ExtensionContext): Promise<void> {
+  AgentRegistry.resetGlobalForTests(); // no recipients: the delivery pass settles with no targets
+  markDeliveredT0(store.root, "B", 7);
+  setWaitEdges(store.root, "B", [{ kind: "agent", agentId: "A" }]);
+  await notifyRecipients({} as ExtensionAPI, ctx, store, [], "A"); // DELIVERY_CHAIN
+  __compactTest.setSpendToday(store.root, 5); // SPEND
+  await withWriteMutex(store.root, async () => {}); // MUTEX
+  openTreeStore(store.treePath, 0).ready(); // QUEUES (seed only — no disk writes)
+  Bun.env[DIGEST_STATS_ENV] = "1";
+  const out = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "room-digest-")), "stats.jsonl");
+  TMP.push(path.dirname(out));
+  Bun.env[DIGEST_STATS_PATH_ENV] = out;
+  try {
+    recordDigestTurn(store, "render"); // PREV_DIGESTS
+  } finally {
+    delete Bun.env[DIGEST_STATS_ENV];
+    delete Bun.env[DIGEST_STATS_PATH_ENV];
+  }
+}
+
+function expectRegistriesSeeded(root: string, treePath: string): void {
+  expect(hasRegistryEntry("__roomDeliveredT0", root)).toBe(true);
+  expect(hasRegistryEntry("__roomWaitEdges", root)).toBe(true);
+  expect(hasRegistryEntry("__roomDeliveryChain", root)).toBe(true);
+  expect(hasRegistryEntry("__roomCompactionSpend", root)).toBe(true);
+  expect(hasRegistryEntry("__roomCompactionMutex", root)).toBe(true);
+  expect(hasRegistryEntry("__roomTreeReady", treePath)).toBe(true);
+  expect(hasRegistryEntry("__roomPrevDigests", root)).toBe(true);
+}
+
+function expectRegistriesEvicted(root: string, treePath: string): void {
+  expect(hasRegistryEntry("__roomDeliveredT0", root)).toBe(false);
+  expect(hasRegistryEntry("__roomWaitEdges", root)).toBe(false);
+  expect(hasRegistryEntry("__roomDeliveryChain", root)).toBe(false);
+  expect(hasRegistryEntry("__roomCompactionSpend", root)).toBe(false);
+  expect(hasRegistryEntry("__roomCompactionMutex", root)).toBe(false);
+  expect(hasRegistryEntry("__roomTreeReady", treePath)).toBe(false);
+  expect(hasRegistryEntry("__roomPrevDigests", root)).toBe(false);
+}
+
+test("last-session dispose evicts every per-root global registry", async () => {
+  // Five maps keyed by root leaked one entry per root for process life; the last dispose evicts all.
+  const root = tempRoot();
+  const ctx = sessionOn(root, "A");
+  const store = roomStoreFor(ctx);
+  await seedRootRegistries(store, ctx);
+  expectRegistriesSeeded(store.root, store.treePath);
+
+  disposeRoomSession(ctx);
+  expectRegistriesEvicted(store.root, store.treePath);
+});
+
+test("resetRoomStores evicts every per-root global registry", async () => {
+  // The test seam must evict everything dispose evicts, or tests leak state between files.
+  const root = tempRoot();
+  const ctx = sessionOn(root, "A");
+  const store = roomStoreFor(ctx);
+  await seedRootRegistries(store, ctx);
+  expectRegistriesSeeded(store.root, store.treePath);
+
+  resetRoomStores();
+  expectRegistriesEvicted(store.root, store.treePath);
 });

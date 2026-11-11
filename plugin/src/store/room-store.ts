@@ -3,14 +3,15 @@ import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { noteGap } from "../attention/governor";
 import { globalMap } from "../globals";
 import { logPathFor, newMessageId, topicOf } from "../ids";
+import { forgetDigestTurn } from "../onboarding/digest";
 // The sweep carries EVERY record it appends (see the tick below); `appendedSince` is the one
 // watermark slice the op paths already use (tools/room.ts:617), so the sweep reuses it rather than
 // keeping a second copy of the rule. Safe against the tools/room → store/room-store cycle: it is
 // only called from the timer callback, long after both module bodies have evaluated, and neither
 // module touches the other's bindings at module scope.
-import { appendedSince } from "../tools/room";
+import { appendedSince, forgetDeliveryChain } from "../tools/room";
 import { type ClaimState, expireStale } from "./claims";
-import { startCompactor, stopCompactor } from "./compactor";
+import { forgetCompactionRegistries, startCompactor, stopCompactor } from "./compactor";
 import { loadRoomConfig, type RoomConfig, resolveRoomId } from "./config";
 import { forgetDeliveredT0 } from "./cursors";
 import {
@@ -23,7 +24,7 @@ import {
 } from "./log";
 import { legacyRoomRoot, openMigratedRoom, roomRootFor } from "./room-root";
 import type { RoomRecord, RoomRecordDraft } from "./schema";
-import { invalidateTree } from "./tree-store";
+import { forgetTreeQueue, invalidateTree } from "./tree-store";
 import { forgetWaitEdges } from "./wait-graph";
 
 // K11 — MemberState is declared ONCE, here (the store owns it); imported by tiers, governor,
@@ -341,10 +342,26 @@ export function disposeRoomSession(ctx: ExtensionContext): void {
   if (set === undefined || !set.delete(ctx.agent.id)) return;
   if (set.size === 0) SESSIONS.delete(root);
   STORES.get(root)?.dispose();
-  // The delivered-T0 registry lives in a globalThis map keyed by root: without this it grew a
-  // key per project for the life of the process. The wait-edge graph is the same shape.
+  // The registries below are per-ROOT while sessions share the root: the first session to leave
+  // must not wipe state a still-live session depends on (GIVEN marks — the next pass would
+  // re-send T0s as a wake+steer storm — or wait edges — blinding cycle detection for
+  // still-waiting peers). Only the dispose that evicted the root cleans up.
+  if (STORES.has(root) || SESSIONS.has(root)) return;
   forgetDeliveredT0(root);
   forgetWaitEdges(root);
+  evictRootRegistries(root);
+}
+
+/**
+ * Evict every per-root global registry the dispose/reset paths own. `treePath` defaults to the
+ * layout `createStore` mints (`<root>/room/tree/`); `resetRoomStores` passes the live store's
+ * path instead so a caller that overrode it still evicts the right queue.
+ */
+function evictRootRegistries(root: string, treePath = `${root}/room/tree/`): void {
+  forgetDeliveryChain(root);
+  forgetCompactionRegistries(root);
+  forgetTreeQueue(treePath);
+  forgetDigestTurn(root);
 }
 
 export function resetRoomStores(): void {
@@ -355,6 +372,7 @@ export function resetRoomStores(): void {
     closeRoomLog(root, store.roomId);
     forgetDeliveredT0(root);
     forgetWaitEdges(root);
+    evictRootRegistries(root, store.treePath);
   }
   STORES.clear();
   REFS.clear();
