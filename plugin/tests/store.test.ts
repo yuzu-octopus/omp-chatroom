@@ -1733,15 +1733,15 @@ test("reset() drops the idempotency index: a retried key posts fresh", () => {
     const first = s.append({ kind: "msg", from: "A", topic: "t", body: "b", idemKey: "k1" });
     expect(s.idemKeys.size).toBe(1);
     // The pre-reset duplicate is suppressed at the index level: the key
-    // still maps to the first record's seq.
-    expect(s.idemKeys.get(idemIndexKey("A", "k1"))).toBe(first.seq);
+    // still maps to the first record's id (025 changed the value from seq to id).
+    expect(s.idemKeys.get(idemIndexKey("A", "k1"))).toBe(first.id);
 
     s.reset();
     expect(s.idemKeys.size).toBe(0);
     const second = s.append({ kind: "msg", from: "A", topic: "t", body: "b", idemKey: "k1" });
     expect(s.records).toHaveLength(1);
     expect(second.seq).toBe(1);
-    expect(s.idemKeys.get(idemIndexKey("A", "k1"))).toBe(second.seq);
+    expect(s.idemKeys.get(idemIndexKey("A", "k1"))).toBe(second.id);
   } finally {
     s.dispose();
   }
