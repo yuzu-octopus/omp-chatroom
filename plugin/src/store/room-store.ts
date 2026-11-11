@@ -10,7 +10,7 @@ import { forgetDigestTurn } from "../onboarding/digest";
 // only called from the timer callback, long after both module bodies have evaluated, and neither
 // module touches the other's bindings at module scope.
 import { appendedSince, forgetDeliveryChain } from "../tools/room";
-import { type ClaimState, expireStale, hydrateClaims } from "./claims";
+import { type ClaimState, expireStale } from "./claims";
 import { forgetCompactionRegistries, startCompactor, stopCompactor } from "./compactor";
 import { loadRoomConfig, type RoomConfig, resolveRoomId } from "./config";
 import { forgetDeliveredT0 } from "./cursors";
@@ -269,7 +269,6 @@ function createStore(root: string, roomId: string): RoomStore {
     if (record.seq > store.seq) store.seq = record.seq;
     project(store, record);
   }
-  hydrateClaims(store, records);
 
   return store;
 }
