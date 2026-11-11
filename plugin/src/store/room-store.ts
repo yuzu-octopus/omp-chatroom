@@ -9,7 +9,7 @@ import { logPathFor, newMessageId, topicOf } from "../ids";
 // only called from the timer callback, long after both module bodies have evaluated, and neither
 // module touches the other's bindings at module scope.
 import { appendedSince } from "../tools/room";
-import { type ClaimState, expireStale, hydrateClaims } from "./claims";
+import { type ClaimState, expireStale } from "./claims";
 import { startCompactor, stopCompactor } from "./compactor";
 import { loadRoomConfig, type RoomConfig, resolveRoomId } from "./config";
 import { forgetDeliveredT0 } from "./cursors";
@@ -253,14 +253,19 @@ function createStore(root: string, roomId: string): RoomStore {
       store.records.length = 0;
       store.byId.clear();
       store.claims.clear();
+      store.claimGens.clear();
       store.cursors.clear();
       store.members.clear();
       store.waiters.clear();
+      store.idemKeys.clear();
       store.seq = 0;
     },
   };
 
   // §3.3/§3.4 — first open rebuilds the projection and claim state by replaying the log.
+  // `project()` is the single funnel: it applies claim/release generations, heldTopics, and the
+  // idempotency index, so there is no second claim pass (a second pass re-applied the R1 rule
+  // against final state and diverged generations whenever ownership had changed).
   const { records } = replay(fd);
   for (const record of records) {
     store.records.push(record);
@@ -268,7 +273,6 @@ function createStore(root: string, roomId: string): RoomStore {
     if (record.seq > store.seq) store.seq = record.seq;
     project(store, record);
   }
-  hydrateClaims(store, records);
 
   return store;
 }
