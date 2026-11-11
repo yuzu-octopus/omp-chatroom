@@ -3,17 +3,15 @@ import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { noteGap } from "../attention/governor";
 import { globalMap } from "../globals";
 import { logPathFor, newMessageId, topicOf } from "../ids";
-import { forgetDigestTurn, RAW_TAIL_R } from "../onboarding/digest";
+import { forgetDigestTurn } from "../onboarding/digest";
 // The sweep carries EVERY record it appends (see the tick below); `appendedSince` is the one
-// watermark slice the op paths already use (tools/room.ts:617), so the sweep reuses it rather than
-// keeping a second copy of the rule. Safe against the tools/room → store/room-store cycle: it is
-// only called from the timer callback, long after both module bodies have evaluated, and neither
-// module touches the other's bindings at module scope.
-import { appendedSince, forgetDeliveryChain } from "../tools/room";
+// watermark slice the op paths already use — and it lives HERE now (moved from tools/room.ts,
+// plan 030 Step 4), so the old tools/room → store/room-store runtime edge is gone.
+import { forgetDeliveryChain } from "../tools/room";
 import { type ClaimState, expireStale } from "./claims";
 import { forgetCompactionRegistries, startCompactor, stopCompactor } from "./compactor";
 import { loadRoomConfig, type RoomConfig, resolveRoomId } from "./config";
-import { forgetDeliveredT0, JOIN_BACKLOG } from "./cursors";
+import { forgetDeliveredT0 } from "./cursors";
 import {
   appendLine,
   closeRoomLog,
@@ -71,6 +69,13 @@ export interface RoomStore {
    */
   deliveries: { T0: number; T1: number; T2: number };
   /**
+   * The recall observatory (plan 032): how many recalls ran and how many found nothing, since
+   * this store opened. Session-scoped like `deliveries` (not logged, not replayed): a miss is an
+   * op outcome, not a room fact, so retention prunes never shift it and reopen resets it. The
+   * embeddings revisit trigger reads this, not the JSONL.
+   */
+  recallStats: { recalls: number; misses: number };
+  /**
    * R7 — the idempotency index: `<agent>+<key>` → the id of the record that key produced. A
    * repeat of a post with the same key returns that record instead of appending a second one:
    * a retried post would otherwise double-wake every mentioned peer, and a T0 is a wake+steer.
@@ -113,6 +118,43 @@ function newMember(agentId: string, joinedAtSeq: number): MemberState {
   };
 }
 
+/**
+ * The fresh-member shape, shared by the ensure and lookup paths (moved from tools/room.ts,
+ * plan 030 Step 4: MemberState is owned HERE, so its constructors live here too).
+ */
+function freshViewer(store: RoomStore, agentId: string): MemberState {
+  return {
+    agentId,
+    joinedAtSeq: store.seq,
+    topics: new Set(),
+    muted: new Set(),
+    threadRoots: new Set(),
+    heldTopics: new Set(),
+  };
+}
+
+/** Mint-or-fetch the viewer's member row (join/claim/post paths, where the mutation persists). */
+export function viewerFor(store: RoomStore, agentId: string): MemberState {
+  const existing = store.members.get(agentId);
+  if (existing) return existing;
+  const fresh = freshViewer(store, agentId);
+  store.members.set(agentId, fresh);
+  return fresh;
+}
+
+/**
+ * Read-only viewer state for classification; never mints membership. Use this on every path that
+ * only READS the viewer (read/board/topics delivery classification). Use `viewerFor` only where
+ * the mutation must persist (join/claim/post, wait_for_claim's waitedResource).
+ */
+export function viewerStateFor(store: RoomStore, agentId: string): MemberState {
+  return store.members.get(agentId) ?? freshViewer(store, agentId);
+}
+
+/** The records an operation appended: everything with a seq above the pre-op watermark. */
+export function appendedSince(store: RoomStore, before: number): RoomRecord[] {
+  return store.records.filter((r) => r.seq > before);
+}
 /** R7 — the idempotency index key: the poster's id and their key, so two agents can pick the
  * same key string without colliding (Stripe scopes its keys per account). */
 export function idemIndexKey(agentId: string, key: string): string {
@@ -206,6 +248,7 @@ function createStore(root: string, roomId: string): RoomStore {
     waiters: new Map(),
     listeners: new Set(),
     deliveries: { T0: 0, T1: 0, T2: 0 },
+    recallStats: { recalls: 0, misses: 0 },
     idemKeys: new Map(),
     seq: 0,
 
@@ -389,10 +432,11 @@ export function resetRoomStores(): void {
   SESSIONS.clear();
 }
 // Step 4 — the replay bound stays consistent with `logMaxRecords` (maintenance note): the margin
-// covers the digest's RAW_TAIL_R backlog plus the JOIN_BACKLOG join window, the two readers that
-// reach behind the retention head. REPLAY_TAIL_BYTES caps the open read when records are large
-// (maxBodyBytes 8192 × (logMaxRecords + margin) would otherwise size the whole file read).
-export const REPLAY_TAIL_MARGIN = RAW_TAIL_R + JOIN_BACKLOG;
+// covers the digest's RAW_TAIL_R backlog (50) plus the JOIN_BACKLOG join window (50), the two
+// readers that reach behind the retention head. Written as literals, not imports: digest.ts reads
+// this store module, so importing its constant back would be a runtime cycle (use-before-init).
+// If either window changes, update this margin to match — the reopen test pins the coverage.
+export const REPLAY_TAIL_MARGIN = 100;
 export const REPLAY_TAIL_BYTES = 4_194_304;
 
 // §3.6 S5 pruning job — in-memory records array ONLY; the JSONL file is never truncated (K19).

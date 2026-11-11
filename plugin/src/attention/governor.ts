@@ -1,6 +1,7 @@
 import { estimateTokens } from "../onboarding/digest";
 import { safeRoomText } from "../onboarding/escape";
-import type { MemberState, RoomStore } from "../store/room-store"; // MemberState is owned here (K11)
+import { deliveredT0s } from "../store/cursors";
+import { type MemberState, type RoomStore, viewerStateFor } from "../store/room-store";
 import type { RoomRecord } from "../store/schema";
 import { roomBodyOf } from "./delivery";
 import { classify } from "./tiers";
@@ -334,7 +335,47 @@ export function unreadCounts(store: RoomStore, viewer: MemberState): Map<string,
   }
   return counts;
 }
-
+/**
+ * The seq just below the oldest record this recipient still OWES — the floor no cursor bump may
+ * cross. `null` when it owes nothing. (Moved from tools/room.ts, plan 030 Step 4: the attention
+ * governor owns floors; the dispatcher only calls it.)
+ * Shared with the sweep's expiry notice (plugin/src/onboarding/hook.ts), which delivers OUTSIDE a
+ * delivery pass: the notice is a T0 at the room head, and an uncapped bump would carry the
+ * holder's cursor over every record it had not read yet — those records would fall below the
+ * cursor and `room{op:"read"}` could never return them.
+ *
+ * `exceptSeq` excludes the record being delivered (the notice's own release record).
+ */
+export function owedFloorFor(
+  store: RoomStore,
+  target: string,
+  exceptSeq?: number,
+  options: { gapsOwed?: boolean } = {},
+): number | null {
+  const viewer = viewerStateFor(store, target);
+  const cursor = store.cursors.get(target) ?? 0;
+  // A GIVEN seq owes nothing: it was handed to the recipient (a delivered T0, an uncertain send
+  // whose bound expired, a T0 batched into the ceiling summary) and only a floor kept it above
+  // the cursor. Left in the owed set it pins the cap at its seq-1 for EVERY later delivery, so
+  // the cursor freezes and the T1 window fills with already-sent records — the record is still
+  // readable (nothing bumped the cursor past it) and a later confirmed delivery may carry the
+  // cursor over it, which is honest: it was given.
+  const given = deliveredT0s(store.root, target);
+  const owed = store.records.filter(
+    (r) =>
+      r.seq > cursor &&
+      r.seq !== exceptSeq &&
+      !given.has(r.seq) &&
+      // A `gap` is CARRIED by the next pass, not owed (see `deliverToTarget`) — unless the caller
+      // is NOT a delivery pass. The sweep's expiry notice is not one: nothing carries the gap, so
+      // a cursor bump past it would lose the notice that records were skipped.
+      (r.kind !== "gap" || options.gapsOwed === true) &&
+      !isMuted(store, viewer, r) &&
+      classify(r, viewer) !== "T2",
+  );
+  if (owed.length === 0) return null;
+  return owed.reduce((min, r) => Math.min(min, r.seq), Number.POSITIVE_INFINITY);
+}
 // --- retention gap notice -------------------------------------------------
 
 export function noteGap(

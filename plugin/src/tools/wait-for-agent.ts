@@ -19,6 +19,7 @@ import {
 } from "../cards/tool-cards";
 import { hostSchema } from "../host-schema";
 import { safeRoomText } from "../onboarding/escape";
+import { clampTimeout } from "../store/config";
 import { type RoomStore, roomStoreFor } from "../store/room-store";
 import { clearWaitEdges, findWaitCycle, setWaitEdges } from "../store/wait-graph";
 import type { WaitOutcome } from "./wait-for-claim"; // K11 — declared once, there
@@ -56,10 +57,6 @@ export type WaitForAgentResult = AgentToolResult<WaitForAgentDetails>;
 
 /** K22/S1 — every room-authored / caller-supplied string reaching the model is sanitised. */
 const safe = safeRoomText;
-
-/** The schema's documented bounds are the contract; this is the one place they are applied. */
-const clamp = (value: number, lo: number, hi: number): number =>
-  Math.min(hi, Math.max(lo, Math.trunc(value)));
 
 /** A snapshot row per named agent; an unregistered id reports `parked` (it is gone, not running). */
 function snapshot(
@@ -134,7 +131,7 @@ async function waitForAgent(
   }
 
   const registry = AgentRegistry.global();
-  const timeoutMs = clamp(params.timeout ?? WAIT_DEFAULT_TIMEOUT_MS, WAIT_MIN_MS, WAIT_MAX_MS);
+  const timeoutMs = clampTimeout(params.timeout, WAIT_DEFAULT_TIMEOUT_MS, WAIT_MIN_MS, WAIT_MAX_MS);
   const require = params.require ?? "any";
   const startedAt = Date.now();
   const agentId = ctx.agent.id;

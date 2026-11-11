@@ -80,13 +80,49 @@ export function clampNumericConfig(
   const clamped = Math.min(bounds.max, Math.max(bounds.min, value));
   return { value: clamped, clamped: clamped !== value };
 }
+/**
+ * The generic numeric clamp (K11: declared once here, beside the bounds table). The four
+ * `clamp(value, lo, hi)` copies in the tools were byte-identical; they now import this.
+ * `clampTimeout` is the same shape with the contract's (default, min, max) triple, so the
+ * 20 s claim default and the 30 s agent/message default stay visibly different values
+ * instead of two schemes that look accidental.
+ */
+export function clampNumber(value: number, lo: number, hi: number): number {
+  return Math.min(hi, Math.max(lo, Math.trunc(value)));
+}
 
+export function clampTimeout(
+  raw: number | undefined,
+  def: number,
+  min: number,
+  max: number,
+): number {
+  return clampNumber(raw ?? def, min, max);
+}
 /** A clamp report: which field moved and from what. Wired to `pi.logger.warn` where `pi` exists. */
 export type ConfigClampReport = (key: string, raw: number, clamped: number) => void;
 
 export function configPath(root: string): string {
   // <root>/room/config.json
   return `${root}/room/config.json`;
+}
+/**
+ * The ONE value coercion (K11: 030 Step 3): the CLI `config set` path (strings) and the on-disk
+ * JSON path share the unknown-key check, the type check against the default, and the clamp —
+ * the two callers differ only in how they parse (Number() + blank refusal) and report.
+ * Returns the coerced value and whether the clamp moved it; null = unknown key or wrong type.
+ */
+export function coerceConfigValue(
+  key: string,
+  value: unknown,
+): { value: string | number; clamped: boolean } | null {
+  const current = (DEFAULT_ROOM_CONFIG as unknown as Record<string, unknown>)[key];
+  if (typeof current === "string" && typeof value === "string") return { value, clamped: false };
+  if (typeof current === "number" && typeof value === "number" && Number.isFinite(value)) {
+    const { value: clamped, clamped: moved } = clampNumericConfig(key, value);
+    return { value: clamped, clamped: moved };
+  }
+  return null;
 }
 // Field-by-field coercion over the defaults: an unknown key is ignored and a wrong-typed value
 // falls back to its default. The plugin owns this file, but it is still on-disk input.
@@ -97,14 +133,14 @@ function coerceConfig(raw: unknown, onClamp?: ConfigClampReport): RoomConfig {
   // one loop write a mixed-type record.
   const target = config as unknown as Record<string, string | number>;
   for (const [key, value] of Object.entries(raw)) {
-    const current = target[key];
-    if (typeof current === "string" && typeof value === "string") {
-      target[key] = value;
-    } else if (typeof current === "number" && typeof value === "number" && Number.isFinite(value)) {
-      // A persisted 0/negative count or window is a room-wide DoS — clamp to the floor, loudly.
-      const { value: clamped, clamped: moved } = clampNumericConfig(key, value);
-      target[key] = clamped;
-      if (moved) onClamp?.(key, value, clamped);
+    const coerced = coerceConfigValue(key, value);
+    // A persisted 0/negative count or window is a room-wide DoS — the helper floors it, and the
+    // clamp is reported loudly where a logger exists.
+    if (coerced !== null) {
+      target[key] = coerced.value;
+      if (typeof coerced.value === "number" && typeof value === "number" && coerced.clamped) {
+        onClamp?.(key, value, coerced.value);
+      }
     }
   }
   // roomId becomes a filename (logPathFor), so a type check is not enough: an id containing

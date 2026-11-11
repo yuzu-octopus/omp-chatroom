@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent";
+import { recordFields } from "../attention/delivery";
 import { globalMap } from "../globals";
 import { DEFAULT_ROOM_CONFIG } from "../store/config";
 import { cursorFor, lagFor } from "../store/cursors";
@@ -37,25 +38,27 @@ const room = safeRoomText;
 
 // K2 — the model-facing body of a record, derived per kind (not every kind carries `body`).
 function recordLine(record: RoomRecord): string {
+  // Fields through the shared switch (030 Step 2R); the backlog layout stays this surface's own.
+  const f = recordFields(record);
   switch (record.kind) {
     case "msg":
-      return `${record.from} → ${record.topic}: ${oneLine(record.body)}`;
+      return `${f.from} → ${f.topic}: ${oneLine(f.body ?? "")}`;
     case "note":
-      return `note ${record.from} → ${record.topic}: ${oneLine(record.body)}`;
+      return `note ${f.from} → ${f.topic}: ${oneLine(f.body ?? "")}`;
     case "claim":
-      return `claim ${record.from} → ${record.resource}`;
+      return `claim ${f.from} → ${f.resource}`;
     case "release":
-      return `release ${record.from} → ${record.resource} (${record.reason})`;
+      return `release ${f.from} → ${f.resource} (${f.reason})`;
     case "member":
-      return `member ${record.from} ${record.action}`;
+      return `member ${f.from} ${f.action}`;
     case "gap":
-      return `gap ${record.from} skipped ${record.skipped} (${record.reason})`;
+      return `gap ${f.from} skipped ${f.skipped} (${f.reason})`;
     case "contended":
-      return `contended ${record.from} → ${record.resource} (held by ${record.holder})`;
+      return `contended ${f.from} → ${f.resource} (held by ${f.holder})`;
     case "wait":
-      return `wait ${record.from} → ${record.target} (${record.outcome})`;
+      return `wait ${f.from} → ${f.target} (${f.outcome})`;
     case "delivered":
-      return `delivered ${record.from} ← seq ${record.deliveredSeq} (${record.tier})`;
+      return `delivered ${f.from} ← seq ${f.deliveredSeq} (${f.tier})`;
   }
 }
 

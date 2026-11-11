@@ -14,6 +14,7 @@ import {
 } from "../cards/tool-cards";
 import { hostSchema } from "../host-schema";
 import { safeRoomText } from "../onboarding/escape";
+import { clampTimeout } from "../store/config";
 import { type RoomStore, roomStoreFor } from "../store/room-store";
 import type { RoomRecord } from "../store/schema";
 import { clearWaitEdges, findWaitCycle, setWaitEdges, type WaitTarget } from "../store/wait-graph";
@@ -54,10 +55,6 @@ export type WaitForMessageResult = AgentToolResult<WaitForMessageDetails>;
 
 /** K22/S1 — caller-supplied strings and room bodies both reach the model; both are sanitised. */
 const safe = safeRoomText;
-
-/** The schema's documented bounds are the contract; this is the one place they are applied. */
-const clamp = (value: number, lo: number, hi: number): number =>
-  Math.min(hi, Math.max(lo, Math.trunc(value)));
 
 /** A one-line model-facing rendering of the matched msg. */
 function describeMatch(record: Extract<RoomRecord, { kind: "msg" }>): string {
@@ -114,7 +111,7 @@ async function waitForMessage(
     };
   }
 
-  const timeoutMs = clamp(params.timeout ?? WAIT_DEFAULT_TIMEOUT_MS, WAIT_MIN_MS, WAIT_MAX_MS);
+  const timeoutMs = clampTimeout(params.timeout, WAIT_DEFAULT_TIMEOUT_MS, WAIT_MIN_MS, WAIT_MAX_MS);
   const agentId = ctx.agent.id;
   const wantMention = params.mention === true;
   const from = params.from;

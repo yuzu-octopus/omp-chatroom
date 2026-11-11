@@ -62,7 +62,7 @@ advanced on delivery into context, never on send.
 
 ```sh
 cd plugin
-bun test tests/                                 # whole suite (641 pass, 1 skip, 18 files)
+bun test tests/                                 # whole suite (646 pass, 1 skip, 18 files)
 bun run test:halves-a; bun run test:halves-b    # the same suite as two alphabetical halves (see below)
 bun test tests/ --coverage                      # the same run with a coverage table (not a gate)
 bun check                                       # native typecheck, ~95 ms (CI runs it first)

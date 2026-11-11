@@ -351,6 +351,61 @@ function recordDelivery(store: RoomStore, target: string, record: RoomRecord, ti
     });
   }
 }
+/**
+ * The ONE kind-switch that knows which fields each record kind carries (plan 030, Step 2R).
+ * The four renderers (delivery `renderLine`/`roomBodyOf`, tool-path `recordLine`, digest backlog,
+ * compactor input) keep their own byte layouts — those are pinned per surface — but they read
+ * their fields THROUGH here, so a new record kind needs one arm (this one) and a reviewer sees
+ * every surface's field needs in one place instead of four parallel switches.
+ */
+export interface RecordFields {
+  from: string;
+  topic?: string;
+  resource?: string;
+  body?: string;
+  target?: string;
+  holder?: string;
+  action?: string;
+  reason?: string;
+  prevHolder?: string;
+  outcome?: string;
+  ttlMs?: number;
+  skipped?: number;
+  deliveredSeq?: number;
+  tier?: string;
+  dependsOn?: string[];
+}
+export function recordFields(record: RoomRecord): RecordFields {
+  switch (record.kind) {
+    case "msg":
+    case "note":
+      return { from: record.from, topic: record.topic, body: record.body };
+    case "claim":
+      return {
+        from: record.from,
+        resource: record.resource,
+        ttlMs: record.ttlMs,
+        dependsOn: record.dependsOn,
+      };
+    case "release":
+      return {
+        from: record.from,
+        resource: record.resource,
+        reason: record.reason,
+        prevHolder: record.prevHolder,
+      };
+    case "member":
+      return { from: record.from, action: record.action };
+    case "gap":
+      return { from: record.from, skipped: record.skipped, reason: record.reason };
+    case "contended":
+      return { from: record.from, resource: record.resource, holder: record.holder };
+    case "wait":
+      return { from: record.from, target: record.target, outcome: record.outcome };
+    case "delivered":
+      return { from: record.from, deliveredSeq: record.deliveredSeq, tier: record.tier };
+  }
+}
 export function roomBodyOf(record: RoomRecord): string {
   switch (record.kind) {
     case "msg":
@@ -372,7 +427,6 @@ export function roomBodyOf(record: RoomRecord): string {
       return `${record.from} got seq ${record.deliveredSeq} at ${record.tier}`;
   }
 }
-
 // K17 — the model-facing line: tier badge · from · topic|resource · escaped body.
 export function renderLine(record: RoomRecord, safeBody: string, tier: Tier): string {
   // K22/S1 — the topic and the resource are room-authored (any agent picks them), so they go
@@ -395,6 +449,69 @@ export function renderLine(record: RoomRecord, safeBody: string, tier: Tier): st
   return `[${tier}] room ⟵ ${safeRoomText(record.from)} · ${where} · ${safeBody}`;
 }
 
+/** Alias so the moved renderers below read unchanged (they were written against `safe`). */
+const safe = safeRoomText;
+/** One model-facing line per record — tier-free by format (no badge field); tiering lives in `classify`/`renderLine`. §4.5.1 K17. Exported so the `/room recall` passthrough renders the identical lines. */
+export function recordLine(record: RoomRecord): string {
+  // Fields through the shared switch (030 Step 2R); the byte layout stays this surface's own.
+  const f = recordFields(record);
+  const head = `seq ${record.seq} · ${safe(f.from)}`;
+  switch (record.kind) {
+    case "msg":
+      return `${head} · ${safe(f.topic ?? "")} · "${safe(f.body ?? "")}"`;
+    case "note":
+      return `${head} · note ${safe(f.topic ?? "")} · "${safe(f.body ?? "")}"`;
+    case "claim":
+      return `${head} · claim ${safe(f.resource ?? "")} (ttl ${f.ttlMs ?? 0} ms)`;
+    case "release":
+      return `${head} · release ${safe(f.resource ?? "")} · ${f.reason} · prev ${safe(f.prevHolder ?? "")}`;
+    case "member":
+      return `${head} · ${f.action}`;
+    case "gap":
+      return `${head} · gap · ${f.skipped} skipped (${f.reason})`;
+    case "contended":
+      return `${head} · contended ${safe(f.resource ?? "")} — lost to ${safe(f.holder ?? "")}`;
+    case "wait":
+      return `${head} · wait ${safe(f.target ?? "")} — ${f.outcome}`;
+    case "delivered":
+      return `${head} · delivered seq ${f.deliveredSeq} — ${f.tier}`;
+  }
+}
+/** One model-facing board claim row — the waiting/dependsOn shape both surfaces share. §4.5.1. */
+export function claimLine(
+  claim: {
+    resource: string;
+    holder: string;
+    expiresAt: number;
+    waiting: string[];
+    dependsOn: string[];
+  },
+  now: number = Date.now(),
+): string {
+  const left = Math.max(0, Math.round((claim.expiresAt - now) / 1000));
+  // R9 — who is blocked on what: the waiters, and what this claim itself waits on.
+  const waiting =
+    claim.waiting.length > 0 ? ` · waiting: ${claim.waiting.map(safe).join(", ")}` : "";
+  const depends =
+    claim.dependsOn.length > 0 ? ` · needs ${claim.dependsOn.map(safe).join(", ")}` : "";
+  return `claim ${safe(claim.resource)} · ${safe(claim.holder)} · ${left}s left${waiting}${depends}`;
+}
+
+/** One model-facing board roster row — the agent · status · lag shape both surfaces share. */
+export function rosterLine(member: {
+  agentId: string;
+  status: string;
+  lag: number;
+  topics: string[];
+}): string {
+  const topics = member.topics.length > 0 ? ` · ${member.topics.map(safe).join(", ")}` : "";
+  return `${safe(member.agentId)} · ${member.status} · lag ${member.lag}${topics}`;
+}
+
+/** One model-facing board topic row — the unread/last-seq shape both surfaces share. */
+export function topicLine(topic: { topic: string; unread: number; lastSeq: number }): string {
+  return `topic ${safe(topic.topic)} · ${topic.unread} unread · last seq ${topic.lastSeq}`;
+}
 // §5.3 S1+S2 — delegates to the shared escaper so every room-facing surface is marker-safe.
 export function escapeForDelivery(body: string): string {
   return safeRoomText(body);

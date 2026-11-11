@@ -39,9 +39,9 @@ Round-bd69c15 (2026-11-08): bun check 0 errors (native, ~90 ms), tsc 0 errors, b
 | 027 | Use the store config instead of re-reading it from disk per op | P2 | S | — | DONE (merged; save-path refresh is the mutation route) |
 | 028 | Single-pass delivery fan-out and board scans | P2 | M | — | DONE (merged; equivalence-pinned) |
 | 029 | Settle the deferred storage costs (digest cache, append batching decision, replay bound, tree fds) | P2 | M | — | DONE (merged; fsync KEEP verdict recorded, K19 intact) |
-| 030 | Deduplicate formatters, helpers, and constants | P2 | M | — | PARTIAL (Step 1 merged — board converged; Steps 2–5 superseded: field-selection switch + deferred remainder is future work) |
+| 030 | Deduplicate formatters, helpers, and constants | P2 | M | — | DONE (all four: field switch + single clamp/timeout + shared coerce + helper homes; Step 2 byte-identity held, all gates green) |
 | 031 | Tooling, packaging, and docs truth (biome pin, scripts, features flags, HANDOFF, probe) | P3 | S | — | DONE (merged; manifest honest — features block removed) |
-| 032 | Human surface gaps (recall/tree for operators, recallMiss aggregate) | P3 | S | — | BLOCKED (executor spawn fails in this env; single remaining TODO — execute as spike when a worker can spawn) |
+| 032 | Human surface gaps (recall/tree for operators, recallMiss aggregate) | P3 | S | — | DONE (built inline: recall/tree/zoom passthroughs + config reset + miss-rate aggregate, all tested; UX questions remain listed in-plan as asked-not-answered) |
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJECTED (with one-line rationale — finding fixed independently or approach abandoned)
 
 ## Merge order (all approved branches build on efc5211)

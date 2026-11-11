@@ -331,7 +331,7 @@ subagents is unaffected — they live in the same process and share one room and
 
 ```sh
 cd plugin
-bun test tests/                                 # 641 pass / 1 skip, 642 run, 18 files
+bun test tests/                                 # 646 pass / 1 skip, 647 run, 18 files
 bunx --bun tsc --noEmit -p tsconfig.json        # typecheck only
 bunx --bun @biomejs/biome check src tests       # lint + format check
 bunx --bun @biomejs/biome check src tests --write   # apply fixes

@@ -21,12 +21,10 @@ import {
   requeueWaiter,
   resolveWaiters,
 } from "../store/claims";
-import { resolveRoomConfig } from "../store/config";
-import { type RoomStore, roomStoreFor } from "../store/room-store";
+import { clampNumber, clampTimeout, resolveRoomConfig } from "../store/config";
+import { type RoomStore, roomStoreFor, viewerFor } from "../store/room-store";
 import type { RoomRecord } from "../store/schema";
 import { clearWaitEdges, findWaitCycle, setWaitEdges } from "../store/wait-graph";
-import { viewerFor } from "../tools/room";
-
 export const WAIT_FOR_CLAIM_NAME = "wait_for_claim";
 export const WAIT_FOR_CLAIM_DESCRIPTION: string = `Block until you acquire the CLAIM on
 "<topic>/<key>", or time out. When the holder releases, is reclaimed, or its TTL expires, the oldest
@@ -61,11 +59,6 @@ export type WaitForClaimResult = AgentToolResult<WaitForClaimDetails>;
 
 /** K22/S1 — the resource string reaches the model, so it goes through the shared escaper. */
 const safe = safeRoomText;
-
-/** The schema's documented bounds are the contract; this is the one place they are applied. */
-function clamp(value: number, lo: number, hi: number): number {
-  return Math.min(hi, Math.max(lo, Math.trunc(value)));
-}
 
 function eventResult(resource: string, claim: ClaimState): WaitForClaimResult {
   return {
@@ -125,20 +118,21 @@ async function waitForClaim(
   }
   const agentId = ctx.agent.id;
   const resource = params.resource;
-  const ttlMs = clamp(
+  const ttlMs = clampNumber(
     params.ttl ?? resolveRoomConfig(pi, store.root).claimTtlMs,
     CLAIM_WAIT_MIN_MS,
     86_400_000,
   );
-  const timeoutMs = clamp(
-    params.timeout ?? CLAIM_WAIT_DEFAULT_TIMEOUT_MS,
+  const timeoutMs = clampTimeout(
+    params.timeout,
+    CLAIM_WAIT_DEFAULT_TIMEOUT_MS,
     CLAIM_WAIT_MIN_MS,
     CLAIM_WAIT_MAX_MS,
   );
   const maxWaitMs =
     params.maxWaitMs === undefined
       ? undefined
-      : clamp(params.maxWaitMs, CLAIM_WAIT_MIN_MS, CLAIM_WAIT_MAX_MS);
+      : clampNumber(params.maxWaitMs, CLAIM_WAIT_MIN_MS, CLAIM_WAIT_MAX_MS);
   const startedAt = Date.now();
 
   // R5 — a wait that is not recorded cannot be measured: the wait's outcome is the room's only

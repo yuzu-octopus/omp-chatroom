@@ -2,6 +2,7 @@ import type { AssistantMessage, Context } from "@oh-my-pi/pi-ai";
 import { streamSimple } from "@oh-my-pi/pi-ai"; // root export, NOT a deep import (K21/F3)
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { escapeHarnessTags } from "@oh-my-pi/pi-coding-agent/session/harness-tags";
+import { recordFields } from "../attention/delivery";
 import { globalMap } from "../globals";
 import type { RoomStore } from "./room-store";
 import type { RoomRecord } from "./schema";
@@ -132,27 +133,28 @@ export function forgetCompactionRegistries(root: string): void {
 
 // --- summarisation ---------------------------------------------------------
 
-/** The model-facing line for one record (kind-first, so no arm reads a field its kind lacks). */
+/** The model-facing line for one record. Fields through the shared switch (030 Step 2R); the summarizer-input layout stays this surface's own. */
 function recordLine(record: RoomRecord): string {
+  const f = recordFields(record);
   switch (record.kind) {
     case "msg":
-      return `[${record.seq}] msg ${record.from} #${record.topic}: ${record.body}`;
+      return `[${record.seq}] msg ${f.from} #${f.topic}: ${f.body}`;
     case "note":
-      return `[${record.seq}] note ${record.from} #${record.topic}: ${record.body}`;
+      return `[${record.seq}] note ${f.from} #${f.topic}: ${f.body}`;
     case "claim":
-      return `[${record.seq}] claim ${record.from} ${record.resource} (ttl ${record.ttlMs}ms)`;
+      return `[${record.seq}] claim ${f.from} ${f.resource} (ttl ${f.ttlMs}ms)`;
     case "release":
-      return `[${record.seq}] release ${record.from} ${record.resource} (${record.reason})`;
+      return `[${record.seq}] release ${f.from} ${f.resource} (${f.reason})`;
     case "member":
-      return `[${record.seq}] ${record.from} ${record.action}`;
+      return `[${record.seq}] ${f.from} ${f.action}`;
     case "gap":
-      return `[${record.seq}] gap ${record.skipped} skipped (${record.reason})`;
+      return `[${record.seq}] gap ${f.skipped} skipped (${f.reason})`;
     case "contended":
-      return `[${record.seq}] contended ${record.from} ${record.resource} (held by ${record.holder})`;
+      return `[${record.seq}] contended ${f.from} ${f.resource} (held by ${f.holder})`;
     case "wait":
-      return `[${record.seq}] wait ${record.from} ${record.target} (${record.outcome})`;
+      return `[${record.seq}] wait ${f.from} ${f.target} (${f.outcome})`;
     case "delivered":
-      return `[${record.seq}] delivered ${record.from} seq ${record.deliveredSeq} (${record.tier})`;
+      return `[${record.seq}] delivered ${f.from} seq ${f.deliveredSeq} (${f.tier})`;
   }
 }
 

@@ -4,7 +4,7 @@ import type {
   ExtensionAPI,
 } from "@oh-my-pi/pi-coding-agent";
 import { deliver } from "../attention/delivery";
-import { resetTurnBudget } from "../attention/governor";
+import { owedFloorFor, resetTurnBudget } from "../attention/governor";
 import { stopCompactor } from "../store/compactor";
 import {
   bumpCursor,
@@ -24,7 +24,7 @@ import {
   roomTimers,
   unregisterSweepNotifier,
 } from "../store/room-store";
-import { notifyRecipients, owedFloorFor } from "../tools/room";
+import { notifyRecipients } from "../tools/room";
 import { buildDigest, recordDigestTurn } from "./digest";
 import rule from "./routing-rule.md" with { type: "text" };
 

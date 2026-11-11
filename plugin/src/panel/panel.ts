@@ -16,9 +16,9 @@ import {
 import { safeRoomText } from "../onboarding/escape";
 import { contended, reclaimIfStale, release } from "../store/claims";
 import { cursorFor } from "../store/cursors";
-import { type MemberState, type RoomStore, roomStoreFor } from "../store/room-store";
+import { appendedSince, type MemberState, type RoomStore, roomStoreFor } from "../store/room-store";
 import type { ClaimRow } from "../store/schema";
-import { appendedSince, notifyRecipients } from "../tools/room";
+import { notifyRecipients } from "../tools/room";
 import { type BoardRow, createBoardPane, sortBoardRows } from "./board-pane";
 import {
   type ChatProjection,

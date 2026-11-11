@@ -1,7 +1,14 @@
 import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent";
 import { prompt } from "@oh-my-pi/pi-utils";
-import { deliver, sendToTarget } from "../attention/delivery";
+import {
+  claimLine,
+  deliver,
+  recordLine,
+  rosterLine,
+  sendToTarget,
+  topicLine,
+} from "../attention/delivery";
 import {
   admitPost,
   coalescePending,
@@ -28,7 +35,7 @@ import { hostSchema } from "../host-schema";
 import { buildDigest, DIGEST_CLAIMS_CAP, estimateTokens, ROSTER_CAP } from "../onboarding/digest";
 import { safeRoomText } from "../onboarding/escape";
 import { contended, grant, reclaimIfStale, release, renew, staleGen } from "../store/claims";
-import type { RoomConfig } from "../store/config";
+import { clampNumber as clamp, type RoomConfig } from "../store/config";
 import {
   bumpCursor,
   cursorFor,
@@ -38,7 +45,15 @@ import {
   markDeliveredT0,
 } from "../store/cursors";
 import { CLAIM_TTL_MAX_MS, CLAIM_TTL_MIN_MS } from "../store/log";
-import { idemIndexKey, type MemberState, type RoomStore, roomStoreFor } from "../store/room-store";
+import {
+  appendedSince,
+  idemIndexKey,
+  type MemberState,
+  type RoomStore,
+  roomStoreFor,
+  viewerFor,
+  viewerStateFor,
+} from "../store/room-store";
 import {
   type BoardResult,
   type Performative,
@@ -173,8 +188,9 @@ export const READ_LIMIT_DEFAULT = 50; // K20 — was 100; routed through the T1 
 export const READ_LIMIT_MAX = 200; // K20 — was 1 000 (~97k tokens)
 export const RECALL_LIMIT_MAX = 100; // §4.1
 
-/** S1 — the longest pattern the op will compile (documented in the schema). */
-const RECALL_PATTERN_MAX = 200;
+/** S1 — the longest pattern the op will compile (documented in the schema). Exported so the
+ * `/room recall` passthrough enforces the identical bound instead of copying it. */
+export const RECALL_PATTERN_MAX = 200;
 /** S1 — the scan's wall-clock budget, checked BEFORE and AFTER every test. */
 const RECALL_SCAN_MS = 1_000;
 /**
@@ -224,8 +240,9 @@ const RECALL_UNSAFE: ReadonlyArray<{ shape: RegExp; why: string }> = [
 /** S1 — one unrestricted repetition of a multi-character atom: `.*`, `\s+`, `[a-z]*`, `.{2,}`. */
 const RECALL_WILDCARD = /(?<!\\)(?:\.|\\[wWsSdD]|\[[^\]]*\])(?:[+*]|\{\d+,\d*\})/g;
 
-/** S1 — the refusal sentence, or null when the pattern may be compiled and run. */
-function recallRefusal(pattern: string): string | null {
+/** S1 — the refusal sentence, or null when the pattern may be compiled and run. Exported so the
+ * `/room recall` passthrough applies the identical filter instead of copying it. */
+export function recallRefusal(pattern: string): string | null {
   for (const { shape, why } of RECALL_UNSAFE) {
     if (shape.test(pattern)) {
       return (
@@ -307,96 +324,6 @@ function fail(error: string, holder?: string, expiresAt?: number): RoomToolResul
   };
 }
 
-export function viewerFor(store: RoomStore, agentId: string): MemberState {
-  const existing = store.members.get(agentId);
-  if (existing) return existing;
-  const fresh = freshViewer(store, agentId);
-  store.members.set(agentId, fresh);
-  return fresh;
-}
-
-/** The fresh-member shape, shared by the ensure and lookup paths. */
-function freshViewer(store: RoomStore, agentId: string): MemberState {
-  return {
-    agentId,
-    joinedAtSeq: store.seq,
-    topics: new Set(),
-    muted: new Set(),
-    threadRoots: new Set(),
-    heldTopics: new Set(),
-  };
-}
-
-/**
- * Read-only viewer state for classification; never mints membership. Use this on every path that
- * only READS the viewer (read/board/topics delivery classification). Use `viewerFor` only where
- * the mutation must persist (join/claim/post, wait_for_claim's waitedResource).
- */
-export function viewerStateFor(store: RoomStore, agentId: string): MemberState {
-  return store.members.get(agentId) ?? freshViewer(store, agentId);
-}
-
-/** One model-facing line per record — tier-free by format (no badge field); tiering lives in `classify`/`renderLine`. §4.5.1 K17. */
-function recordLine(record: RoomRecord): string {
-  const head = `seq ${record.seq} · ${safe(record.from)}`;
-  switch (record.kind) {
-    case "msg":
-      return `${head} · ${safe(record.topic)} · "${safe(record.body)}"`;
-    case "note":
-      return `${head} · note ${safe(record.topic)} · "${safe(record.body)}"`;
-    case "claim":
-      return `${head} · claim ${safe(record.resource)} (ttl ${record.ttlMs} ms)`;
-    case "release":
-      return `${head} · release ${safe(record.resource)} · ${record.reason} · prev ${safe(record.prevHolder)}`;
-    case "member":
-      return `${head} · ${record.action}`;
-    case "gap":
-      return `${head} · gap · ${record.skipped} skipped (${record.reason})`;
-    case "contended":
-      return `${head} · contended ${safe(record.resource)} — lost to ${safe(record.holder)}`;
-    case "wait":
-      return `${head} · wait ${safe(record.target)} — ${record.outcome}`;
-    case "delivered":
-      return `${head} · delivered seq ${record.deliveredSeq} — ${record.tier}`;
-  }
-}
-
-/** One model-facing board claim row — the waiting/dependsOn shape both surfaces share. §4.5.1. */
-export function claimLine(
-  claim: {
-    resource: string;
-    holder: string;
-    expiresAt: number;
-    waiting: string[];
-    dependsOn: string[];
-  },
-  now: number = Date.now(),
-): string {
-  const left = Math.max(0, Math.round((claim.expiresAt - now) / 1000));
-  // R9 — who is blocked on what: the waiters, and what this claim itself waits on.
-  const waiting =
-    claim.waiting.length > 0 ? ` · waiting: ${claim.waiting.map(safe).join(", ")}` : "";
-  const depends =
-    claim.dependsOn.length > 0 ? ` · needs ${claim.dependsOn.map(safe).join(", ")}` : "";
-  return `claim ${safe(claim.resource)} · ${safe(claim.holder)} · ${left}s left${waiting}${depends}`;
-}
-
-/** One model-facing board roster row — the agent · status · lag shape both surfaces share. */
-export function rosterLine(member: {
-  agentId: string;
-  status: string;
-  lag: number;
-  topics: string[];
-}): string {
-  const topics = member.topics.length > 0 ? ` · ${member.topics.map(safe).join(", ")}` : "";
-  return `${safe(member.agentId)} · ${member.status} · lag ${member.lag}${topics}`;
-}
-
-/** One model-facing board topic row — the unread/last-seq shape both surfaces share. */
-export function topicLine(topic: { topic: string; unread: number; lastSeq: number }): string {
-  return `topic ${safe(topic.topic)} · ${topic.unread} unread · last seq ${topic.lastSeq}`;
-}
-
 /**
  * The board as MODEL-FACING lines. `details.board` never reaches the model — `coerceToolResult`
  * (pi-agent-core `agent-loop.ts:540`) keeps only `content` on the wire, so a counts-only content
@@ -423,6 +350,24 @@ function boardLines(board: BoardResult): string[] {
     lines.push(topicLine(topic));
   }
   return lines;
+}
+
+/**
+ * The recall observatory's read-out (plan 032): the miss rate over completed recalls since the
+ * store opened. Pure over the counters — no log scan, so retention gaps cannot shift it (the
+ * denominator counts op outcomes, not records, and the counters are session-scoped like
+ * `deliveries`). Zero recalls → null (no window yet), never 0% (that would claim success).
+ * The `recallMiss` details flag on each zero-match recall is the per-call signal; this is the
+ * aggregate the embeddings revisit trigger reads.
+ */
+export function recallMissRate(store: RoomStore): {
+  recalls: number;
+  misses: number;
+  rate: number;
+} | null {
+  const { recalls, misses } = store.recallStats;
+  if (recalls === 0) return null;
+  return { recalls, misses, rate: misses / recalls };
 }
 
 /** Append rendered rows to a content line. `read` already renders; the count-only ops did not. */
@@ -461,11 +406,6 @@ export function buildBoard(store: RoomStore, viewer: MemberState): BoardResult {
     unread: row.unreadAll,
   }));
   return { ok: true, claims, roster, topics, deliveries: { ...store.deliveries } };
-}
-
-/** The schema's documented bounds are the contract; this is the one place they are applied. */
-function clamp(value: number, lo: number, hi: number): number {
-  return Math.min(hi, Math.max(lo, Math.trunc(value)));
 }
 
 // --- §5.3 the post-append delivery pass -----------------------------------
@@ -789,53 +729,6 @@ async function deliverToTarget(
   } catch (error) {
     return error instanceof Error ? error.message : "delivery failed";
   }
-}
-
-/**
- * The seq just below the oldest record this recipient still OWES — the floor no cursor bump may
- * cross. `null` when it owes nothing.
- *
- * Shared with the sweep's expiry notice (plugin/src/onboarding/hook.ts), which delivers OUTSIDE a
- * delivery pass: the notice is a T0 at the room head, and an uncapped bump would carry the
- * holder's cursor over every record it had not read yet — those records would fall below the
- * cursor and `room{op:"read"}` could never return them.
- *
- * `exceptSeq` excludes the record being delivered (the notice's own release record).
- */
-export function owedFloorFor(
-  store: RoomStore,
-  target: string,
-  exceptSeq?: number,
-  options: { gapsOwed?: boolean } = {},
-): number | null {
-  const viewer = viewerStateFor(store, target);
-  const cursor = store.cursors.get(target) ?? 0;
-  // A GIVEN seq owes nothing: it was handed to the recipient (a delivered T0, an uncertain send
-  // whose bound expired, a T0 batched into the ceiling summary) and only a floor kept it above
-  // the cursor. Left in the owed set it pins the cap at its seq-1 for EVERY later delivery, so
-  // the cursor freezes and the T1 window fills with already-sent records — the record is still
-  // readable (nothing bumped the cursor past it) and a later confirmed delivery may carry the
-  // cursor over it, which is honest: it was given.
-  const given = deliveredT0s(store.root, target);
-  const owed = store.records.filter(
-    (r) =>
-      r.seq > cursor &&
-      r.seq !== exceptSeq &&
-      !given.has(r.seq) &&
-      // A `gap` is CARRIED by the next pass, not owed (see `deliverToTarget`) — unless the caller
-      // is NOT a delivery pass. The sweep's expiry notice is not one: nothing carries the gap, so
-      // a cursor bump past it would lose the notice that records were skipped.
-      (r.kind !== "gap" || options.gapsOwed === true) &&
-      !isMuted(store, viewer, r) &&
-      classify(r, viewer) !== "T2",
-  );
-  if (owed.length === 0) return null;
-  return owed.reduce((min, r) => Math.min(min, r.seq), Number.POSITIVE_INFINITY);
-}
-
-/** The records an operation appended: everything with a seq above the pre-op watermark. */
-export function appendedSince(store: RoomStore, before: number): RoomRecord[] {
-  return store.records.filter((r) => r.seq > before);
 }
 
 /** K1 — an ok result carrying the optional delivery-failure note. */
@@ -1564,8 +1457,12 @@ export function registerRoomTool(pi: ExtensionAPI): void {
             }
             // Miss signal is details-only (no extra write): a zero-match recall on a non-empty
             // log is exactly the countable "cannot find it" event the embeddings revisit trigger needs.
+            // The observatory counts every completed recall (refusals and timeouts never reach
+            // here): `recalls` is the window, `misses` the trigger numerator.
             const logSize = store.records.length;
             const miss = matches.length === 0 && logSize > 0;
+            store.recallStats.recalls += 1;
+            if (miss) store.recallStats.misses += 1;
             return ok(
               miss
                 ? {

@@ -1,10 +1,11 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@oh-my-pi/pi-coding-agent";
+import { recordLine } from "../attention/delivery";
 import { resourceKey } from "../ids";
 import { safeRoomText } from "../onboarding/escape";
 import { openRoomPanel } from "../panel/panel";
 import { grant, reclaimIfStale, release, renew } from "../store/claims";
 import {
-  clampNumericConfig,
+  coerceConfigValue,
   configPath,
   DEFAULT_ROOM_CONFIG,
   loadRoomConfig,
@@ -15,21 +16,46 @@ import { cursorFor, initCursor } from "../store/cursors";
 // §3.4 — the canonical lease bounds, shared with the tool and with replay, so a widened command
 // cannot mint a lease the log validator would quarantine on the next open.
 import { CLAIM_TTL_MAX_MS, CLAIM_TTL_MIN_MS } from "../store/log";
-import { type RoomStore, roomStoreFor } from "../store/room-store";
+import { appendedSince, type RoomStore, roomStoreFor, viewerStateFor } from "../store/room-store";
+import type { RoomRecord } from "../store/schema";
 import {
-  appendedSince,
+  COVER_BUDGET_LINES,
+  loadView,
+  openTreeStore,
+  RAW_MAX,
+  validateZoomRange,
+  zoom,
+} from "../store/tree-store";
+import {
   buildBoard,
   DEPENDS_ON_MAX_BYTES,
   notifyRecipients,
   overListCap,
-  viewerStateFor,
+  RECALL_LIMIT_MAX,
+  RECALL_PATTERN_MAX,
+  recallMissRate,
+  recallRefusal,
 } from "../tools/room";
 
 export const ROOM_COMMAND_NAME = "room";
 
 // Subcommand set: exactly the shipped `room` ops, plus `config` (P7/R6 — the
 // manifest settings are unreachable from extension code, so the command is the human surface).
-export const ROOM_SUBCOMMANDS = ["board", "join", "claim", "release", "post", "config"] as const;
+// `read`/`topics`/`mute` stay model-only (they shape attention, not content); `recall`, `tree`
+// and `zoom` are exposed read-only (plan 032) because operators need the same retrieval the
+// models get. Mute/tree/zoom UX open questions (listed in plans/032): how mute state displays,
+// whether zoom needs paging, recall output caps — asked, not answered, by this spike.
+export const ROOM_SUBCOMMANDS = [
+  "board",
+  "join",
+  "claim",
+  "release",
+  "post",
+  "config",
+  "recall",
+  "tree",
+  "zoom",
+] as const;
 export type RoomSubcommand = (typeof ROOM_SUBCOMMANDS)[number];
 
 /** Structural subset of the host's `AutocompleteItem` (value/label/description are what it renders). */
@@ -38,14 +64,17 @@ export interface RoomCompletion {
   label: string;
   description?: string;
 }
-
 const SUBCOMMAND_HELP: Readonly<Record<RoomSubcommand, string>> = {
   board: "claims, roster and per-agent lag",
   join: "join the room and mint your cursor",
   claim: "claim <topic> <key> [ttlMs] [dependsOn...] — take exclusive ownership",
   release: "release <topic> <key> — drop a claim you hold",
   post: "post <topic> <body> — append a message",
-  config: "show the resolved config; `config set <key>=<value>` writes it",
+  config:
+    "show the resolved config; `config set <key>=<value>` writes it; `config reset` restores defaults",
+  recall: "recall <pattern> — regex search over the raw log (same bounds as the tool op)",
+  tree: "show the cold-tree tiling (which seq ranges are raw or summarised)",
+  zoom: "zoom <lo> <hi> — descend into a tree node",
 };
 
 const USAGE = `usage: /room [<${ROOM_SUBCOMMANDS.join("|")}>]`;
@@ -127,10 +156,11 @@ function coerceSetting(
     if (raw.trim() === "") return null;
     const parsed = Number(raw);
     if (!Number.isFinite(parsed)) return null;
-    // The file path clamps on load, so `set` clamps on write: the saved value is the
-    // effective value, and the caller reports the clamp (below) rather than staying silent.
-    const { value, clamped } = clampNumericConfig(key, parsed);
-    return { value, clampedFrom: clamped ? parsed : null };
+    // The parse is the only CLI-specific part: the unknown-key check, the type check and the
+    // clamp live in the shared `coerceConfigValue`, so the two paths cannot drift.
+    const coerced = coerceConfigValue(key, parsed);
+    if (coerced === null) return null;
+    return { value: coerced.value, clampedFrom: coerced.clamped ? parsed : null };
   }
   return { value: raw, clampedFrom: null };
 }
@@ -393,6 +423,13 @@ export function registerRoomCommand(pi: ExtensionAPI): void {
 
         case "config": {
           const [action, assignment] = rest.split(/\s+/).filter(Boolean);
+          if (action === "reset") {
+            // Through the save path (027): the file and the live store agree afterwards.
+            saveRoomConfig(store.root, { ...DEFAULT_ROOM_CONFIG, roomId: store.config.roomId });
+            store.config = loadRoomConfig(store.root);
+            report(ctx, pi, `room config → reset to defaults (roomId kept)`);
+            return;
+          }
           if (action !== "set") {
             for (const line of configLines(pi, store)) report(ctx, pi, line);
             return;
@@ -428,6 +465,102 @@ export function registerRoomCommand(pi: ExtensionAPI): void {
             pi,
             `room config → ${safe(key)}=${safe(String(coerced.value))} written to ${safe(configPath(store.root))}`,
           );
+          return;
+        }
+
+        case "recall": {
+          const pattern = rest.trim() === "" ? undefined : rest.trim();
+          if (pattern === undefined) {
+            report(ctx, pi, "recall requires <pattern>", "warning");
+            return;
+          }
+          // Same bounds as the tool op (same constants, same refusal text): a human pattern
+          // must never do what a model pattern cannot.
+          if (pattern.length > RECALL_PATTERN_MAX) {
+            report(ctx, pi, `pattern too long (max ${RECALL_PATTERN_MAX} chars)`, "warning");
+            return;
+          }
+          const refusal = recallRefusal(pattern);
+          if (refusal !== null) {
+            report(ctx, pi, refusal, "warning");
+            return;
+          }
+          let regex: RegExp;
+          try {
+            regex = new RegExp(pattern);
+          } catch {
+            report(ctx, pi, "invalid regex pattern", "warning");
+            return;
+          }
+          // Same newest-first scan and slice as the tool op (no deadline: human cadence is one
+          // recall per command, and the 512-char slice bounds the cost exactly like the tool path).
+          const matched: RoomRecord[] = [];
+          for (let i = store.records.length - 1; i >= 0; i--) {
+            const record = store.records[i]!;
+            const line = recordLine(record);
+            const probe = line.length > 512 ? line.slice(0, 512) : line;
+            if (regex.test(probe)) {
+              matched.push(record);
+              if (matched.length >= RECALL_LIMIT_MAX) break;
+            }
+          }
+          store.recallStats.recalls += 1;
+          const miss = matched.length === 0 && store.records.length > 0;
+          if (miss) store.recallStats.misses += 1;
+          const missLine = recallMissRate(store);
+          report(
+            ctx,
+            pi,
+            `room recall → ${matched.length} match(es)` +
+              (missLine === null
+                ? ""
+                : ` · miss rate ${(missLine.rate * 100).toFixed(1)}% (${missLine.misses}/${missLine.recalls} since open)`),
+          );
+          for (const record of matched.slice(0, 20)) report(ctx, pi, recordLine(record));
+          if (matched.length > 20) {
+            report(ctx, pi, `… +${matched.length - 20} more (tool op caps at ${RECALL_LIMIT_MAX})`);
+          }
+          return;
+        }
+
+        case "tree": {
+          const n = store.records.length;
+          const tiling = loadView(store.treePath, n, COVER_BUDGET_LINES);
+          report(ctx, pi, `room tree → ${tiling.length} block(s) over ${n} record(s)`);
+          for (const [lo, hi] of tiling) {
+            const size = hi - lo;
+            report(ctx, pi, `[${lo},${hi}) size ${size} ${size <= RAW_MAX ? "raw" : "summary"}`);
+          }
+          return;
+        }
+
+        case "zoom": {
+          const [loRaw, hiRaw] = rest.split(/\s+/).filter(Boolean);
+          const lo = loRaw === undefined ? NaN : Number(loRaw);
+          const hi = hiRaw === undefined ? NaN : Number(hiRaw);
+          if (!Number.isInteger(lo) || !Number.isInteger(hi)) {
+            report(ctx, pi, "zoom requires <lo> <hi> (integers)", "warning");
+            return;
+          }
+          const n = store.records.length;
+          const validation = validateZoomRange(lo, hi, n);
+          if (!validation.ok) {
+            report(ctx, pi, validation.error, "warning");
+            return;
+          }
+          const tree = openTreeStore(store.treePath, n);
+          const children = zoom(tree, lo, hi, (seq) => {
+            const record = store.records[seq];
+            return record !== undefined ? recordLine(record) : "";
+          });
+          report(ctx, pi, `room zoom → ${children.length} child(ren)`);
+          for (const c of children) {
+            report(
+              ctx,
+              pi,
+              `[${c.lo},${c.hi}) size ${c.size} ${c.raw ? "raw" : "summary"} · ${safe(c.text)}`,
+            );
+          }
           return;
         }
       }

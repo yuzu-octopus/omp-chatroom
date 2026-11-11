@@ -13,6 +13,7 @@ import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import {
   deliver,
   escapeForDelivery,
+  recordFields,
   renderLine,
   roomBodyOf,
   SEND_ACCEPT_BOUND_MS,
@@ -25,6 +26,7 @@ import {
   muteRoom,
   muteTopic,
   noteGap,
+  owedFloorFor,
   resetTurnBudget,
   selectT0,
   selectT1,
@@ -42,12 +44,7 @@ import {
   roomStoreFor,
 } from "../src/store/room-store";
 import type { RoomRecord } from "../src/store/schema";
-import {
-  notifyRecipients,
-  owedFloorFor,
-  type RoomToolResult,
-  registerRoomTool,
-} from "../src/tools/room";
+import { notifyRecipients, type RoomToolResult, registerRoomTool } from "../src/tools/room";
 
 // --- fixtures -------------------------------------------------------------
 
@@ -2245,4 +2242,55 @@ test("single-pass bucketing preserves the K/B overflow hint: oldest admitted, ne
   // delta is airtight at zero — no record is T0 for anyone. (The T1/T2 counters also count
   // ambient refs' T2 cursor bumps on this store, so they are not pinned.)
   expect(store.deliveries.T0 - before.T0).toBe(0);
+});
+
+// --- plan 030 Step 2R: one field switch, four byte-identical renderers ------------------
+
+test("recordFields covers every record kind: no kind reads an undeclared field", () => {
+  // Mutation target: a new record kind (or a renderer reading around the switch) breaks the
+  // invariant that every surface's fields come from the one switch. Each arm below exercises
+  // the kind's declared fields only.
+  const samples: RoomRecord[] = [
+    { v: 1, seq: 1, ts: 1, kind: "msg", id: "a", from: "A", topic: "t", body: "b" },
+    { v: 1, seq: 2, ts: 2, kind: "note", id: "b", from: "A", topic: "t", body: "b" },
+    { v: 1, seq: 3, ts: 3, kind: "claim", id: "c", from: "A", resource: "t/k", ttlMs: 1000 },
+    {
+      v: 1,
+      seq: 4,
+      ts: 4,
+      kind: "release",
+      from: "A",
+      resource: "t/k",
+      reason: "released",
+      prevHolder: "A",
+      id: "d",
+    },
+    { v: 1, seq: 5, ts: 5, kind: "member", from: "A", action: "join", id: "e" },
+    { v: 1, seq: 6, ts: 6, kind: "gap", from: "system", skipped: 3, reason: "retention", id: "f" },
+    { v: 1, seq: 7, ts: 7, kind: "contended", from: "A", resource: "t/k", holder: "B", id: "g" },
+    {
+      v: 1,
+      seq: 8,
+      ts: 8,
+      kind: "wait",
+      from: "A",
+      waited: "claim",
+      target: "t/k",
+      outcome: "event",
+      enqueuedAt: 0,
+      id: "h",
+    },
+    { v: 1, seq: 9, ts: 9, kind: "delivered", from: "A", deliveredSeq: 1, tier: "T0", id: "i" },
+  ];
+  for (const record of samples) {
+    const f = recordFields(record);
+    expect(f.from).toBe(record.from);
+    // Every surface renderer below must read through `f` — spot-check the kind-specific fields.
+    if (record.kind === "msg" || record.kind === "note") expect(f.body).toBe(record.body);
+    if (record.kind === "claim") expect(f.ttlMs).toBe(record.ttlMs);
+    if (record.kind === "gap") expect(f.skipped).toBe(record.skipped);
+    if (record.kind === "contended") expect(f.holder).toBe(record.holder);
+    if (record.kind === "wait") expect(f.target).toBe(record.target);
+    if (record.kind === "delivered") expect(f.deliveredSeq).toBe(record.deliveredSeq);
+  }
 });

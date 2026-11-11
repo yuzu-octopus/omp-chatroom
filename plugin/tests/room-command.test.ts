@@ -720,3 +720,67 @@ test("/room board escapes a forged <room-authored marker in member and topic tex
   // The closing form is escaped too: the lookahead covers `</room-authored`.
   expect(text).not.toContain("</room-authored");
 });
+
+// --- plan 032: recall/tree/zoom passthroughs + config reset (spike) ----------------
+
+test("/room recall enforces the tool op's bounds and renders identical lines", async () => {
+  // Mutation target: a hand-rolled bound or renderer here diverges from the tool op.
+  const notified: string[] = [];
+  const handler = captureHandler(notified);
+  const root = tempRoot();
+  const store = roomStoreForCwd(root);
+  store.append({ kind: "msg", from: "A", topic: "build", body: "hello deploy" });
+  store.append({ kind: "msg", from: "B", topic: "build", body: "nothing relevant" });
+
+  await handler("recall deploy", headlessCtx(root, notified));
+  const text = notified.join("\n");
+  expect(text).toContain("room recall → 1 match(es)");
+  expect(text).toContain("hello deploy");
+  expect(text).toContain("miss rate 0.0% (0/1 since open)");
+
+  // Over-long patterns and catastrophic shapes are refused with the tool op's sentences.
+  await handler(`recall ${"x".repeat(201)}`, headlessCtx(root, notified));
+  expect(notified.some((line) => line.includes("pattern too long (max 200 chars)"))).toBe(true);
+  await handler("recall (a+)+", headlessCtx(root, notified));
+  expect(
+    notified.some((line) => line.includes("pattern refused — catastrophic backtracking risk")),
+  ).toBe(true);
+
+  // A zero-match recall on a non-empty log counts the miss the trigger reads.
+  await handler("recall zzz-no-such-text", headlessCtx(root, notified));
+  expect(notified.some((line) => line.includes("miss rate 50.0% (1/2 since open)"))).toBe(true);
+});
+
+test("/room tree and zoom render the tool op's tiling without new bounds", async () => {
+  const notified: string[] = [];
+  const handler = captureHandler(notified);
+  const root = tempRoot();
+  const store = roomStoreForCwd(root);
+  store.append({ kind: "msg", from: "A", topic: "t", body: "one" });
+  store.append({ kind: "msg", from: "A", topic: "t", body: "two" });
+
+  await handler("tree", headlessCtx(root, notified));
+  expect(notified.some((line) => line.includes("room tree →"))).toBe(true);
+
+  await handler("zoom 0 2", headlessCtx(root, notified));
+  expect(notified.some((line) => line.includes("room zoom →"))).toBe(true);
+
+  // The tool op's range validation is reused, not reimplemented: an out-of-range zoom
+  // warns with the tool's own sentence (validateZoomRange) instead of rendering.
+  await handler("zoom 0 999", headlessCtx(root, notified));
+  expect(notified.at(-1)).toContain("invalid zoom range");
+});
+
+test("/room config reset restores defaults through the save path", async () => {
+  const notified: string[] = [];
+  const handler = captureHandler(notified);
+  const root = tempRoot();
+  const store = roomStoreForCwd(root);
+
+  await handler("config set maxBodyBytes=16", headlessCtx(root, notified));
+  expect(store.config.maxBodyBytes).toBe(16);
+
+  await handler("config reset", headlessCtx(root, notified));
+  expect(store.config.maxBodyBytes).toBe(8192);
+  expect(notified.some((line) => line.includes("reset to defaults"))).toBe(true);
+});
