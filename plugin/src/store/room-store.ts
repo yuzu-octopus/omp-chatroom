@@ -3,13 +3,13 @@ import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { noteGap } from "../attention/governor";
 import { globalMap } from "../globals";
 import { logPathFor, newMessageId, topicOf } from "../ids";
+import { forgetDigestTurn } from "../onboarding/digest";
 // The sweep carries EVERY record it appends (see the tick below); `appendedSince` is the one
 // watermark slice the op paths already use (tools/room.ts:617), so the sweep reuses it rather than
 // keeping a second copy of the rule. Safe against the tools/room → store/room-store cycle: it is
 // only called from the timer callback, long after both module bodies have evaluated, and neither
 // module touches the other's bindings at module scope.
 import { appendedSince, forgetDeliveryChain } from "../tools/room";
-import { forgetDigestTurn } from "../onboarding/digest";
 import { type ClaimState, expireStale, hydrateClaims } from "./claims";
 import { forgetCompactionRegistries, startCompactor, stopCompactor } from "./compactor";
 import { loadRoomConfig, type RoomConfig, resolveRoomId } from "./config";
