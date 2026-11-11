@@ -18,30 +18,7 @@
     "description": "In-process multi-agent chatroom: claim board, bounded chat, blocking waits",
     "extensions": [
       "./src/index.ts"
-    ],
-    "features": {
-      "room": {
-        "description": "Room store, claim board, and the room tool",
-        "default": true,
-        "extensions": [
-          "./src/index.ts"
-        ]
-      },
-      "wait-tools": {
-        "description": "Blocking wait tools (wait_for_claim, wait_for_agent, wait_for_message)",
-        "default": true,
-        "extensions": [
-          "./src/index.ts"
-        ]
-      },
-      "panel": {
-        "description": "TUI panel for the room (overlay, subcommands, board view)",
-        "default": true,
-        "extensions": [
-          "./src/index.ts"
-        ]
-      }
-    }
+    ]
   },
   "engines": {
     "bun": ">=1.4.4"
