@@ -25,9 +25,9 @@ import {
 import { DIGEST_MESSAGE_TYPE, registerHooks } from "../src/onboarding/hook";
 import rule from "../src/onboarding/routing-rule.md" with { type: "text" };
 import {
+  enforceRetention,
   type MemberState,
   type RoomStore,
-  enforceRetention,
   resetRoomStores,
   roomStoreFor,
   roomTimers,
@@ -277,7 +277,6 @@ test("a retention prune invalidates the cache: same seq, new tail, cache miss", 
   resetDigestCache();
   expect(buildDigest(store, v)).toBe(after);
 });
-
 
 // ---------------------------------------------------------------------------------------------
 // 3. K22 regression: room content cannot forge a harness tag or close the untrusted region.
