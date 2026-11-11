@@ -1,4 +1,4 @@
-import { afterEach, expect, test, vi } from "bun:test";
+import { afterEach, expect, spyOn, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -744,6 +744,46 @@ test("R5: deliveries are counted per tier, and a T0 is logged", async () => {
     expect(record.from).toBe("Sender");
     expect(record.tier).toBe("T0");
     expect(record.deliveredSeq).toBe(2);
+  }
+});
+test("Step 3 verdict: one T0 fan-out pays one fsync per delivered marker, user path untouched", async () => {
+  // Measured 2026-11-11: N recipients → N fsyncs, all through appendLine (the I5 path). The
+  // verdict keeps per-record fsync: markers share the fd with user records, so batching them
+  // behind one fsync cannot be proven crash-safe without a second un-fsync'd write path.
+  const root = tempRoot();
+  const ctx = fakeCtx(root, "Sender");
+  const store = roomStoreFor(ctx);
+  const N = 4;
+  const calls: Send[] = [];
+  for (let i = 0; i < N; i++) {
+    registerSession(`fan-${i}`, calls, true);
+    store.members.set(`fan-${i}`, {
+      agentId: `fan-${i}`,
+      joinedAtSeq: 0,
+      topics: new Set(["build"]),
+      muted: new Set(),
+      threadRoots: new Set(),
+      heldTopics: new Set(),
+    });
+  }
+  const record = store.append({
+    kind: "msg",
+    from: "Sender",
+    topic: "build",
+    body: "hello",
+    mention: Array.from({ length: N }, (_, i) => `fan-${i}`),
+  });
+  const { pi } = fakePi();
+  const spy = spyOn(fs, "fsyncSync");
+  try {
+    for (let i = 0; i < N; i++) {
+      await deliver(pi, fakeCtx(root, `fan-${i}`), `fan-${i}`, record, "T0");
+    }
+    // One fsync per delivered marker: the measured cost the verdict accepts.
+    expect(spy).toHaveBeenCalledTimes(N);
+    expect(store.records.filter((r) => r.kind === "delivered")).toHaveLength(N);
+  } finally {
+    spy.mockRestore();
   }
 });
 

@@ -346,9 +346,17 @@ export function appendLine(fd: number, line: string): void {
   // crash (process or machine) can drop a page-cached write, and I5 claims each append survives
   // one. This is the expensive part of an append, deliberately kept here (and synchronous) so
   // every writer funnels through the one durable path.
+  //
+  // Step 3 verdict (KEEP, measured 2026-11-11): one T0 fan-out to N recipients pays exactly N
+  // fsyncs — one per `delivered` marker, all through this path (counted: 8 markers → 8 fsyncs).
+  // Batching the markers behind ONE fsync was rejected: the markers share this fd with every
+  // user record, so a crash between the batched writes and the single fsync loses an UNBOUNDED
+  // prefix of user records too — the batch cannot be proven crash-safe without a second
+  // (un-fsync'd) write path, which is exactly the weakening I5 forbids. The cost is accepted:
+  // fsync latency on this filesystem measures ~0 ms p50/p90 (page-cache fast path), and a T0
+  // fan-out already pays one steering send per recipient, against which N fsyncs are noise.
   fs.fsyncSync(fd);
 }
-
 // Sync whole-file read; a partial trailing line is returned as-is and rejected by JSON.parse.
 function readAllLines(fd: number): string[] {
   const size = fs.fstatSync(fd).size;
