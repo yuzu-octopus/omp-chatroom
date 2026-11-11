@@ -336,8 +336,11 @@ export function disposeRoomSession(ctx: ExtensionContext): void {
   if (set === undefined || !set.delete(ctx.agent.id)) return;
   if (set.size === 0) SESSIONS.delete(root);
   STORES.get(root)?.dispose();
-  // The delivered-T0 registry lives in a globalThis map keyed by root: without this it grew a
-  // key per project for the life of the process. The wait-edge graph is the same shape.
+  // The registries below are per-ROOT while sessions share the root: the first session to leave
+  // must not wipe state a still-live session depends on (GIVEN marks — the next pass would
+  // re-send T0s as a wake+steer storm — or wait edges — blinding cycle detection for
+  // still-waiting peers). Only the dispose that evicted the root cleans up.
+  if (STORES.has(root) || SESSIONS.has(root)) return;
   forgetDeliveredT0(root);
   forgetWaitEdges(root);
 }
