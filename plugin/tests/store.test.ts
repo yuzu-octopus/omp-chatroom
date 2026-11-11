@@ -607,9 +607,9 @@ test("enforceRetention prunes to the config's logMaxRecords, not the default 500
   expect(store.records.filter((r) => r.kind !== "gap").length).toBe(5);
 });
 
-test("enforceRetention drops the idempotency key with its pruned post", () => {
-  // Line 389: the key's promise ("this post happened once") dies with the
-  // record it referred to — a repost after the prune is a new post.
+test("enforceRetention keeps the idempotency key as a tombstone for its pruned post", () => {
+  // R7 — the key's promise ("this post happened once") outlives the record: the key survives
+  // the prune pointing at a gone record, so a retry is refused instead of double-posting.
   const root = tempRoot();
   const storeRoot = path.join(root, ".omp-room");
   saveRoomConfig(storeRoot, { ...DEFAULT_ROOM_CONFIG, logMaxRecords: 3 });
@@ -621,11 +621,14 @@ test("enforceRetention drops the idempotency key with its pruned post", () => {
     clearInterval: () => {},
   } as unknown as ExtensionContext;
   const store = roomStoreFor(ctx);
-  store.append({ kind: "msg", from: "A", topic: "t", body: "keyed", idemKey: "k1" });
+  const keyed = store.append({ kind: "msg", from: "A", topic: "t", body: "keyed", idemKey: "k1" });
   for (let i = 0; i < 5; i++) store.append({ kind: "msg", from: "A", topic: "t", body: `f${i}` });
   expect(store.idemKeys.size).toBe(1);
   enforceRetention(store, Date.now());
-  expect(store.idemKeys.size).toBe(0);
+  // The record is gone from the projection …
+  expect(store.byId.has(keyed.id)).toBe(false);
+  // … but the key stays, pointing at it (the tool's dangle arm refuses a retry with it).
+  expect(store.idemKeys.size).toBe(1);
 });
 
 test("enforceRetention at scale drops exactly one prefix behind one gap (mutation: wrong count or over-clear fails)", () => {
@@ -665,7 +668,8 @@ test("enforceRetention at scale drops exactly one prefix behind one gap (mutatio
   expect(store.records[0].id).toBe(firstSurvivor);
   for (const id of droppedIds) expect(store.byId.has(id)).toBe(false);
   expect(store.byId.size).toBe(store.records.length);
-  expect(store.idemKeys.size).toBe(0);
+  // The 450 pruned keys survive as tombstones (refused on retry); only live records resolve.
+  expect(store.idemKeys.size).toBe(450);
 });
 
 // --- F1: room tool registers card renderers ---

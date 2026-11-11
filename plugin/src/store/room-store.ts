@@ -426,11 +426,9 @@ export function enforceRetention(store: RoomStore, now: number): RoomRecord | nu
   const removed = store.records.splice(0, dropped);
   for (const record of removed) {
     store.byId.delete(record.id);
-    // R7 — an idempotency key whose record was pruned must go with it: the key's promise is
-    // "this post happened once", and the post it referred to no longer exists.
-    if (record.kind === "msg" && record.idemKey !== undefined) {
-      store.idemKeys.delete(idemIndexKey(record.from, record.idemKey));
-    }
+    // R7 — a pruned idempotency key STAYS as a tombstone: the key's promise ("this post happened
+    // once") outlives the record, so a retry with the same key is refused (mint a fresh key)
+    // instead of silently appending a second post that double-wakes every mentioned peer.
   }
   // Tree positions are dense indices into `store.records`: the prune just shifted every survivor
   // under its summary, so the persisted tree is stale by construction. Invalidate it — the
