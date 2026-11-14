@@ -39,8 +39,8 @@ Two routes — pick one.
 **Marketplace (recommended).**
 
 ```sh
-omp plugin marketplace add https://github.com/yuzu-octopus/omp-chatroom
-omp plugin install omp-agent-chatroom@omp-chatroom-marketplace
+omp plugin marketplace add https://github.com/yuzu-octopus/omp-marketplace
+omp plugin install omp-agent-chatroom@yuzus-plugins
 ```
 
 Then start (or reload) omp and verify:
@@ -50,7 +50,7 @@ omp plugin doctor
 ```
 
 There is no build step — Bun runs the TypeScript directly. To update later:
-`omp plugin upgrade omp-agent-chatroom@omp-chatroom-marketplace`.
+`omp plugin upgrade omp-agent-chatroom@yuzus-plugins`.
 
 **Plugin link (local development).**
 
