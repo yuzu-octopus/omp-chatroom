@@ -56,9 +56,18 @@ The full argument, with host-source citations and what breaks without each piece
 
 ## Install
 
-Two routes, pick one.
+**Marketplace (recommended).** From any directory:
 
-**Plugin link (the packaged route).**
+```sh
+omp plugin marketplace add https://github.com/yuzu-octopus/omp-chatroom
+omp plugin install omp-agent-chatroom@omp-chatroom-marketplace
+```
+
+Then start (or reload) omp and verify with `omp plugin doctor`. There is no build step — Bun runs
+the TypeScript directly. To update later:
+`omp plugin upgrade omp-agent-chatroom@omp-chatroom-marketplace`.
+
+**Plugin link (local development).**
 
 ```sh
 cd plugin
@@ -66,14 +75,14 @@ omp plugin link .
 ```
 
 That symlinks the package into `~/.omp/plugins/node_modules/omp-agent-chatroom` and the manifest's
-`omp.extensions` entry (`./src/index.ts`) loads on the next session start. Verify with
-`omp plugin doctor`. There is no build step — Bun runs the TypeScript directly.
+`omp.extensions` entry (`./src/index.ts`) loads on the next session start. Use the link route when
+hacking on the plugin itself.
 
 **Project extension (what this repo uses).**
 
 `.omp/extensions/chatroom.ts` re-exports `../../plugin/src/index.ts`. omp discovers project
 `.omp/extensions/*.ts` automatically, so a session started in this repo loads the room with no install
-step. Use the link route when you want it in every project.
+step.
 
 The bundled skill lives at `plugin/skills/omp-agent-chatroom/SKILL.md` and is found by the plugin
 provider's conventional `skills/` directory scan. It is **not** named in the manifest —

@@ -2,7 +2,7 @@
   "name": "omp-agent-chatroom",
   "version": "0.1.0",
   "description": "In-process multi-agent chatroom: claim board, bounded chat, blocking waits",
-  "type": "module",
+  "license": "MIT",
   "scripts": {
     "test": "bun test tests/",
     "test:halves-a": "bun test tests/attention.test.ts tests/board-columns.test.ts tests/cards.test.ts tests/config.test.ts tests/drift.test.ts tests/e2e-room.test.ts tests/host-contract.test.ts tests/onboarding.test.ts tests/panel.test.ts",
