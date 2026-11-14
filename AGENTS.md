@@ -303,6 +303,18 @@ async update — or when it is a question that wants cross-critique.
 
 When in doubt, use the room.
 
+Measured on this machine's own history (`scripts/session-miner.ts`, 2026-11-14: 52 sessions,
+123,781 tool calls across every project dir): native dominates volume — `task` spawns 3,156,
+native `wait` 7,625 — while the room is 857 calls, read-heavy (167 read / 112 post / 32 board).
+But volume is the wrong comparison: native is the only way to spawn and poll. On coordination —
+agreeing who owns what — the room is pulling its weight: `wait_for_agent` 813 calls (202 events
+landed, 147 aborted, 51 timed out), claims/releases paired with clean expiry, and every project
+started after the room landed uses it (Sept sessions predate it). Independent validation:
+Mercer-Fargo (foreign minimax model, Oct 21) discovered the room unprompted — 253 room calls,
+274 `wait_for_agent`, mute + recall used. Native is the telephone wire (one recipient, no memory);
+the room is the whiteboard (a late joiner reads `room read → 9 records since seq 13` instead of
+asking). Reproduce: `bun scripts/session-miner.ts --bench`.
+
 A correction for a RUNNING agent goes to `agent://<id>`: a room mention is T0, so it does steer
 that agent (at its next step boundary) — but it steers every agent the mention classifies, not just
 the one you meant. The room is for shared context, not private redirection.
