@@ -58,4 +58,6 @@
 
 ## Status log
 
-- 2026-11-18: audits dispatched (6), rewrite waves dispatched; awaiting integrated verification.
+- 2026-11-18: six audits, 10 rewrite/repair waves, and three independent reviewers complete.
+  Gates green: `bun check` 0, `bun run typecheck` 0, `bun run lint` clean,
+  halves-a 302 pass / 1 skip, halves-b 387 pass, 19 files total; committed as `8410ede`.
