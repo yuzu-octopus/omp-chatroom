@@ -17,7 +17,17 @@ import {
   closeRoomLog,
   isWorkerThread,
   openRoomLog,
+  type RoomStateSnapshot,
   replay,
+  SNAPSHOT_INTERVAL,
+  SNAPSHOT_MAX_BYTES,
+  SNAPSHOT_MAX_ENTRIES,
+  SNAPSHOT_MAX_GEN,
+  SNAPSHOT_MAX_NAME_BYTES,
+  SNAPSHOT_MAX_SET,
+  type SnapshotClaim,
+  type SnapshotMember,
+  stateOf,
   WORKER_THREAD_REFUSAL,
 } from "./log";
 import { legacyRoomRoot, openMigratedRoom, roomRootFor } from "./room-root";
@@ -168,7 +178,14 @@ export function idemIndexKey(agentId: string, key: string): string {
 // listeners run, so a listener woken by a promotion sees the grant it is reacting to (claims.ts
 // owns the arbiter's rules — TTL/staleness/waiter promotion — not this projection).
 
-function project(store: RoomStore, record: RoomRecord): void {
+function project(store: RoomStore, record: RoomRecord, applyCarriedSnapshot = true): void {
+  // The carried snapshot represents the state BEFORE this record, so it is applied FIRST on
+  // replay and the record's delta still supplies the change. On a LIVE append, however, the
+  // projection already IS that state: applying the checkpoint would clear/rebuild the maps and
+  // orphan member objects whose post-append mutations (lastMessageId, waitedResource, topics)
+  // are performed after this call. The caller that just built the checkpoint passes false.
+  const snapshot = applyCarriedSnapshot ? stateOf(record) : null;
+  if (snapshot !== null) applySnapshot(store, snapshot);
   // R7 — the idempotency index is projected HERE, so a replay rebuilds it: a retry after a restart
   // must still find the record its key produced.
   if (record.kind === "msg" && record.idemKey !== undefined) {
@@ -225,6 +242,194 @@ export function pruneHeldTopic(store: RoomStore, holder: string, topic: string):
   }
   store.members.get(holder)?.heldTopics.delete(topic);
 }
+/**
+ * Build the compact checkpoint carried by an existing append. Each field keeps its most recent
+ * entries in insertion order; when an entry or byte cap is hit, whole entries are dropped from
+ * cursors → members → idem keys → generations → claims, and `truncated` records the loss.
+ */
+const SNAPSHOT_DROP_ORDER = ["cursors", "members", "idemKeys", "claimGens", "claims"] as const;
+
+function snapshotFits(state: RoomStateSnapshot): boolean {
+  try {
+    return JSON.stringify(state).length <= SNAPSHOT_MAX_BYTES;
+  } catch {
+    return false;
+  }
+}
+
+/** Drop whole oldest entries (never a substring) from the least durable field until it fits. */
+function trimSnapshotBytes(state: RoomStateSnapshot): void {
+  if (snapshotFits(state)) return;
+  state.truncated = true;
+  const lists = state as unknown as Record<(typeof SNAPSHOT_DROP_ORDER)[number], unknown[]>;
+  for (const field of SNAPSHOT_DROP_ORDER) {
+    const entries = lists[field];
+    if (entries.length === 0) continue;
+    // Lower bound: the smallest oldest-prefix drop whose retained suffix fits the byte cap.
+    let lo = 0;
+    let hi = entries.length;
+    while (lo < hi) {
+      const mid = Math.floor((lo + hi) / 2);
+      lists[field] = entries.slice(mid);
+      if (snapshotFits(state)) hi = mid;
+      else lo = mid + 1;
+    }
+    lists[field] = entries.slice(lo);
+    if (snapshotFits(state)) return;
+  }
+}
+
+function buildSnapshot(store: RoomStore, upTo: number): RoomStateSnapshot {
+  const text = (value: string): boolean => value.length <= SNAPSHOT_MAX_NAME_BYTES;
+  let truncated = false;
+  const recent = <T>(entries: T[]): T[] => {
+    if (entries.length <= SNAPSHOT_MAX_ENTRIES) return entries;
+    truncated = true;
+    return entries.slice(-SNAPSHOT_MAX_ENTRIES);
+  };
+
+  const claimGens: Array<[string, number]> = [];
+  for (const [resource, gen] of store.claimGens) {
+    if (!text(resource) || !Number.isInteger(gen) || gen < 1 || gen > SNAPSHOT_MAX_GEN) {
+      truncated = true;
+      continue;
+    }
+    claimGens.push([resource, gen]);
+  }
+
+  const claims: SnapshotClaim[] = [];
+  for (const claim of store.claims.values()) {
+    if (
+      !text(claim.resource) ||
+      !text(claim.holder) ||
+      !Number.isInteger(claim.acquiredAt) ||
+      claim.acquiredAt < 0 ||
+      !Number.isInteger(claim.seq) ||
+      claim.seq < 0 ||
+      claim.seq > upTo ||
+      !Number.isInteger(claim.gen) ||
+      claim.gen < 1 ||
+      claim.gen > SNAPSHOT_MAX_GEN ||
+      claim.dependsOn.length > SNAPSHOT_MAX_SET ||
+      claim.dependsOn.some((resource) => !text(resource))
+    ) {
+      truncated = true;
+      continue;
+    }
+    claims.push({
+      resource: claim.resource,
+      holder: claim.holder,
+      ttlMs: claim.ttlMs,
+      acquiredAt: claim.acquiredAt,
+      seq: claim.seq,
+      gen: claim.gen,
+      ...(claim.dependsOn.length > 0 ? { dependsOn: [...claim.dependsOn] } : {}),
+    });
+  }
+
+  const cursors: Array<[string, number]> = [];
+  for (const [agentId, cursor] of store.cursors) {
+    if (!text(agentId) || !Number.isInteger(cursor) || cursor < 0 || cursor > upTo) {
+      truncated = true;
+      continue;
+    }
+    cursors.push([agentId, cursor]);
+  }
+
+  const members: SnapshotMember[] = [];
+  for (const member of store.members.values()) {
+    const sets = [member.topics, member.muted, member.threadRoots, member.heldTopics];
+    if (
+      !text(member.agentId) ||
+      !Number.isInteger(member.joinedAtSeq) ||
+      member.joinedAtSeq < 0 ||
+      member.joinedAtSeq > upTo ||
+      sets.some((set) => set.size > SNAPSHOT_MAX_SET || [...set].some((v) => !text(v))) ||
+      (member.lastMessageId !== undefined && !text(member.lastMessageId)) ||
+      (member.waitedResource !== undefined && !text(member.waitedResource))
+    ) {
+      truncated = true;
+      continue;
+    }
+    members.push({
+      agentId: member.agentId,
+      joinedAtSeq: member.joinedAtSeq,
+      topics: [...member.topics],
+      muted: [...member.muted],
+      threadRoots: [...member.threadRoots],
+      heldTopics: [...member.heldTopics],
+      ...(member.lastMessageId === undefined ? {} : { lastMessageId: member.lastMessageId }),
+      ...(member.waitedResource === undefined ? {} : { waitedResource: member.waitedResource }),
+    });
+  }
+
+  const idemKeys: Array<[string, string]> = [];
+  for (const [key, id] of store.idemKeys) {
+    if (!text(key) || !text(id)) {
+      truncated = true;
+      continue;
+    }
+    idemKeys.push([key, id]);
+  }
+
+  const keptClaimGens = recent(claimGens);
+  const keptClaims = recent(claims);
+  const keptCursors = recent(cursors);
+  const keptMembers = recent(members);
+  const keptIdemKeys = recent(idemKeys);
+  const state: RoomStateSnapshot = {
+    v: 1,
+    seq: upTo,
+    truncated,
+    claimGens: keptClaimGens,
+    claims: keptClaims,
+    cursors: keptCursors,
+    members: keptMembers,
+    idemKeys: keptIdemKeys,
+  };
+  trimSnapshotBytes(state);
+  return state;
+}
+
+/**
+ * Apply a validated checkpoint to the live projection maps. `seq` is a watermark, not an id.
+ * A checkpoint is a bounded durable window: entries older than the cap are intentionally not
+ * restored. Logs written before `truncated` existed have no marker; their retained entries apply
+ * unchanged.
+ */
+function applySnapshot(store: RoomStore, snapshot: RoomStateSnapshot): void {
+  store.claims.clear();
+  for (const claim of snapshot.claims) {
+    store.claims.set(claim.resource, {
+      resource: claim.resource,
+      holder: claim.holder,
+      ttlMs: claim.ttlMs,
+      acquiredAt: claim.acquiredAt,
+      seq: claim.seq,
+      gen: claim.gen,
+      dependsOn: claim.dependsOn === undefined ? [] : [...claim.dependsOn],
+    });
+  }
+  store.claimGens.clear();
+  for (const [resource, gen] of snapshot.claimGens) store.claimGens.set(resource, gen);
+  store.cursors.clear();
+  for (const [agentId, cursor] of snapshot.cursors) store.cursors.set(agentId, cursor);
+  store.members.clear();
+  for (const member of snapshot.members) {
+    store.members.set(member.agentId, {
+      agentId: member.agentId,
+      joinedAtSeq: member.joinedAtSeq,
+      topics: new Set(member.topics),
+      muted: new Set(member.muted),
+      threadRoots: new Set(member.threadRoots),
+      heldTopics: new Set(member.heldTopics),
+      ...(member.lastMessageId === undefined ? {} : { lastMessageId: member.lastMessageId }),
+      ...(member.waitedResource === undefined ? {} : { waitedResource: member.waitedResource }),
+    });
+  }
+  store.idemKeys.clear();
+  for (const [key, id] of snapshot.idemKeys) store.idemKeys.set(key, id);
+}
 
 function createStore(root: string, roomId: string): RoomStore {
   const config = loadRoomConfig(root);
@@ -255,12 +460,25 @@ function createStore(root: string, roomId: string): RoomStore {
     append(draft: RoomRecordDraft): RoomRecord {
       // I1 — synchronous critical section: mint, write, project, notify with no await between.
       const seq = store.seq + 1;
-      const record = { v: 1, seq, ts: Date.now(), id: newMessageId(), ...draft } as RoomRecord;
+      // A retention gap already carries its own notice, and the interval keeps a checkpoint
+      // inside the bounded tail without appending another record (K19, no extra fsync).
+      const state =
+        draft.kind === "gap" || seq % SNAPSHOT_INTERVAL === 0
+          ? buildSnapshot(store, seq - 1)
+          : null;
+      const record = {
+        v: 1,
+        seq,
+        ts: Date.now(),
+        id: newMessageId(),
+        ...draft,
+        ...(state === null ? {} : { state }),
+      } as RoomRecord;
       appendLine(fd, `${JSON.stringify(record)}\n`);
       store.seq = seq;
       store.records.push(record);
       store.byId.set(record.id, record);
-      project(store, record);
+      project(store, record, false);
       for (const fn of [...store.listeners]) {
         try {
           fn(record);
@@ -504,8 +722,11 @@ export function enforceRetention(store: RoomStore, now: number): RoomRecord | nu
   }
   const dropped = Math.max(countDrop, ageDrop);
   if (dropped === 0) return null;
+  // The gap appended below occupies one projection slot. Without reserving it, a count-driven
+  // prune lands at cap+1 and every later tick splices one real record only to re-append its gap.
+  const budget = Math.min(store.records.length, Math.max(countDrop + 1, ageDrop));
   // One splice removes the exact prefix; no second append primitive is introduced.
-  const removed = store.records.splice(0, dropped);
+  const removed = store.records.splice(0, budget);
   for (const record of removed) {
     store.byId.delete(record.id);
     // R7 — a pruned idempotency key STAYS as a tombstone: the key's promise ("this post happened
@@ -517,7 +738,7 @@ export function enforceRetention(store: RoomStore, now: number): RoomRecord | nu
   // compactor rebuilds lazily, and reads fall back to raw records meanwhile (T2/T3).
   invalidateTree(store.treePath);
   // The drop is itself a record — the file is never truncated, only the projection (K19).
-  return noteGap(store, dropped, "retention");
+  return noteGap(store, budget, "retention");
 }
 
 // K3 — the third refcounted ctx.setInterval job: expireStale → release{reason:"expired"} →

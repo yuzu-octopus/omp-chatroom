@@ -82,6 +82,7 @@ function probe(cwd) {
 const payload = {
   fresh: probe(process.env.ROOM_E2E_PROJECT_DIR || ""),
   legacy: probe(process.env.ROOM_E2E_LEGACY_PROJECT_DIR || ""),
+  stranger: probe(process.env.ROOM_E2E_STRANGER_PROJECT_DIR || ""),
 };
 console.log(${JSON.stringify(RESULT_MARKER)} + JSON.stringify(payload));
 `;
@@ -182,11 +183,12 @@ function listTree(dir: string): string[] {
  * which costs ~10 s of transpiling — twice that would be a slow suite for no extra coverage.
  */
 function runChild(
-  projects: { fresh: string; legacy: string },
+  projects: { fresh: string; legacy: string; stranger: string },
   xdgDir: string,
 ): {
   fresh: ChildPayload;
   legacy: ChildPayload;
+  stranger: ChildPayload;
 } {
   const scriptPath = path.join(tempDir("omp-room-e2e-script-"), "child.ts");
   fs.writeFileSync(scriptPath, CHILD_SOURCE, "utf-8");
@@ -197,6 +199,7 @@ function runChild(
   env.XDG_CACHE_HOME = xdgDir;
   env.ROOM_E2E_PROJECT_DIR = projects.fresh;
   env.ROOM_E2E_LEGACY_PROJECT_DIR = projects.legacy;
+  env.ROOM_E2E_STRANGER_PROJECT_DIR = projects.stranger;
   // bun's own transpiler cache would otherwise land in $XDG_CACHE_HOME and share the temp dir
   // with the room store; keep the XDG tree to the room alone.
   env.BUN_RUNTIME_TRANSPILER_CACHE_PATH = tempDir("omp-room-e2e-bun-cache-");
@@ -226,7 +229,7 @@ function runChild(
   }
   // The child script above emits exactly this shape, so the cast is the boundary assertion; the
   // fields themselves are checked by the assertions that follow.
-  return parsed as { fresh: ChildPayload; legacy: ChildPayload };
+  return parsed as { fresh: ChildPayload; legacy: ChildPayload; stranger: ChildPayload };
 }
 
 interface Run {
@@ -240,6 +243,10 @@ interface Run {
   legacyRecord: string;
   fresh: ChildPayload;
   legacy: ChildPayload;
+  stranger: ChildPayload;
+  strangerProjectDir: string;
+  strangerRoot: string;
+  strangerId: string;
 }
 
 /** The one child run, shared by both tests (the child costs ~10 s to start). */
@@ -273,8 +280,27 @@ function ensureRun(): Run {
     `${JSON.stringify({ roomId: legacyId })}\n`,
     "utf-8",
   );
+  // A second legacy room with unrelated files in both the room dir and the legacy root: the
+  // migration must move its log without sweeping either file away.
+  const strangerProjectDir = makeProjectDir();
+  const strangerRoot = path.join(strangerProjectDir, ".omp-room");
+  const strangerRoomDir = path.join(strangerRoot, "room");
+  fs.mkdirSync(strangerRoomDir, { recursive: true });
+  const strangerId = roomIdFor(strangerRoot);
+  fs.writeFileSync(path.join(strangerRoomDir, `${strangerId}.jsonl`), `${legacyRecord}\n`, "utf-8");
+  // The pin travels with the log, so the child resolves the stranger's own id after migration.
+  fs.writeFileSync(
+    path.join(strangerRoomDir, "config.json"),
+    `${JSON.stringify({ roomId: strangerId })}\n`,
+    "utf-8",
+  );
+  fs.writeFileSync(path.join(strangerRoomDir, "keep.txt"), "keep-in-room\n", "utf-8");
+  fs.writeFileSync(path.join(strangerRoot, "keep.txt"), "keep-in-root\n", "utf-8");
 
-  const payload = runChild({ fresh: projectDir, legacy: legacyProjectDir }, xdgDir);
+  const payload = runChild(
+    { fresh: projectDir, legacy: legacyProjectDir, stranger: strangerProjectDir },
+    xdgDir,
+  );
   run = {
     xdgDir,
     projectDir,
@@ -284,8 +310,12 @@ function ensureRun(): Run {
     legacyId,
     legacyLog,
     legacyRecord,
-    fresh: payload.fresh,
     legacy: payload.legacy,
+    fresh: payload.fresh,
+    stranger: payload.stranger,
+    strangerProjectDir,
+    strangerRoot,
+    strangerId,
   };
   return run;
 }
@@ -355,6 +385,34 @@ test(
     expect(listTree(r.legacyProjectDir)).toEqual([]);
 
     // the user's real store was not used
+    for (const candidate of realStoreRooms(leaf)) {
+      expect(fs.existsSync(candidate)).toBe(false);
+    }
+  },
+  CHILD_TIMEOUT_MS,
+);
+
+test(
+  "migration leaves unrelated legacy files untouched in a real global-store open",
+  () => {
+    const r = ensureRun();
+    const payload = r.stranger;
+    const leaf = roomDirNameFor(r.strangerProjectDir);
+
+    // The log was really migrated to the global store.
+    expect(payload.roomId).toBe(r.strangerId);
+    expect(payload.logText).toContain("hello from the legacy room");
+    expect(fs.existsSync(path.join(payload.roomDir, `${r.strangerId}.jsonl`))).toBe(true);
+
+    // Unrelated data in the legacy room and at its root survived byte for byte. The room dir
+    // keeps its stray file, so the legacy root must NOT be removed recursively around it.
+    expect(fs.readFileSync(path.join(r.strangerRoot, "room", "keep.txt"), "utf-8")).toBe(
+      "keep-in-room\n",
+    );
+    expect(fs.readFileSync(path.join(r.strangerRoot, "keep.txt"), "utf-8")).toBe("keep-in-root\n");
+    expect(fs.existsSync(r.strangerRoot)).toBe(true);
+    expect(fs.existsSync(path.join(r.strangerRoot, "room"))).toBe(true);
+
     for (const candidate of realStoreRooms(leaf)) {
       expect(fs.existsSync(candidate)).toBe(false);
     }

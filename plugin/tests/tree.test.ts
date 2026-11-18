@@ -190,6 +190,8 @@ let lastMessageCount = 0;
 const prompts: string[] = [];
 /** Per-call canned reply (1-based); `undefined` → the deterministic block summary. */
 let replyFor: ((call: number) => string) | undefined;
+/** Test seam: hold a model reply open so an invalidate can land before the write. */
+let holdSummary: (() => Promise<void>) | undefined;
 /** Non-cyclic filler: a repeated character trips the provider's thinking-loop guard. */
 function filler(n: number): string {
   let s = "";
@@ -224,10 +226,13 @@ registerCustomApi(FAKE_API, (_model, context, options) => {
     queueMicrotask(() => stream.fail(new Error("forced summarizer failure")));
     return stream;
   }
-  // F7 — a canned reply per attempt lets a test script an over-long first reply, a short second.
+  const emit = (text: string): void => {
+    const send = holdSummary === undefined ? Promise.resolve() : holdSummary();
+    void send.then(() => stream.end(assistantMessage(text)));
+  };
   const canned = replyFor?.(llmCalls);
   if (canned !== undefined) {
-    queueMicrotask(() => stream.end(assistantMessage(canned)));
+    emit(canned);
     return stream;
   }
   // Deterministic: the summary is a pure function of the block the prompt names, so a rebuild
@@ -239,7 +244,7 @@ registerCustomApi(FAKE_API, (_model, context, options) => {
   const text = block
     ? `S${block[1]}-${block[2]} ${filler(Math.min(400, 10 * (Number(block[2]) - Number(block[1])) + 20))}`
     : "S?";
-  queueMicrotask(() => stream.end(assistantMessage(text)));
+  emit(text);
   return stream;
 });
 
@@ -511,6 +516,56 @@ test("a zero configured cap floors at 1: one node builds, then the cap bites", a
 
   __compactTest.resetSpend();
   stopCompactor(root);
+});
+
+test("the daily cap counts every model call, including retries (cap=1, five overlong replies)", async () => {
+  const { root, treePath } = tmpRootTree();
+  const store = fakeStore(treePath, [msg(0), msg(1), msg(2), msg(3)]);
+  store.config.compactionCallsPerDay = 1;
+  const { ctx } = fakeCtx("main");
+
+  __compactTest.resetSpend();
+  llmCalls = 0;
+  replyFor = () => filler(700); // every reply is too long → up to COMPACT_MAX_RETRIES calls
+  try {
+    // One logical compaction may spend up to five calls; with cap=1 exactly one is allowed.
+    // The first overlong reply is still the shortest candidate seen, so the node can build;
+    // the point is that no retry ever gets a second call past the cap.
+    await compactOnce(store, ctx, [0, 2]);
+    expect(llmCalls).toBe(1);
+    expect(compactionSpendToday(root)).toBe(1);
+
+    // The cap still bites on the next buildable block: a retry chain cannot multiply the budget,
+    // even though the fake model would answer five times.
+    expect(await compactOnce(store, ctx, [2, 4])).toBe(false);
+    expect(llmCalls).toBe(1);
+  } finally {
+    replyFor = undefined;
+    __compactTest.resetSpend();
+    stopCompactor(root);
+  }
+});
+
+test("a normal retry still succeeds when the daily cap allows both calls", async () => {
+  const { root, treePath } = tmpRootTree();
+  const store = fakeStore(treePath, [msg(0), msg(1)]);
+  store.config.compactionCallsPerDay = COMPACT_MAX_RETRIES;
+  const { ctx } = fakeCtx("main");
+
+  __compactTest.resetSpend();
+  llmCalls = 0;
+  let call = 0;
+  replyFor = () => (++call === 1 ? filler(700) : filler(200));
+  try {
+    expect(await compactOnce(store, ctx, [0, 2])).toBe(true);
+    expect(llmCalls).toBe(2);
+    expect(compactionSpendToday(root)).toBe(2);
+    expect(openTreeStore(treePath, 2).getNode(0, 2)).toBe(filler(200).trim());
+  } finally {
+    replyFor = undefined;
+    __compactTest.resetSpend();
+    stopCompactor(root);
+  }
 });
 
 test("a summarizer that fails every attempt skips the node without pausing the tree", async () => {
@@ -1109,6 +1164,41 @@ test("retention prunes the head AND invalidates the tree built over it", () => {
     expect(post.getNode(0, 2)).toBe("summary of seqs 51-52");
   } finally {
     resetRoomStores();
+  }
+});
+
+test("a summary delayed across invalidateTree cannot publish a stale node", async () => {
+  const { root, treePath } = tmpRootTree();
+  const store = fakeStore(treePath, [msg(0), msg(1)]);
+  const { ctx } = fakeCtx("main");
+  __compactTest.resetSpend(root);
+
+  const entered = Promise.withResolvers<void>();
+  const held = Promise.withResolvers<void>();
+  holdSummary = async () => {
+    entered.resolve();
+    await held.promise;
+  };
+  replyFor = () => "stale summary";
+
+  try {
+    const stale = compactOnce(store, ctx, [0, 2]);
+    await entered.promise; // the reply is ready, but it has not reached putNode yet
+    invalidateTree(treePath);
+    held.resolve();
+    expect(await stale).toBe(false);
+    expect(openTreeStore(treePath, 2).getNode(0, 2)).toBeNull();
+
+    // A fresh summary, started after the invalidate, can rebuild the node.
+    holdSummary = undefined;
+    replyFor = () => "fresh summary";
+    expect(await compactOnce(store, ctx, [0, 2])).toBe(true);
+    expect(openTreeStore(treePath, 2).getNode(0, 2)).toBe("fresh summary");
+  } finally {
+    held.resolve();
+    holdSummary = undefined;
+    replyFor = undefined;
+    __compactTest.resetSpend(root);
   }
 });
 

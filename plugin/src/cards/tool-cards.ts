@@ -106,7 +106,7 @@ function waitCallSummary(raw: unknown): string {
   return [`wait_for_message`, filter, timeout].filter((p): p is string => !!p).join(" ");
 }
 
-/** One-line result summary, derived from `details` (never from the rendered `content` text). */
+/** One-line result summary, derived from `details` (never from `content`) and escaped for both card backends. */
 function roomResultSummary(result: AgentToolResult<RoomToolDetails>): {
   meta: string[];
   error?: string;
@@ -114,7 +114,7 @@ function roomResultSummary(result: AgentToolResult<RoomToolDetails>): {
   const details = result.details;
   if (!details?.ok) {
     const error = details && "error" in details ? details.error : "failed";
-    return { meta: [], error: typeof error === "string" ? error : "failed" };
+    return { meta: [], error: typeof error === "string" ? safeRoomText(error) : "failed" };
   }
   switch (details.op) {
     case "join":
@@ -124,7 +124,7 @@ function roomResultSummary(result: AgentToolResult<RoomToolDetails>): {
     case "post":
       return { meta: ["posted", `seq ${details.seq}`] };
     case "claim":
-      return { meta: ["granted", details.holder] };
+      return { meta: ["granted", safeRoomText(details.holder)] };
     case "release":
       return { meta: ["released"] };
     case "board":
@@ -151,14 +151,21 @@ function roomResultSummary(result: AgentToolResult<RoomToolDetails>): {
 
 function waitResultSummary(details: WaitDetails | undefined): { meta: string[]; error?: string } {
   if (!details) return { meta: [] };
-  if (!details.ok) return { meta: [], error: details.error ?? "failed" };
+  if (!details.ok) {
+    const error = details.error ?? "failed";
+    return { meta: [], error: typeof error === "string" ? safeRoomText(error) : "failed" };
+  }
   // `outcome` is exhaustive over WaitOutcome; the trailing return keeps the function total even if
   // a future variant widens the union.
   switch (details.outcome) {
     case "event":
       if ("acquired" in details)
         return {
-          meta: [details.acquired ? `acquired ${details.claim?.resource ?? ""}`.trim() : "event"],
+          meta: [
+            details.acquired
+              ? `acquired ${safeRoomText(details.claim?.resource ?? "")}`.trim()
+              : "event",
+          ],
         };
       if ("message" in details && details.message) return { meta: ["message"] };
       return { meta: ["event"] };

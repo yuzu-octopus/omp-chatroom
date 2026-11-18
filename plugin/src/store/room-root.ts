@@ -8,6 +8,7 @@ import { configPath, isValidRoomId, loadRoomConfig } from "./config";
 import {
   acquireRoomLock,
   holdsRoomLock,
+  lockPathFor,
   releaseRoomLock,
   reserveRoomLock,
   roomWritePathIsSafe,
@@ -109,6 +110,26 @@ function rmTreeQuiet(target: string): void {
   } catch {
     // Best-effort: the legacy room is inert once its history is in the target.
   }
+}
+
+/**
+ * True when `dir` has no entries; a missing or unreadable directory counts as non-empty so the
+ * caller never guesses that it is safe to remove.
+ */
+function isEmptyDir(dir: string): boolean {
+  try {
+    return fs.readdirSync(dir).length === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Remove a directory only when it is already empty. The migration deletes the room's known files
+ * one by one; pruning a DIRECTORY must never sweep up an entry the migration did not put there.
+ */
+function rmEmptyDirQuiet(dir: string): void {
+  if (isEmptyDir(dir)) rmTreeQuiet(dir);
 }
 
 /** The legacy room's log files. */
@@ -267,10 +288,10 @@ export function migrateLegacyRoom(legacyRoot: string, targetRoot: string): boole
 /**
  * Remove the legacy room once its history has been copied into the target.
  *
- * The removal is a fixed sequence of EXACT paths: the files the copy took (the log(s) and the
- * config), then the tree cache, then the legacy `room/` directory, then the legacy root that
- * held it. Nothing sweeps the project and no path is derived from the project's contents, so a
- * stray file in the project tree can never be deleted by it.
+ * The removal deletes a fixed sequence of EXACT paths: the files the copy took (the log(s) and
+ * the config), then the tree cache, then the lock, then — ONLY IF EMPTY — the legacy `room/`
+ * directory and the legacy root that held it. The last two are never removed recursively: a
+ * stray file in either is the user's data, and no path is derived from the project's contents.
  *
  * `fs.rmSync` unlinks a symlink AS a link and never follows it into its target, and every
  * directory removal is guarded by an `lstat` check, so a link planted inside the legacy room
@@ -301,10 +322,12 @@ function removeLegacyRoom(
   for (const file of copied.files) rmQuiet(file);
   // 2. the tree cache.
   if (copied.tree !== null) rmTreeQuiet(copied.tree);
-  // 3. the legacy room directory.
-  rmTreeQuiet(legacyRoomDir);
-  // 4. the legacy root itself, so the project tree ends up with no `.omp-room` at all.
-  rmTreeQuiet(legacyRoot);
+  // 3. the lock, which is not one of the copied files but belongs to the migrated room.
+  rmQuiet(lockPathFor(legacyRoot));
+  // 4. the legacy room directory and root, ONLY when they are empty. Anything unexpected in
+  //    either is the user's data: leave it (and the parent directory) in place.
+  rmEmptyDirQuiet(legacyRoomDir);
+  rmEmptyDirQuiet(legacyRoot);
 }
 
 /**
@@ -421,7 +444,6 @@ function copyLegacyRoom(
     // would persist. A cold cache costs one rebuild; a wrong one costs the truth.
     const legacyTree = path.join(legacyRoomDir, "tree");
     const tree: string | null = fs.existsSync(legacyTree) ? legacyTree : null;
-    // The copy is in place: these are the legacy paths that may now go.
     return { files: staged.map((item) => item.src), tree };
   } finally {
     if (!targetHeld) releaseRoomLock(targetRoot);

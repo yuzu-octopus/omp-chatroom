@@ -33,7 +33,12 @@ import {
 } from "../src/store/room-store";
 import type { RoomRecord } from "../src/store/schema";
 import { viewPath } from "../src/store/tree-store";
-import { ROOM_DESCRIPTION, recallMissRate, registerRoomTool } from "../src/tools/room";
+import {
+  notifyRecipients,
+  ROOM_DESCRIPTION,
+  recallMissRate,
+  registerRoomTool,
+} from "../src/tools/room";
 import { zodStub } from "./zod-stub";
 
 // §3.1 — a real store over a real temp root; the real JSONL log is written (§3.3).
@@ -2212,4 +2217,53 @@ test("recallMissRate accumulates across recalls and reports the true fraction", 
   const rate = recallMissRate(store);
   expect(rate).toMatchObject({ recalls: 3, misses: 2 });
   expect(rate?.rate).toBeCloseTo(2 / 3);
+});
+
+test("a replayed gap sharing a real T2 record's seq is delivered as T1", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "room-tool-"));
+  const ctx = fakeCtx(root, "AgentA");
+  const store = roomStoreFor(ctx);
+  const t2 = store.append({
+    kind: "contended",
+    from: "Actor",
+    resource: "build/step",
+    holder: "Other",
+  });
+  // Replay quarantines the torn line at the preceding record's seq, then accepts a hand-written
+  // duplicate at that same seq: three distinct records, one seq. Seq orders them; it cannot
+  // identify them.
+  fs.appendFileSync(store.logPath, "{not json\n");
+  fs.appendFileSync(store.logPath, `${JSON.stringify({ ...t2, id: "duplicate-seq" })}\n`);
+  resetRoomStores();
+  const reopenedCtx = fakeCtx(root, "AgentA");
+  const reopened = roomStoreFor(reopenedCtx);
+  const gap = reopened.records.find((r) => r.kind === "gap");
+  expect(gap).toBeDefined();
+  expect(gap?.seq).toBe(t2.seq);
+  expect(reopened.records.filter((r) => r.seq === t2.seq)).toHaveLength(3);
+
+  const sent: string[] = [];
+  AgentRegistry.global().register({
+    id: "Follower",
+    displayName: "Follower",
+    kind: "sub",
+    status: "running",
+    session: {
+      async sendCustomMessage(payload: unknown) {
+        sent.push(JSON.stringify(payload));
+        return true;
+      },
+    } as never,
+  });
+  const pi = { sendMessage: () => {}, logger: { warn: () => {} } } as unknown as ExtensionAPI;
+  try {
+    await notifyRecipients(pi, reopenedCtx, reopened, [], "Actor");
+  } finally {
+    AgentRegistry.global().unregister("Follower");
+  }
+  const lines = sent.join("\n");
+  // The gap is a promised notify (T1), not a T2 cursor-only record swallowed by the real
+  // contended record that shares its seq.
+  expect(lines).toContain("record(s) skipped (corrupt)");
+  expect(lines).toContain("[T1]");
 });

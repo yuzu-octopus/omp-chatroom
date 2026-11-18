@@ -204,31 +204,32 @@ async function waitForClaim(
     settle(result);
   };
 
-  // The arbiter appends the `claim` record BEFORE it updates `store.claims`, so this listener must
-  // never read that map mid-append — the granted record is the authoritative signal.
+  // A release record never grants a lease: the arbiter's `resolveWaiters` appends an own-name
+  // `claim` record for the promotion. Store projection runs before listeners, so that record is
+  // the authoritative signal; a later own-name renewal is ignored once the wait has finished.
   const listener = (record: RoomRecord): void => {
+    if (finished) return;
     if (record.kind !== "claim" && record.kind !== "release") return;
     if (record.resource !== resource) return;
-    if (record.kind === "claim") {
-      if (record.from === agentId) {
-        finish(
-          eventResult(resource, {
-            resource,
-            holder: agentId,
-            ttlMs: record.ttlMs,
-            acquiredAt: record.ts,
-            seq: record.seq,
-            gen: store.claims.get(resource)?.gen ?? 1,
-            dependsOn: record.dependsOn ?? [],
-          }),
-        );
-        return;
-      }
-      // A foreign claim won the race: stay queued and keep waiting — never `acquired:false` (§4.4).
-      requeueWaiter(store, resource, agentId);
-      if (maxWaitMs !== undefined && Date.now() - startedAt > maxWaitMs)
-        finish(timeoutResult(resource, timeoutMs));
+    if (record.kind !== "claim") return;
+    if (record.from === agentId) {
+      finish(
+        eventResult(resource, {
+          resource,
+          holder: agentId,
+          ttlMs: record.ttlMs,
+          acquiredAt: record.ts,
+          seq: record.seq,
+          gen: store.claims.get(resource)?.gen ?? 1,
+          dependsOn: record.dependsOn ?? [],
+        }),
+      );
+      return;
     }
+    // A foreign claim won the race: stay queued and keep waiting — never `acquired:false` (§4.4).
+    requeueWaiter(store, resource, agentId);
+    if (maxWaitMs !== undefined && Date.now() - startedAt > maxWaitMs)
+      finish(timeoutResult(resource, timeoutMs));
   };
 
   const unsubscribe = store.addListener(listener);

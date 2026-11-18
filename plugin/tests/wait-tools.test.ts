@@ -2,9 +2,11 @@ import { expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { AgentToolResult, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { AgentRegistry, createAgentSession, SessionManager } from "@oh-my-pi/pi-coding-agent";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import roomExtension, { __roomTest } from "../src/index";
+import { observeWait } from "../src/tools/wait-for-agent";
 
 type Session = Awaited<ReturnType<typeof createAgentSession>>["session"];
 
@@ -78,6 +80,25 @@ function freshRoot(): string {
 }
 
 const textOf = (res: ToolResultEnvelope): string => res.content.map((c) => c.text ?? "").join("\n");
+
+/** Structured `room` read records, narrowed at the harness boundary. */
+function waitRecords(res: ToolResultEnvelope): Array<Record<string, unknown>> {
+  const records = res.details?.records;
+  if (!Array.isArray(records)) throw new Error("room read returned no records");
+  return records.filter(
+    (r): r is Record<string, unknown> =>
+      typeof r === "object" && r !== null && "kind" in r && r.kind === "wait",
+  );
+}
+
+/** Integration exception: the host owns ctx.setInterval, so fake timers cannot observe its heartbeat. */
+async function awaitHeartbeat(updates: unknown[]): Promise<void> {
+  const deadline = Date.now() + 3_000;
+  while (updates.length === 0) {
+    if (Date.now() >= deadline) throw new Error("no heartbeat observed within 3s");
+    await Bun.sleep(10);
+  }
+}
 
 /**
  * These tests wait on the room's own wait tools, whose timeout is 5 s — the same as bun's
@@ -1012,39 +1033,58 @@ test(
 );
 
 test(
-  "both new waits settle on abort and never throw",
+  "both observer waits settle on abort, record once, and never throw",
   async () => {
     const root = freshRoot();
     const bus = new EventBus();
     const registry = new AgentRegistry();
     const a = await newSession(bus, registry, root, "AgentA");
+    const acAgent = new AbortController();
+    const acMsg = new AbortController();
     try {
-      const ac = new AbortController();
       const agentP = toolOf(a, "wait_for_agent").execute(
         "c-abort-a",
         { agents: ["Ghost"], timeout: 30_000 },
-        ac.signal,
+        acAgent.signal,
       );
-      ac.abort();
-      const agent = await Promise.race([agentP, Bun.sleep(2_000).then(() => null)]);
-      expect(agent).not.toBeNull();
-      expect(agent!.details?.outcome).toBe("aborted");
-      expect(agent!.useless).toBe(true);
-      expect(Array.isArray(agent!.content)).toBe(true);
-
-      const ac2 = new AbortController();
       const msgP = toolOf(a, "wait_for_message").execute(
         "c-abort-m",
-        { timeout: 30_000 },
-        ac2.signal,
+        { from: "Ghost", timeout: 30_000 },
+        acMsg.signal,
       );
-      ac2.abort();
-      const msg = await Promise.race([msgP, Bun.sleep(2_000).then(() => null)]);
+      // Real-timer integration exception: give the host-owned listeners a bounded moment to
+      // install before aborting, so this exercises the observer lifecycle rather than the
+      // pre-aborted fast path already covered by the dedicated tests below.
+      await Bun.sleep(80);
+      acAgent.abort();
+      acMsg.abort();
+
+      const [agent, msg] = await Promise.all([
+        Promise.race([agentP, Bun.sleep(2_000).then(() => null)]),
+        Promise.race([msgP, Bun.sleep(2_000).then(() => null)]),
+      ]);
+      expect(agent).not.toBeNull();
+      expect(agent!.details).toMatchObject({ ok: true, outcome: "aborted" });
+      expect(agent!.useless).toBe(true);
+      expect(Array.isArray(agent!.content)).toBe(true);
       expect(msg).not.toBeNull();
-      expect(msg!.details?.outcome).toBe("aborted");
+      expect(msg!.details).toMatchObject({ ok: true, outcome: "aborted" });
       expect(msg!.useless).toBe(true);
       expect(Array.isArray(msg!.content)).toBe(true);
+
+      const read = await toolOf(a, "room").execute("c-read-abort-both", {
+        op: "read",
+        since: 0,
+        limit: 50,
+      });
+      const waits = waitRecords(read);
+      expect(waits.filter((w) => w.waited === "agent")).toHaveLength(1);
+      expect(waits.filter((w) => w.waited === "agent")[0]?.outcome).toBe("aborted");
+      expect(waits.filter((w) => w.waited === "message")).toHaveLength(1);
+      expect(waits.filter((w) => w.waited === "message")[0]?.outcome).toBe("aborted");
     } finally {
+      acAgent.abort();
+      acMsg.abort();
       await a.dispose();
     }
   },
@@ -1776,6 +1816,136 @@ test(
     } finally {
       await a.dispose();
     }
+  },
+  WAIT_TIMEOUT_MS,
+);
+
+test(
+  "a heartbeat update followed by a room event still returns the event result",
+  async () => {
+    const root = freshRoot();
+    const bus = new EventBus();
+    const registry = new AgentRegistry();
+    const a = await newSession(bus, registry, root, "AgentA");
+    const b = await newSession(bus, registry, root, "AgentB");
+    try {
+      const updates: ToolResultEnvelope[] = [];
+      const pending = toolOf(a, "wait_for_message").execute(
+        "c-hb-msg-event",
+        { from: "AgentB", timeout: 120_000 },
+        undefined,
+        (u: ToolResultEnvelope) => {
+          updates.push(u);
+        },
+      );
+      await awaitHeartbeat(updates);
+      expect(updates[0]?.details).toMatchObject({ ok: true, outcome: "timeout" });
+      expect(textOf(updates[0]!)).toMatch(/waiting \d+s/);
+
+      await toolOf(b, "room").execute("c-hb-post", {
+        op: "post",
+        topic: "sync",
+        body: "event after heartbeat",
+      });
+      const res = await Promise.race([pending, Bun.sleep(5_000).then(() => null)]);
+      expect(res).not.toBeNull();
+      expect(res!.details).toMatchObject({ ok: true, outcome: "event" });
+      expect(res!.details?.message).toMatchObject({ body: "event after heartbeat" });
+      expect(res!.useless).not.toBe(true);
+      // Heartbeats are progress, not settlements: none may overwrite the event outcome.
+      expect(updates.every((u) => u.details?.outcome === "timeout")).toBe(true);
+    } finally {
+      await a.dispose();
+      await b.dispose();
+    }
+  },
+  WAIT_TIMEOUT_MS,
+);
+
+test(
+  "a heartbeat update followed by a status change still returns the event result",
+  async () => {
+    AgentRegistry.resetGlobalForTests();
+    const root = freshRoot();
+    const bus = new EventBus();
+    const a = await newSession(bus, undefined, root, "AgentA");
+    const peer = await newSession(bus, undefined, root, "AgentB");
+    try {
+      const updates: ToolResultEnvelope[] = [];
+      const pending = toolOf(a, "wait_for_agent").execute(
+        "c-hb-agent-event",
+        { agents: ["AgentB"], timeout: 120_000 },
+        undefined,
+        (u: ToolResultEnvelope) => {
+          updates.push(u);
+        },
+      );
+      await awaitHeartbeat(updates);
+      expect(updates[0]?.details).toMatchObject({ ok: true, outcome: "timeout" });
+      expect(textOf(updates[0]!)).toMatch(/waiting \d+s/);
+
+      expect(AgentRegistry.global().setStatus("AgentB", "idle")).toBe(true);
+      const res = await Promise.race([pending, Bun.sleep(5_000).then(() => null)]);
+      expect(res).not.toBeNull();
+      expect(res!.details).toMatchObject({
+        ok: true,
+        outcome: "event",
+        agents: [{ id: "AgentB", status: "idle" }],
+      });
+      expect(updates.every((u) => u.details?.outcome === "timeout")).toBe(true);
+    } finally {
+      await a.dispose();
+      await peer.dispose();
+      AgentRegistry.resetGlobalForTests();
+    }
+  },
+  WAIT_TIMEOUT_MS,
+);
+
+test(
+  "a timeout callback delivered after an event cannot settle the wait twice",
+  async () => {
+    // The host ignores extra args on its session tool, so drive the shared lifecycle directly:
+    // this pins the settle-once guard in observeWait without depending on host timer plumbing.
+    type Details = { outcome: "event" | "timeout" | "aborted" };
+    const envelope = (outcome: Details["outcome"]): AgentToolResult<Details> => ({
+      content: [{ type: "text", text: outcome }],
+      details: { outcome },
+    });
+
+    let timerCallback!: () => void;
+    const ctx = {
+      setTimeout: (fn: () => void): number => {
+        timerCallback = fn;
+        return 1;
+      },
+      setInterval: (): number => 2,
+      clearTimer: (): void => {},
+    } as unknown as ExtensionContext;
+
+    let settleFromListener!: (result: AgentToolResult<Details>) => void;
+    const settled: Details["outcome"][] = [];
+    const pending = observeWait<Details>({
+      ctx,
+      timeoutMs: 1_000,
+      startedAt: Date.now(),
+      listen: (settle) => {
+        settleFromListener = settle;
+        return () => {};
+      },
+      timeout: () => envelope("timeout"),
+      abort: () => envelope("aborted"),
+      heartbeat: () => envelope("event"),
+      onSettled: (outcome) => settled.push(outcome),
+    });
+
+    settleFromListener(envelope("event"));
+    const result = await pending;
+    expect(result.details?.outcome).toBe("event");
+
+    // Deliberately deliver the timeout after the settle: cleanup alone must not be the guard.
+    timerCallback();
+    expect(settled).toEqual(["event"]);
   },
   WAIT_TIMEOUT_MS,
 );

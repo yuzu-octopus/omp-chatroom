@@ -23,6 +23,9 @@ export type WaitTarget =
   | { kind: "agent"; agentId: string }
   | { kind: "message"; from?: string };
 
+/** How a wait interprets several satisfiers; see `findWaitCycle`. */
+export type WaitCycleMode = "all" | "any";
+
 /** The agents this target can be satisfied by. A resource is satisfied by its holder. */
 function candidatesOf(
   target: WaitTarget,
@@ -67,6 +70,11 @@ export function clearWaitEdges(root: string, agentId: string): void {
  * `holderOf` resolves a resource to its current holder — the caller passes the room's claim map,
  * so this module does not depend on the store (claims.ts and room-store.ts both import this one).
  *
+ * `mode` defaults to "all": one candidate path back to the requester closes a cycle, which is
+ * correct when every target is required (require:"all") and for single-target claim/message waits.
+ * Pass "any" when one satisfier resolves the wait (require:"any" agent waits, filterless message
+ * waits): only refuse when EVERY candidate is blocked and has a path back to the requester.
+ *
  * The returned array names the agents in the cycle, in order, with the requester first.
  */
 export function findWaitCycle(
@@ -74,11 +82,59 @@ export function findWaitCycle(
   agentId: string,
   targets: readonly WaitTarget[],
   holderOf: (resource: string) => string | undefined,
+  mode: WaitCycleMode = "all",
 ): string[] | null {
   // A missing edge map is an empty one: the requester's own targets are still walked, so the
   // first waiter can detect a cycle it closes (e.g. waiting on itself) without prior edges.
   const edges = WAIT_EDGES.get(root);
   const blockedAgents = edges === undefined ? [] : [...edges.keys()];
+
+  if (mode === "any") {
+    // A path that reaches the requester closes a cycle. `from` identifies the agent whose wait
+    // is being walked, so a nested filterless message excludes that agent, not the requester.
+    const pathBackTo = (
+      from: string,
+      pending: readonly WaitTarget[],
+      seen: Set<string>,
+      path: string[],
+    ): string[] | null => {
+      for (const target of pending) {
+        for (const next of candidatesOf(target, holderOf, from, blockedAgents)) {
+          if (next === agentId) return [...path, next];
+          if (seen.has(next)) continue;
+          const nextTargets = edges?.get(next);
+          if (nextTargets === undefined) continue;
+          seen.add(next);
+          path.push(next);
+          const found = pathBackTo(next, nextTargets, seen, path);
+          path.pop();
+          seen.delete(next);
+          if (found !== null) return found;
+        }
+      }
+      return null;
+    };
+
+    let cyclePath: string[] | null = null;
+    for (const target of targets) {
+      const candidates = candidatesOf(target, holderOf, agentId, blockedAgents);
+      // No blocked satisfier is no evidence of a deadlock — an unblocked agent can act.
+      if (candidates.length === 0) return null;
+      for (const next of candidates) {
+        if (next === agentId) {
+          cyclePath ??= [agentId];
+          continue;
+        }
+        const nextTargets = edges?.get(next);
+        if (nextTargets === undefined) return null;
+        const path = pathBackTo(next, nextTargets, new Set([agentId, next]), [next]);
+        if (path === null) return null;
+        cyclePath ??= path;
+      }
+    }
+    return cyclePath === null ? null : [agentId, ...cyclePath];
+  }
+
   const seen = new Set<string>();
   const path: string[] = [];
   /** Walk one step: follow what an agent waits for to the agents that could satisfy it. */

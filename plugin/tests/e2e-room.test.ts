@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { AgentRegistry, createAgentSession, SessionManager } from "@oh-my-pi/pi-coding-agent";
 import { resolveLocalRoot } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
@@ -11,6 +12,7 @@ import { __compactTest } from "../src/store/compactor";
 import { DEFAULT_ROOM_CONFIG, resolveRoomId, saveRoomConfig } from "../src/store/config";
 
 type Session = Awaited<ReturnType<typeof createAgentSession>>["session"];
+type SessionModel = NonNullable<Parameters<typeof createAgentSession>[0]>["model"];
 
 /** Host generics are erased on `getToolByName`; restate the K1 envelope here. */
 interface ToolResultEnvelope {
@@ -46,6 +48,7 @@ async function newSession(
   id: string,
   main = false,
   configOverride: Partial<typeof DEFAULT_ROOM_CONFIG> = {},
+  model?: SessionModel,
 ) {
   // The compactor only starts for a MAIN session, and this file's sessions are main (the
   // claim-sweep job only runs there). Without this the compactor would fire REAL model calls at
@@ -73,6 +76,14 @@ async function newSession(
     enableMCP: false,
     enableLsp: false,
     hasUI: false,
+    ...(model === undefined
+      ? {}
+      : {
+          model,
+          cacheWarming: false,
+          disableModelFallback: true,
+          getApiKey: async () => "offline",
+        }),
   });
   return session;
 }
@@ -257,29 +268,54 @@ test(
 );
 
 test(
-  "the host loop delivers content arrays, not bare outcomes (K1 end-to-end)",
+  "the host loop delivers content arrays in tool_execution_end (K1 end-to-end)",
   async () => {
-    // NARROWED (2026-11-11 audit): the old version enumerated eight ops asserting each returns a
-    // non-empty content array — but the per-op content SHAPE is already pinned in room-tool.test.ts
-    // ("board content …", "topics/recall content …") through the same invokeRoom path, and the
-    // §11.1 test above already asserts winner.content through the real loop. What ONLY the real
-    // loop can prove is that the host's coercion preserves the array end-to-end (a direct
-    // execute() return never passes through it). One op is enough for that; the board is the one
-    // whose content the K1 defect actually hid.
+    // A real session turn is the only place pi-agent-core's coerceToolResult runs: a direct
+    // execute() return already has the plugin's shape. Seed one claim directly, then let a fake
+    // model call `room {op:"board"}` and inspect the event emitted AFTER host coercion.
+    registerMockApi();
+    const model = createMockModel({
+      responses: [
+        { content: [{ type: "toolCall", name: "room", arguments: { op: "board" } }] },
+        { content: ["done"] },
+      ],
+    });
     const root = freshRoot();
     const bus = new EventBus();
     const registry = new AgentRegistry();
-    const a = await newSession(bus, registry, root, "AgentA");
+    const a = await newSession(bus, registry, root, "AgentA", false, {}, model);
+    // The host's prompt preflight resolves a credential before the mock stream runs. Seed a
+    // runtime key on this session's registry: the documented host seam, with no real provider
+    // key and no network call.
+    a.modelRegistry.authStorage.keys.setRuntime(model.provider, "offline");
     try {
-      const room = toolOf(a, "room");
-      await room.execute("c-claim", { op: "claim", topic: "build", key: "step", ttl: 300_000 });
-      const board = await room.execute("c-board", { op: "board" });
-      expect(Array.isArray(board.content)).toBe(true);
-      expect(board.content.length).toBeGreaterThan(0);
-      expect(board.content[0]?.type).toBe("text");
-      // The K1 defect's signature: a bare count with no holder. Through the real loop it must
-      // still name the holder.
-      expect(board.content[0]?.text).toContain("AgentA");
+      await toolOf(a, "room").execute("c-claim", {
+        op: "claim",
+        topic: "build",
+        key: "step",
+        ttl: 300_000,
+      });
+      const ends: ToolResultEnvelope[] = [];
+      const unsubscribe = a.subscribe((event) => {
+        if (event.type === "tool_execution_end" && event.toolName === "room") {
+          // Host event types erase the tool-specific details; the K1 envelope is the contract.
+          const result: ToolResultEnvelope = event.result;
+          ends.push(result);
+        }
+      });
+      try {
+        await a.prompt("show the board");
+      } finally {
+        unsubscribe();
+      }
+      expect(ends.length).toBe(1);
+      const result = ends[0]!;
+      expect(Array.isArray(result.content)).toBe(true);
+      expect(result.content.length).toBeGreaterThan(0);
+      expect(result.content[0]?.type).toBe("text");
+      // The K1 defect's signature: a bare count with no holder. Through the host loop the
+      // text block must still name the holder.
+      expect(result.content[0]?.text).toContain("AgentA");
     } finally {
       await a.dispose();
     }

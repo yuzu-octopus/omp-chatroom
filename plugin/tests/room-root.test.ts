@@ -154,6 +154,54 @@ test("a successful migration leaves the tree cache behind: the target rebuilds i
   expect(fs.existsSync(legacy)).toBe(false);
 });
 
+test("migration never deletes an unrelated file under the legacy room", () => {
+  const legacy = tempRoot();
+  const target = tempRoot();
+  const legacyRoomDir = path.join(legacy, "room");
+  fs.mkdirSync(legacyRoomDir, { recursive: true });
+  const legacyId = roomIdFor(legacy);
+  const log = '{"seq":1}\n';
+  fs.writeFileSync(path.join(legacyRoomDir, `${legacyId}.jsonl`), log);
+  // The config pins the legacy id, so the copied log keeps its name at the target.
+  fs.writeFileSync(
+    path.join(legacyRoomDir, "config.json"),
+    `${JSON.stringify({ roomId: legacyId })}\n`,
+  );
+  // An unrelated file in the room dir: the migration copies the room, not the user's data.
+  const keepPath = path.join(legacyRoomDir, "keep.txt");
+  const keepBytes = Buffer.from("do not delete this\n");
+  fs.writeFileSync(keepPath, keepBytes);
+
+  expect(migrateLegacyRoom(legacy, target)).toBe(true);
+  // The log still travelled, byte for byte.
+  expect(fs.readFileSync(path.join(target, "room", `${legacyId}.jsonl`), "utf-8")).toBe(log);
+  // The unrelated file survived byte for byte, and neither directory was swept away.
+  expect(fs.readFileSync(keepPath)).toEqual(keepBytes);
+  expect(fs.existsSync(legacyRoomDir)).toBe(true);
+  expect(fs.existsSync(legacy)).toBe(true);
+});
+
+test("migration never deletes an unrelated file beside the legacy room dir", () => {
+  const legacy = tempRoot();
+  const target = tempRoot();
+  const legacyRoomDir = path.join(legacy, "room");
+  fs.mkdirSync(legacyRoomDir, { recursive: true });
+  const legacyId = roomIdFor(legacy);
+  fs.writeFileSync(path.join(legacyRoomDir, `${legacyId}.jsonl`), '{"seq":1}\n');
+  fs.writeFileSync(
+    path.join(legacyRoomDir, "config.json"),
+    `${JSON.stringify({ roomId: legacyId })}\n`,
+  );
+  const keepPath = path.join(legacy, "keep.txt");
+  const keepBytes = Buffer.from("also do not delete this\n");
+  fs.writeFileSync(keepPath, keepBytes);
+
+  expect(migrateLegacyRoom(legacy, target)).toBe(true);
+  expect(fs.existsSync(path.join(target, "room", `${legacyId}.jsonl`))).toBe(true);
+  expect(fs.readFileSync(keepPath)).toEqual(keepBytes);
+  expect(fs.readdirSync(legacy)).toEqual(["keep.txt"]);
+});
+
 test("migration never clobbers a room that already has a log", () => {
   const legacy = tempRoot();
   const target = tempRoot();
@@ -258,11 +306,16 @@ test("the removal never follows a symlink out of the tree", () => {
   fs.symlinkSync(outside, path.join(legacyRoomDir, "link-to-outside"));
 
   expect(migrateLegacyRoom(legacy, target)).toBe(true);
-  // The link was unlinked as a link; the directory it pointed at is untouched.
+  // The link was never followed: the directory it points at survives byte for byte.
   expect(fs.existsSync(path.join(outside, "precious.txt"))).toBe(true);
   expect(fs.readFileSync(path.join(outside, "precious.txt"), "utf-8")).toBe("precious");
-  expect(fs.existsSync(legacyRoomDir)).toBe(false);
-  expect(fs.existsSync(legacy)).toBe(false);
+  // A stray symlink is user data, so it blocks the empty-directory sweep: the link, the
+  // legacy room dir and the legacy root all stay in place.
+  const link = path.join(legacyRoomDir, "link-to-outside");
+  expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
+  expect(fs.readlinkSync(link)).toBe(outside);
+  expect(fs.existsSync(legacyRoomDir)).toBe(true);
+  expect(fs.existsSync(legacy)).toBe(true);
 });
 
 test("migration does not copy into a target that a LIVE process holds (F5)", () => {

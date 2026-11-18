@@ -206,21 +206,38 @@ function tooLongMessage(text: string): string {
   );
 }
 
+/** Spend one model call against the room's daily cap. Returns false when no call remains. */
+function spendCall(store: RoomStore): boolean {
+  if (atCap(store.root, configuredCap(store))) return false;
+  spendFor(store.root).today++;
+  return true;
+}
+
+/** Claim one call from the remaining budget, spending against the daily cap before the call. */
+function takeCall(store: RoomStore, remaining: { calls: number }): boolean {
+  if (remaining.calls <= 0 || !spendCall(store)) return false;
+  remaining.calls--;
+  return true;
+}
+
 /**
  * §3.6 merge shape — 2 inputs → 1 output. `hi - lo <= RAW_MAX` compresses the raw records;
  * a larger block compresses its two halves' summaries. Returns `""` when the block cannot be
- * built yet (the log does not reach it, or a half is unbuilt) or when every retry failed: the
- * caller skips the node, and readers fall back to the raw log (T3).
+ * built yet, the daily call budget is exhausted, or when every retry failed: the caller skips the
+ * node, and readers fall back to the raw log (T3).
  *
  * F7 — models can't count bytes, so the task shows a ruler exactly `TREE_REC` dashes long; the
  * reply is measured and, when over, retried in the SAME conversation with a cut message. Up to
- * COMPACT_MAX_RETRIES attempts, keeping the shortest reply seen.
+ * COMPACT_MAX_RETRIES attempts, keeping the shortest reply seen. Each attempt claims one call
+ * from the remaining budget and spends it against the daily cap BEFORE the model call, so a retry
+ * chain cannot secretly multiply the documented cap.
  */
 export async function summarizeBlock(
   ctx: ExtensionContext,
   store: RoomStore,
   lo: number,
   hi: number,
+  remaining: { calls: number } = { calls: COMPACT_MAX_RETRIES },
 ): Promise<string> {
   let body: string;
   // The block's RAW size — the reference the merge floor is measured against. It must NOT be the
@@ -267,6 +284,7 @@ export async function summarizeBlock(
   let best = "";
   let bestBytes = Number.POSITIVE_INFINITY;
   for (let attempt = 0; attempt < COMPACT_MAX_RETRIES; attempt++) {
+    if (!takeCall(store, remaining)) break; // cap counts MODEL CALLS, not logical compactions
     try {
       const message = await callSummarizer(ctx, context);
       const text = replyText(message);
@@ -318,11 +336,16 @@ export async function compactOnce(
   if (atCap(store.root, configuredCap(store))) return false; // T5 — the rate cap, before spending
   return withWriteMutex(store.root, async () => {
     if (tree.getNode(lo, hi) !== null) return false; // re-check inside the critical section
+    // The budget is computed INSIDE the mutex so concurrent compactions cannot each ticket the
+    // same remaining calls before any of them spends.
     if (atCap(store.root, configuredCap(store))) return false;
-    spendFor(store.root).today++; // one logical compaction = one call
-    const summary = await summarizeBlock(ctx, store, lo, hi);
-    if (summary === "") return false; // skipped; the raw log is the fallback (T2/T3)
-    return tree.putNode(lo, hi, summary);
+    const remaining = {
+      calls: Math.min(COMPACT_MAX_RETRIES, configuredCap(store) - compactionSpendToday(store.root)),
+    };
+    return summarizeBlock(ctx, store, lo, hi, remaining).then((summary) => {
+      if (summary === "") return false; // skipped; the raw log is the fallback (T2/T3)
+      return tree.putNode(lo, hi, summary);
+    });
   });
 }
 

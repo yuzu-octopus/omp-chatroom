@@ -62,21 +62,22 @@ advanced on delivery into context, never on send.
 
 ```sh
 cd plugin
-bun test tests/                                 # whole suite (646 pass, 1 skip, 18 files)
+bun ci --frozen-lockfile                        # install with lockfile drift check (CI first step)
+bun test tests/                                 # whole suite (19 test files)
 bun run test:halves-a; bun run test:halves-b    # the same suite as two alphabetical halves (see below)
 bun test tests/ --coverage                      # the same run with a coverage table (not a gate)
 bun check                                       # native typecheck, ~95 ms (CI runs it first)
 bun run typecheck                               # the same check via tsc, the authoritative gate
 bun run typecheck:fast                          # script alias for `bun check` (a script literally named
                                                 # `check` would shadow the native command, so it is not used)
-bunx --bun @biomejs/biome check src tests       # lint + format
-bunx --bun @biomejs/biome check src tests --write   # apply fixes
+bun run lint                                    # pinned local biome, lint + format
+bun run lint:fix                                # apply fixes
 ```
 
 **If the one-shot suite blocks**, run the two alphabetical halves via their scripts
 (`bun run test:halves-a`, `bun run test:halves-b` — the exact file lists below, scripted so
-newcomers do not copy-paste nine filenames) — every file passes alone and in halves; only all 18
-in one process hang, and only while another omp session is live on the machine (reproduced on a
+newcomers do not copy-paste them) — every file passes alone and in halves; only the whole suite in
+one process hangs, and only while another omp session is live on the machine (reproduced on a
 stashed tree, so it is the environment, not a test):
 
 ```sh
@@ -92,7 +93,7 @@ bun test tests/attention.test.ts tests/board-columns.test.ts tests/cards.test.ts
   tests/panel.test.ts
 bun test tests/room-command.test.ts tests/room-root.test.ts tests/room-root-e2e.test.ts \
   tests/room-tool.test.ts tests/store.test.ts tests/symbol-sets.test.ts tests/theme-fallback.test.ts \
-  tests/tree.test.ts tests/wait-tools.test.ts
+  tests/tree.test.ts tests/wait-claim-regression.test.ts tests/wait-tools.test.ts
 ```
 
 **There is no build step** — Bun runs the TypeScript directly and omp loads it in-process. Two load

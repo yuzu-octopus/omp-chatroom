@@ -340,10 +340,11 @@ subagents is unaffected — they live in the same process and share one room and
 
 ```sh
 cd plugin
-bun test tests/                                 # 646 pass / 1 skip, 647 run, 18 files
-bunx --bun tsc --noEmit -p tsconfig.json        # typecheck only
-bunx --bun @biomejs/biome check src tests       # lint + format check
-bunx --bun @biomejs/biome check src tests --write   # apply fixes
+bun ci --frozen-lockfile                        # lockfile drift (CI install step)
+bun test tests/                                 # 19 test files (last full run 2026-11-11: 646 pass / 1 skip, 647 run across 18 files)
+bun run typecheck                               # pinned local tsc, via the script
+bun run lint                                    # pinned local biome, lint + format check
+bun run lint:fix                                # apply fixes
 ```
 
 Bun only — never Node, npm, or npx. There is no build step; the design record behind every constant

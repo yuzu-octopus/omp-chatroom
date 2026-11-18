@@ -12,7 +12,9 @@ import {
 import { roomIdFor } from "../src/ids";
 import { enqueueWaiter } from "../src/store/claims";
 import { loadRoomConfig } from "../src/store/config";
-import { resetRoomStores, storeFor } from "../src/store/room-store";
+import { type RoomStore, resetRoomStores, storeFor } from "../src/store/room-store";
+import { registerRoomTool } from "../src/tools/room";
+import { zodStub } from "./zod-stub";
 
 function tempRoot(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "room-command-"));
@@ -63,7 +65,7 @@ function headlessCtx(root: string, notified: string[]): ExtensionContext {
 
 // The handler resolves its store via roomStoreFor(ctx) → <cwd>/.omp-room; the assertion store
 // must be opened on that same root or the two never meet.
-function roomStoreForCwd(root: string): ReturnType<typeof storeFor> {
+function roomStoreForCwd(root: string): RoomStore {
   const roomRoot = `${root}/.omp-room`;
   return storeFor(roomRoot, roomIdFor(roomRoot));
 }
@@ -140,10 +142,9 @@ test("/room claim with an unmet dependency is refused naming blocker and holder"
   // The R3 refusal names the blocking resource and who holds it (the tool path's wording).
   expect(notified.join("\n")).toContain("blocked — depends on build/schema (held by Other)");
   expect(store.claims.has("build/parser")).toBe(false);
-  // … and the loss is still a measurement: one contended record on the attempted resource.
-  const contended = store.records.filter((r) => r.kind === "contended");
-  expect(contended).toHaveLength(1);
-  expect(contended[0]).toMatchObject({ from: "Main", resource: "build/parser", holder: "Other" });
+  // A blocked dependency is not a lost race: no contended record (same on the tool path).
+  expect(store.records.filter((r) => r.kind === "contended")).toHaveLength(0);
+  expect(store.records.filter((r) => r.kind === "claim")).toHaveLength(1);
 });
 
 test("/room claim with free dependencies grants and records them on the lease", async () => {
@@ -804,4 +805,142 @@ test("/room board marks muted topics instead of hiding them", async () => {
   expect(notified.some((line) => line.includes("topic build") && line.includes("muted"))).toBe(
     true,
   );
+});
+
+// --- both surfaces share the mutation layer -----------------------------------------------
+
+/** The model tool, registered off a stub pi, driven against the same <cwd>/.omp-room store. */
+async function invokeRoomTool(
+  ctx: ExtensionContext,
+  params: Record<string, unknown>,
+): Promise<{ content: Array<{ text?: string }>; details?: Record<string, unknown> }> {
+  type ToolResult = { content: Array<{ text?: string }>; details?: Record<string, unknown> };
+  let tool:
+    | {
+        execute: (
+          id: string,
+          params: Record<string, unknown>,
+          signal: AbortSignal,
+          onUpdate: (u: unknown) => void,
+          ctx: ExtensionContext,
+        ) => Promise<ToolResult>;
+      }
+    | undefined;
+  const pi = {
+    zod: zodStub,
+    registerTool: (def: { name: string; execute: NonNullable<typeof tool>["execute"] }) => {
+      if (def.name === "room") tool = def;
+    },
+  } as unknown as ExtensionAPI;
+  registerRoomTool(pi);
+  if (!tool) throw new Error("room tool not registered");
+  return tool.execute("test", params, new AbortController().signal, () => {}, ctx);
+}
+
+test("renew behaves the same through /room claim and room{op:'claim'}", async () => {
+  for (const surface of ["command", "tool"] as const) {
+    const notified: string[] = [];
+    const root = tempRoot();
+    const handler = captureHandler(notified);
+    const ctx = headlessCtx(root, notified);
+    const store = roomStoreForCwd(root);
+    let renewed: Record<string, unknown> | undefined;
+    let toolText = "";
+    if (surface === "command") {
+      await handler("claim build step 60000", ctx);
+      await handler("claim build step 120000", ctx);
+    } else {
+      await invokeRoomTool(ctx, {
+        op: "claim",
+        topic: "build",
+        key: "step",
+        ttl: 60_000,
+      });
+      const result = await invokeRoomTool(ctx, {
+        op: "claim",
+        topic: "build",
+        key: "step",
+        ttl: 120_000,
+      });
+      renewed = result.details;
+      toolText = result.content.map((c) => c.text ?? "").join("\n");
+    }
+    const text = surface === "command" ? notified.join("\n") : toolText;
+    expect(text).toContain("renewed");
+    expect(text).toContain("expires in 120s");
+    if (surface === "tool") {
+      expect(renewed).toMatchObject({ ok: true, op: "claim", holder: "Main", renewed: true });
+    }
+    expect(store.claims.get("build/step")).toMatchObject({ holder: "Main", ttlMs: 120_000 });
+    expect(store.records.filter((r) => r.kind === "claim")).toHaveLength(2);
+    expect(store.records.filter((r) => r.kind === "contended")).toHaveLength(0);
+    expect(store.members.get("Main")?.heldTopics.has("build")).toBe(true);
+  }
+});
+
+test("blocked-by-dependency behaves the same through both entry points", async () => {
+  for (const surface of ["command", "tool"] as const) {
+    const notified: string[] = [];
+    const root = tempRoot();
+    const handler = captureHandler(notified);
+    const ctx = headlessCtx(root, notified);
+    const store = roomStoreForCwd(root);
+    // A live lease held by somebody else blocks the dependency.
+    store.append({ kind: "claim", from: "Other", resource: "build/schema", ttlMs: 60_000 });
+    let refused: Record<string, unknown> | undefined;
+    if (surface === "command") {
+      await handler("claim build parser 60000 build/schema", ctx);
+    } else {
+      refused = (
+        await invokeRoomTool(ctx, {
+          op: "claim",
+          topic: "build",
+          key: "parser",
+          ttl: 60_000,
+          dependsOn: ["build/schema"],
+        })
+      ).details;
+    }
+    const text = surface === "command" ? notified.join("\n") : JSON.stringify(refused);
+    expect(text).toContain("blocked — depends on build/schema (held by Other)");
+    if (surface === "tool") expect(refused).toMatchObject({ ok: false, holder: "Other" });
+    expect(store.claims.has("build/parser")).toBe(false);
+    // No lost race was recorded: blocked is not contention, on either surface.
+    expect(store.records.filter((r) => r.kind === "contended")).toHaveLength(0);
+    expect(store.records.filter((r) => r.kind === "claim")).toHaveLength(1);
+  }
+});
+
+test("/room claim and /room post mint the writer's member without /room join", async () => {
+  const notified: string[] = [];
+  const handler = captureHandler(notified);
+  const root = tempRoot();
+  const store = roomStoreForCwd(root);
+
+  await handler("claim build step 60000", headlessCtx(root, notified));
+  await handler("post build hello", headlessCtx(root, notified));
+
+  const member = store.members.get("Main");
+  expect(member).toBeDefined();
+  expect(member?.heldTopics.has("build")).toBe(true);
+  expect(member?.topics.has("build")).toBe(true);
+  expect(member?.lastMessageId).toBeDefined();
+});
+
+test("/room claim and /room post refuse oversized topic/key before append", async () => {
+  const notified: string[] = [];
+  const handler = captureHandler(notified);
+  const root = tempRoot();
+  const store = roomStoreForCwd(root);
+  const before = store.records.length;
+
+  await handler(`claim ${"t".repeat(513)} step 60000`, headlessCtx(root, notified));
+  await handler(`claim build ${"k".repeat(513)} 60000`, headlessCtx(root, notified));
+  await handler(`post ${"t".repeat(513)} hello`, headlessCtx(root, notified));
+
+  const text = notified.join("\n");
+  expect(text).toContain("topic exceeds its 512-byte cap");
+  expect(text).toContain("key exceeds its 512-byte cap");
+  expect(store.records.length).toBe(before);
+  expect(store.claims.size).toBe(0);
 });

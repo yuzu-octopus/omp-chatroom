@@ -47,18 +47,24 @@ import {
   releaseRoomLock,
   replay,
   roomLogFd,
+  SNAPSHOT_INTERVAL,
+  SNAPSHOT_MAX_BYTES,
+  SNAPSHOT_MAX_ENTRIES,
+  stateOf,
   validateRecord,
 } from "../src/store/log";
 import {
   disposeRoomSession,
   enforceRetention,
   idemIndexKey,
+  REPLAY_TAIL_MARGIN,
   type RoomStore,
   registerSweepNotifier,
   resetRoomStores,
   roomStoreFor,
   roomTimers,
   storeFor,
+  viewerFor,
 } from "../src/store/room-store";
 import type { RoomRecord } from "../src/store/schema";
 import { openTreeStore } from "../src/store/tree-store";
@@ -631,8 +637,9 @@ test("enforceRetention prunes to the config's logMaxRecords, not the default 500
   expect(store.records.length).toBe(10);
 
   enforceRetention(store, Date.now());
-  // 5 remaining + 1 gap record appended by enforceRetention
-  expect(store.records.filter((r) => r.kind !== "gap").length).toBe(5);
+  // The appended gap occupies one budgeted slot: 4 real records + 1 gap = logMaxRecords.
+  expect(store.records.filter((r) => r.kind !== "gap").length).toBe(4);
+  expect(store.records.length).toBe(5);
 });
 
 test("enforceRetention keeps the idempotency key as a tombstone for its pruned post", () => {
@@ -685,13 +692,13 @@ test("enforceRetention at scale drops exactly one prefix behind one gap (mutatio
     const record = store.append(draft as Parameters<RoomStore["append"]>[0]);
     if (i < 450) droppedIds.push(record.id);
   }
-  const firstSurvivor = store.records[450].id;
+  const firstSurvivor = store.records[451].id;
   const gap = enforceRetention(store, Date.now());
   expect(gap).not.toBeNull();
   if (gap === null || gap.kind !== "gap") throw new Error("expected one retention gap");
-  expect(gap.skipped).toBe(450);
+  expect(gap.skipped).toBe(451);
   expect(store.records.filter((r) => r.kind === "gap").length).toBe(1);
-  expect(store.records.filter((r) => r.kind !== "gap").length).toBe(50);
+  expect(store.records.filter((r) => r.kind !== "gap").length).toBe(49);
   expect(store.records.at(-1)!.id).toBe(gap.id);
   expect(store.records[0].id).toBe(firstSurvivor);
   for (const id of droppedIds) expect(store.byId.has(id)).toBe(false);
@@ -849,9 +856,9 @@ test("enforceRetention appends a gap record via noteGap", () => {
   expect(gap).not.toBeNull();
   expect(gap!.kind).toBe("gap");
   if (gap!.kind !== "gap") throw new Error("expected gap record");
-  expect(gap!.skipped).toBe(5);
+  expect(gap!.skipped).toBe(6);
   expect(gap!.reason).toBe("retention");
-  expect(store.records.length).toBe(6); // 5 remaining + 1 gap
+  expect(store.records.length).toBe(5); // 4 remaining + 1 gap
 });
 
 // --- F5: claim adds topic to heldTopics; classify returns T1 ---
@@ -1030,9 +1037,8 @@ test("roomTimers.start with no timer API schedules nothing and never throws", ()
 });
 
 test("roomTimers prune tick runs enforceRetention on the store", () => {
-  // Line 434: the prune handle calls enforceRetention with the live store.
-  // Captured (not fired by a real clock): invoking the handle prunes past
-  // the cap and appends the retention gap record.
+  // The retention gap occupies a projection slot: with cap 3 and five seeded records, the
+  // prune drops three and appends its gap, leaving two real records with the gap inside the cap.
   const root = tempRoot();
   const store = storeFor(root, roomIdFor(root));
   store.config.logMaxRecords = 3;
@@ -1049,7 +1055,7 @@ test("roomTimers prune tick runs enforceRetention on the store", () => {
   try {
     expect(callbacks.length).toBe(2);
     callbacks[0]();
-    expect(store.records.filter((r) => r.kind !== "gap").length).toBe(3);
+    expect(store.records.filter((r) => r.kind !== "gap").length).toBe(2);
     expect(store.records.some((r) => r.kind === "gap")).toBe(true);
   } finally {
     roomTimers.stop(root);
@@ -1953,4 +1959,415 @@ test("reopen past the bound replays the tail: seq survives, head is a gap", () =
   } finally {
     store.dispose();
   }
+});
+
+// --- bounded replay: compact state checkpoint -------------------------------
+
+test("reopen past the replay bound recovers an old claim, idem key and cursor from a carried snapshot", () => {
+  const dir = tempRoot();
+  const root = `${dir}/.omp-room`;
+  saveRoomConfig(root, { ...DEFAULT_ROOM_CONFIG, logMaxRecords: 5 });
+  const roomId = roomIdFor(root);
+  const s = storeFor(root, roomId);
+  expect(grant(s, "build/step", "A", 60_000).ok).toBe(true);
+  const keyed = s.append({
+    kind: "msg",
+    from: "A",
+    topic: "t",
+    body: "keyed",
+    idemKey: "old-key",
+  });
+  bumpCursor(s, "A", 2);
+
+  // Fill beyond logMaxRecords + margin: the original state records fall outside the replay
+  // tail, while an interval checkpoint carries their projection forward.
+  const bound = 5 + REPLAY_TAIL_MARGIN;
+  const total = bound + SNAPSHOT_INTERVAL + 10;
+  for (let seq = s.seq + 1; seq <= total; seq++) {
+    s.append({ kind: "msg", from: "A", topic: "t", body: `fill-${seq}` });
+  }
+  const bounded = replay(roomLogFd(root, roomId), {
+    maxRecords: bound,
+    tailBytes: 4_194_304,
+  });
+  const firstKept = bounded.records.find((r) => r.kind !== "gap");
+  expect(firstKept).toBeDefined();
+  expect(firstKept!.seq).toBeGreaterThan(2);
+  expect(bounded.records.some((r) => stateOf(r) !== null)).toBe(true);
+
+  const r = reopenStore(root);
+  try {
+    expect(r.claims.get("build/step")?.holder).toBe("A");
+    expect(r.claims.get("build/step")?.gen).toBe(1);
+    expect(r.idemKeys.get(idemIndexKey("A", "old-key"))).toBe(keyed.id);
+    expect(r.cursors.get("A")).toBe(2);
+  } finally {
+    r.dispose();
+  }
+});
+
+test("a checkpoint past the entry cap stays bounded, is marked truncated, and replays recent state", () => {
+  const dir = tempRoot();
+  const root = `${dir}/.omp-room`;
+  saveRoomConfig(root, { ...DEFAULT_ROOM_CONFIG, logMaxRecords: 5 });
+  const roomId = roomIdFor(root);
+  const s = storeFor(root, roomId);
+
+  expect(grant(s, "build/step", "A", 60_000).ok).toBe(true);
+  expect(release(s, "build/step", "A", "released")).toBe(true);
+  expect(grant(s, "build/step", "B", 60_000).ok).toBe(true);
+  expect(s.claimGens.get("build/step")).toBe(2);
+
+  let recentId = "";
+  for (let i = 0; i < SNAPSHOT_MAX_ENTRIES + 1; i++) {
+    const record = s.append({
+      kind: "msg",
+      from: "A",
+      topic: "t",
+      body: `key-${i}`,
+      idemKey: `k${i}`,
+    });
+    if (i === SNAPSHOT_MAX_ENTRIES) recentId = record.id;
+  }
+
+  const checkpointSeq = SNAPSHOT_INTERVAL * (Math.floor(s.seq / SNAPSHOT_INTERVAL) + 1);
+  while (s.seq < checkpointSeq) {
+    s.append({ kind: "msg", from: "A", topic: "t", body: "fill" });
+  }
+  const checkpoint = s.records.find((r) => r.seq === checkpointSeq);
+  expect(checkpoint).toBeDefined();
+  const snapshot = checkpoint === undefined ? null : stateOf(checkpoint);
+  expect(snapshot).not.toBeNull();
+  if (snapshot === null) throw new Error("expected a bounded checkpoint");
+  expect(snapshot.truncated).toBe(true);
+  expect(snapshot.idemKeys.length).toBe(SNAPSHOT_MAX_ENTRIES);
+  expect(snapshot.idemKeys[0]?.[0]).not.toBe(idemIndexKey("A", "k0"));
+  expect(snapshot.idemKeys.at(-1)).toEqual([
+    idemIndexKey("A", `k${SNAPSHOT_MAX_ENTRIES}`),
+    recentId,
+  ]);
+
+  // Put the checkpoint behind the replay tail: the original claim records are gone from view,
+  // so the next open can only rebuild generation state from the checkpoint itself.
+  const pastTail = checkpointSeq + SNAPSHOT_INTERVAL + REPLAY_TAIL_MARGIN + SNAPSHOT_INTERVAL;
+  while (s.seq < pastTail) {
+    s.append({ kind: "msg", from: "A", topic: "t", body: "tail" });
+  }
+
+  const r = reopenStore(root);
+  try {
+    expect(r.idemKeys.get(idemIndexKey("A", `k${SNAPSHOT_MAX_ENTRIES}`))).toBe(recentId);
+    expect(r.idemKeys.get(idemIndexKey("A", "k0"))).toBeUndefined();
+    expect(r.claimGens.get("build/step")).toBe(2);
+    expect(r.claims.get("build/step")?.gen).toBe(2);
+    expect(release(r, "build/step", "B", "released")).toBe(true);
+    expect(grant(r, "build/step", "C", 60_000).ok).toBe(true);
+    expect(r.claimGens.get("build/step")).toBe(3);
+  } finally {
+    r.dispose();
+  }
+});
+
+test("byte-capped checkpoints drop whole cursors first and keep every retained string intact", () => {
+  const root = tempRoot();
+  const roomId = roomIdFor(root);
+  const s = storeFor(root, roomId);
+  expect(grant(s, "build/step", "A", 60_000).ok).toBe(true);
+  s.idemKeys.set(idemIndexKey("A", "tombstone"), "gone-id");
+
+  const prefix = "c".repeat(500);
+  const seeded = 1200;
+  for (let i = 0; i < seeded; i++) {
+    s.cursors.set(`${prefix}-${i.toString().padStart(3, "0")}`, 1);
+  }
+  while (s.seq < SNAPSHOT_INTERVAL - 1) {
+    s.append({ kind: "msg", from: "A", topic: "t", body: "fill" });
+  }
+  const checkpoint = s.append({ kind: "msg", from: "A", topic: "t", body: "checkpoint" });
+  expect(checkpoint.seq).toBe(SNAPSHOT_INTERVAL);
+  const snapshot = stateOf(checkpoint);
+  expect(snapshot).not.toBeNull();
+  if (snapshot === null) throw new Error("expected a byte-bounded checkpoint");
+  expect(snapshot.truncated).toBe(true);
+  expect(JSON.stringify(snapshot).length).toBeLessThanOrEqual(SNAPSHOT_MAX_BYTES);
+  expect(snapshot.cursors.length).toBeLessThan(seeded);
+  const longCursors = snapshot.cursors.filter(([agentId]) => agentId.startsWith(prefix));
+  expect(longCursors.length).toBeGreaterThan(0);
+  // Seeded ids have a 3- or 4-digit suffix and keep their value; short fixture ids may survive too.
+  expect(
+    longCursors.every(
+      ([agentId, seq]) =>
+        agentId.startsWith(prefix) &&
+        (agentId.length === prefix.length + 4 || agentId.length === prefix.length + 5) &&
+        /^\d{3,4}$/.test(agentId.slice(prefix.length + 1)) &&
+        seq === 1,
+    ),
+  ).toBe(true);
+  expect(snapshot.claims.some((claim) => claim.resource === "build/step")).toBe(true);
+  expect(snapshot.claimGens.some(([resource]) => resource === "build/step")).toBe(true);
+  expect(snapshot.idemKeys.some(([key]) => key === idemIndexKey("A", "tombstone"))).toBe(true);
+  // grant() appends a claim but mints no member row, so this fixture has no roster entry to trim.
+});
+
+test("a legacy checkpoint without a truncated marker still replays its retained entries", () => {
+  const root = tempRoot();
+  const roomId = roomIdFor(root);
+  const fd = roomLogFd(root, roomId);
+  const legacy = {
+    ...msg(1),
+    state: {
+      v: 1,
+      seq: 0,
+      claimGens: [["build/legacy", 2]],
+      claims: [],
+      cursors: [],
+      members: [],
+      idemKeys: [["1:A", "legacy-id"]],
+    },
+  };
+  expect(validateRecord(legacy)).not.toBeNull();
+  appendLine(fd, `${JSON.stringify(legacy)}\n`);
+  const { records, skipped } = replay(fd);
+  expect(skipped).toBe(0);
+  const state = stateOf(records[0]!);
+  expect(state).not.toBeNull();
+  expect(state?.truncated).toBeUndefined();
+  closeRoomLog(root, roomId);
+  resetRoomStores();
+  const s = storeFor(root, roomId);
+  try {
+    expect(s.claimGens.get("build/legacy")).toBe(2);
+    expect(s.idemKeys.get("1:A")).toBe("legacy-id");
+  } finally {
+    s.dispose();
+  }
+});
+
+test("a non-boolean truncated marker quarantines its carried snapshot", () => {
+  const bad = {
+    ...msg(1),
+    state: {
+      v: 1,
+      seq: 0,
+      truncated: "yes",
+      claimGens: [],
+      claims: [],
+      cursors: [],
+      members: [],
+      idemKeys: [],
+    },
+  };
+  expect(validateRecord(bad)).toBeNull();
+});
+
+test("a live checkpoint append keeps the member object and its post-append mutations", () => {
+  const root = tempRoot();
+  const roomId = roomIdFor(root);
+  const s = storeFor(root, roomId);
+  const member = viewerFor(s, "A");
+  expect(grant(s, "build/step", "A", 60_000).ok).toBe(true);
+  while (s.seq < SNAPSHOT_INTERVAL - 1) {
+    s.append({ kind: "msg", from: "A", topic: "t", body: "fill" });
+  }
+
+  // State as it exists when the next append mints a checkpoint: every field is carried.
+  member.topics.add("before");
+  member.threadRoots.add("root-before");
+  member.lastMessageId = "before-post";
+  member.waitedResource = "build/step";
+
+  const post = s.append({ kind: "msg", from: "A", topic: "before", body: "post" });
+  expect(post.seq).toBe(SNAPSHOT_INTERVAL);
+  expect(stateOf(post)).not.toBeNull();
+
+  // mutatePost and wait_for_claim's finally mutate the viewer AFTER append returns. Applying the
+  // checkpoint inside project() used to replace the map entry with a fresh object, orphaning all
+  // four of these fields and leaving the caller writing to a detached member.
+  member.topics.delete("before");
+  member.topics.add("after");
+  member.threadRoots.add("root-after");
+  member.lastMessageId = post.id;
+  delete member.waitedResource;
+
+  expect(s.members.get("A")).toBe(member);
+  expect(member.topics.has("after")).toBe(true);
+  expect(member.threadRoots.has("root-after")).toBe(true);
+  expect(member.lastMessageId).toBe(post.id);
+  expect(member.waitedResource).toBeUndefined();
+
+  // Carry the post-append state into replay via the next checkpoint, without further mutation.
+  while (s.seq < SNAPSHOT_INTERVAL * 2 - 1) {
+    s.append({ kind: "msg", from: "A", topic: "after", body: "fill" });
+  }
+  const later = s.append({ kind: "msg", from: "A", topic: "after", body: "post-2" });
+  expect(later.seq).toBe(SNAPSHOT_INTERVAL * 2);
+  expect(stateOf(later)).not.toBeNull();
+  expect(s.members.get("A")).toBe(member);
+  const snapshotMember = stateOf(later)?.members.find((m) => m.agentId === "A");
+  expect(snapshotMember?.topics).toContain("after");
+  expect(snapshotMember?.threadRoots).toContain("root-after");
+  expect(snapshotMember?.lastMessageId).toBe(post.id);
+  expect(snapshotMember?.waitedResource).toBeUndefined();
+
+  // Replay still applies carried snapshots, so the reopened store reconstructs the same state.
+  const r = reopenStore(root);
+  try {
+    const restored = r.members.get("A");
+    expect(restored?.topics.has("after")).toBe(true);
+    expect(restored?.threadRoots.has("root-after")).toBe(true);
+    expect(restored?.lastMessageId).toBe(post.id);
+    expect(restored?.waitedResource).toBeUndefined();
+    expect(restored?.heldTopics.has("build")).toBe(true);
+  } finally {
+    r.dispose();
+  }
+});
+
+test("a corrupt carried snapshot quarantines its whole record", () => {
+  const root = tempRoot();
+  const roomId = roomIdFor(root);
+  const fd = roomLogFd(root, roomId);
+  const bad = {
+    ...msg(1, "A", "t", "b"),
+    state: {
+      v: 1,
+      seq: 0,
+      claimGens: [["build/step", "not-a-generation"]],
+      claims: [],
+      cursors: [],
+      members: [],
+      idemKeys: [],
+    },
+  };
+  expect(validateRecord(bad)).toBeNull();
+  appendLine(fd, `${JSON.stringify(bad)}\n`);
+  const { records, skipped } = replay(fd);
+  expect(skipped).toBe(1);
+  expect(records).toHaveLength(1);
+  expect(records[0]!.kind).toBe("gap");
+  if (records[0]!.kind !== "gap") throw new Error("expected one quarantine gap");
+  expect(records[0]!.reason).toBe("invalid");
+  closeRoomLog(root, roomId);
+});
+
+test("a log with no carried snapshot still projects claims, keys and members unchanged", () => {
+  const root = tempRoot();
+  const roomId = roomIdFor(root);
+  const fd = roomLogFd(root, roomId);
+  const legacy: RoomRecord[] = [
+    {
+      v: 1,
+      seq: 1,
+      ts: 1001,
+      kind: "claim",
+      id: "c1",
+      from: "A",
+      resource: "build/step",
+      ttlMs: 60_000,
+    },
+    {
+      v: 1,
+      seq: 2,
+      ts: 1002,
+      kind: "msg",
+      id: "m2",
+      from: "A",
+      topic: "t",
+      body: "b",
+      idemKey: "k1",
+    },
+    { v: 1, seq: 3, ts: 1003, kind: "member", id: "j3", from: "A", action: "join" },
+  ];
+  for (const record of legacy) appendLine(fd, `${JSON.stringify(record)}\n`);
+  closeRoomLog(root, roomId);
+  resetRoomStores();
+  const s = storeFor(root, roomId);
+  try {
+    expect(s.claims.get("build/step")?.gen).toBe(1);
+    expect(s.idemKeys.get(idemIndexKey("A", "k1"))).toBe("m2");
+    expect(s.members.get("A")?.joinedAtSeq).toBe(3);
+  } finally {
+    s.dispose();
+  }
+});
+
+test("appendLine issues one full-line writeSync and refuses a short write", () => {
+  const root = tempRoot();
+  const roomId = roomIdFor(root);
+  const fd = roomLogFd(root, roomId);
+  const line = `${JSON.stringify(msg(1))}\n`;
+  const spy = spyOn(fs, "writeSync");
+  try {
+    appendLine(fd, line);
+    expect(spy).toHaveBeenCalledTimes(1);
+    const args = spy.mock.calls[0] as unknown as [number, Buffer];
+    expect(args[0]).toBe(fd);
+    expect(Buffer.from(args[1]).toString("utf8")).toBe(line);
+  } finally {
+    spy.mockRestore();
+  }
+
+  const short = spyOn(fs, "writeSync").mockImplementation((() => 1) as never);
+  try {
+    expect(() => appendLine(fd, line)).toThrow("Short write");
+  } finally {
+    short.mockRestore();
+  }
+  closeRoomLog(root, roomId);
+});
+
+test("renew carries dependsOn into the renewal record and across replay", () => {
+  const root = tempRoot();
+  const roomId = roomIdFor(root);
+  const s = storeFor(root, roomId);
+  expect(grant(s, "build/api", "A", 60_000, ["infra/db"]).ok).toBe(true);
+  expect(renew(s, "build/api", "A", 60_000).ok).toBe(true);
+  expect(s.claims.get("build/api")?.dependsOn).toEqual(["infra/db"]);
+  const r = reopenStore(root);
+  try {
+    expect(r.claims.get("build/api")?.dependsOn).toEqual(["infra/db"]);
+  } finally {
+    r.dispose();
+  }
+});
+
+test("enforceRetention budgets its gap so repeated ticks never prune merely to re-append one", () => {
+  const root = tempRoot();
+  const storeRoot = path.join(root, ".omp-room");
+  saveRoomConfig(storeRoot, { ...DEFAULT_ROOM_CONFIG, logMaxRecords: 2 });
+  const ctx = {
+    cwd: root,
+    agent: { id: "A", kind: "main" },
+    localProtocolOptions: { root: storeRoot },
+    setInterval: () => 0,
+    clearInterval: () => {},
+  } as unknown as ExtensionContext;
+  const store = roomStoreFor(ctx);
+  for (let i = 0; i < 4; i++) {
+    store.append({ kind: "msg", from: "A", topic: "t", body: `b${i}` });
+  }
+
+  const first = enforceRetention(store, Date.now());
+  expect(first?.kind).toBe("gap");
+  if (first?.kind !== "gap") throw new Error("expected a first retention gap");
+  // All four seeded records were real: this gap accounts for three of them, not a prior gap.
+  expect(first.skipped).toBe(3);
+  expect(store.records.length).toBeLessThanOrEqual(2);
+  const older = store.records[0]!.id;
+  const newer = store.append({ kind: "msg", from: "A", topic: "t", body: "new" });
+
+  const second = enforceRetention(store, Date.now());
+  expect(store.records.length).toBeLessThanOrEqual(2);
+  expect(second).not.toBeNull();
+  if (second?.kind !== "gap") throw new Error("expected a second retention gap");
+  // Both entries dropped before this gap were real projection entries (the older message and
+  // the first tick's gap) — not one live record spliced only to replace itself with a gap.
+  expect(second.skipped).toBe(2);
+  expect(store.byId.has(older)).toBe(false);
+  expect(store.byId.has(first.id)).toBe(false);
+  expect(store.byId.has(newer.id)).toBe(true);
+  // K19 keeps both gaps in the log even though the second prune drops the first from the
+  // projection: exactly two gap appends happened, each carrying a real drop behind it.
+  const logged = readLines(store.logPath).map((line) => JSON.parse(line) as RoomRecord);
+  expect(logged.filter((r) => r.kind === "gap").length).toBe(2);
 });

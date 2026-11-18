@@ -141,7 +141,8 @@ export function registerHooks(pi: ExtensionAPI): void {
       display: false,
     };
 
-    persistOwnCursor(pi, store.roomId, cursorFor(store, agentId));
+    const cursor = cursorFor(store, agentId);
+    if (persisted !== cursor) persistOwnCursor(pi, store.roomId, cursor);
     return { systemPrompt, message };
   });
 

@@ -368,24 +368,31 @@ test("the routing rule is present in full in the system prompt regardless of dig
 // 5. Hook idempotence per agent.
 // ---------------------------------------------------------------------------------------------
 
+type FakePi = ExtensionAPI & { appends: unknown[] };
+
 function fakePi(): {
-  pi: ExtensionAPI;
+  pi: FakePi;
   fire: (event: string, payload: unknown, ctx: unknown) => Promise<unknown>;
   /** Every `pi.logger.warn` message, in order. */
   warnings: string[];
   /** Every `pi.sendMessage` payload, in order. */
   sends: unknown[];
+  /** Every `pi.appendEntry` payload, in the shape `restoreOwnCursor` reads. */
+  appends: unknown[];
 } {
   const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
   const warnings: string[] = [];
   const sends: unknown[] = [];
+  const appends: unknown[] = [];
   const pi = {
     on(event: string, handler: (event: unknown, ctx: unknown) => unknown) {
       const list = handlers.get(event) ?? [];
       list.push(handler);
       handlers.set(event, list);
     },
-    appendEntry() {},
+    appendEntry(customType: string, data: unknown) {
+      appends.push({ type: "custom", customType, data });
+    },
     getFlag() {
       return undefined;
     },
@@ -406,7 +413,7 @@ function fakePi(): {
     }
     return result;
   };
-  return { pi, fire, warnings, sends };
+  return { pi: pi as FakePi, fire, warnings, sends, appends };
 }
 
 function fakeCtx(agentId: string): ExtensionContext {
@@ -495,6 +502,32 @@ test("the digest advertises the active caps and honours the roster/claim caps", 
   // Claims are capped at the top 10 by remaining TTL: the 5 lowest-TTL claims are dropped first.
   expect(digest).toContain("topic/key-14");
   expect(digest).not.toContain("topic/key-0");
+});
+
+test("the digest footer reports live cap values instead of the defaults", () => {
+  store.config.maxBodyBytes = 4096;
+  store.config.claimTtlMs = 60_000;
+
+  const digest = buildDigest(store, viewer("AgentA"));
+
+  expect(digest).toContain("maxBodyBytes=4096");
+  expect(digest).toContain("claimTtlMs=60000");
+  expect(digest).not.toContain("maxBodyBytes=8192");
+  expect(digest).not.toContain("claimTtlMs=300000");
+});
+
+test("a live cap change invalidates the cached digest render", () => {
+  const before = buildDigest(store, viewer("AgentA"));
+  expect(digestRenderCount).toBe(1);
+
+  store.config.maxBodyBytes = 4096;
+  const after = buildDigest(store, viewer("AgentA"));
+
+  expect(digestRenderCount).toBe(2);
+  expect(after).not.toBe(before);
+  expect(after).toContain("maxBodyBytes=4096");
+  resetDigestCache();
+  expect(buildDigest(store, viewer("AgentA"))).toBe(after);
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -1276,6 +1309,81 @@ test("before_agent_start resumes a higher persisted cursor instead of starting a
     ctx,
   )) as { message?: { content?: string } } | undefined;
   expect(result?.message?.content).toContain("Your cursor: 5");
+});
+
+test("before_agent_start does not append a cursor entry when the persisted cursor is unchanged", async () => {
+  for (let i = 0; i < 10; i++) post(i, `record-${i}`);
+  const entries = [
+    { type: "custom", customType: "chatroom:cursor", data: { roomId: store.roomId, seq: 5 } },
+  ];
+  const { pi, fire, appends } = fakePi();
+  registerHooks(pi);
+  const base = fakeCtx("AgentA");
+  const ctx = {
+    ...base,
+    sessionManager: { ...base.sessionManager, getEntries: () => entries },
+  } as unknown as ExtensionContext;
+  const event = { type: "before_agent_start", prompt: "hi", systemPrompt: ["BASE"] };
+
+  await fire("before_agent_start", event, ctx);
+  await fire("before_agent_start", event, ctx);
+
+  expect(appends).toHaveLength(0);
+});
+
+test("before_agent_start appends the cursor only after delivery advances it", async () => {
+  for (let i = 0; i < 10; i++) post(i, `record-${i}`);
+  const entries = [
+    { type: "custom", customType: "chatroom:cursor", data: { roomId: store.roomId, seq: 5 } },
+  ];
+  const { pi, fire, appends } = fakePi();
+  registerHooks(pi);
+  const base = fakeCtx("AgentA");
+  const ctx = {
+    ...base,
+    sessionManager: { ...base.sessionManager, getEntries: () => entries },
+  } as unknown as ExtensionContext;
+  const event = { type: "before_agent_start", prompt: "hi", systemPrompt: ["BASE"] };
+
+  await fire("before_agent_start", event, ctx);
+  expect(appends).toHaveLength(0);
+  store.cursors.set("AgentA", 8);
+  await fire("before_agent_start", event, ctx);
+
+  expect(appends).toHaveLength(1);
+  expect(appends[0]).toEqual({
+    type: "custom",
+    customType: "chatroom:cursor",
+    data: { roomId: store.roomId, seq: 8 },
+  });
+});
+
+test("a persisted cursor past the log head resumes capped and persists the capped value", async () => {
+  for (let i = 0; i < 3; i++) post(i, `record-${i}`);
+  const entries = [
+    { type: "custom", customType: "chatroom:cursor", data: { roomId: store.roomId, seq: 9999 } },
+  ];
+  const { pi, fire, appends } = fakePi();
+  registerHooks(pi);
+  const base = fakeCtx("AgentA");
+  const ctx = {
+    ...base,
+    sessionManager: { ...base.sessionManager, getEntries: () => entries },
+  } as unknown as ExtensionContext;
+
+  const result = (await fire(
+    "before_agent_start",
+    { type: "before_agent_start", prompt: "hi", systemPrompt: ["BASE"] },
+    ctx,
+  )) as { message?: { content?: string } } | undefined;
+
+  expect(result?.message?.content).toContain("Your cursor: 3");
+  expect(appends).toHaveLength(1);
+  expect(appends[0]).toEqual({
+    type: "custom",
+    customType: "chatroom:cursor",
+    data: { roomId: store.roomId, seq: 3 },
+  });
 });
 
 // --- safeRoomText: the ONE escaper for room-authored text (S1/K22) ----------------------

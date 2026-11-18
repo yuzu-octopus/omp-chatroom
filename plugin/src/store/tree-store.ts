@@ -184,6 +184,23 @@ interface ReadyQueue {
 
 const QUEUES = globalMap<string, ReadyQueue>("__roomTreeReady");
 
+/**
+ * A tree handle is a cache over one generation of the level files. Retention deletes those files
+ * and shifts every record under their summaries, so a handle opened before the delete must never
+ * append afterwards: `putNode` recreates the tree directory and would resurrect a stale node.
+ * Identity, not a counter: a recycled path cannot match a handle from an older generation.
+ */
+const GENERATIONS = globalMap<string, object>("__roomTreeGeneration");
+
+function generationFor(treePath: string): object {
+  let gen = GENERATIONS.get(treePath);
+  if (gen === undefined) {
+    gen = {};
+    GENERATIONS.set(treePath, gen);
+  }
+  return gen;
+}
+
 function queueFor(treePath: string): ReadyQueue {
   let q = QUEUES.get(treePath);
   if (q === undefined) {
@@ -383,11 +400,14 @@ export function forgetTreeQueue(treePath: string): void {
  * Drop every persisted summary and the saved view, and reset the in-memory ready queue.
  * Called by retention AFTER the head is pruned: tree positions are dense indices into
  * `store.records`, so a prune shifts every surviving record under its summary — a node built
- * over positions [0,2) would otherwise keep describing the pruned records. The compactor
+ * over positions [0,2) would otherwise keep describing the pruned records. Handles opened before
+ * this call are fenced off too, so a delayed summary cannot re-add such a node. The compactor
  * rebuilds lazily from the new dense space; reads fall back to raw records meanwhile (T2/T3).
  * Never throws: a cache that can break pruning is worse than a stale one.
  */
 export function invalidateTree(treePath: string): void {
+  // Bump before the deletes: a stale handle must fail even if rmSync itself is refused.
+  GENERATIONS.set(treePath, {});
   QUEUES.delete(treePath);
   try {
     fs.rmSync(treePath, { recursive: true, force: true });
@@ -409,6 +429,7 @@ export function invalidateTree(treePath: string): void {
  * length says exactly how far that level got — O(1) lookup, one `stat` per level.
  */
 export function openTreeStore(treePath: string, logLength = 0): TreeStore {
+  const generation = generationFor(treePath);
   const store: TreeStore = {
     logLength,
 
@@ -456,6 +477,8 @@ export function openTreeStore(treePath: string, logLength = 0): TreeStore {
     },
 
     putNode(lo: number, hi: number, summary: string): boolean {
+      // A summary started before invalidateTree must not publish into the rebuilt generation.
+      if (generationFor(treePath) !== generation) return false;
       if (!isBlock(lo, hi)) return false;
       const size = hi - lo;
       const p = levelPath(treePath, size);

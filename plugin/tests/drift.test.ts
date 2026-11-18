@@ -117,3 +117,52 @@ test("the security-critical and shared-root exports exist with the expected arit
   expect(harnessTags.escapeHarnessTags.length).toBe(1);
   expect(typeof localProtocol.resolveLocalRoot).toBe("function");
 });
+
+/** JSON.parse yields `unknown`; validate once at this boundary, then read checked fields. */
+function requireObject(value: unknown, label: string): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} is not an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+async function readPluginManifest(): Promise<Record<string, unknown>> {
+  const url = new URL("../package.json", import.meta.url);
+  return requireObject(JSON.parse(await Bun.file(url).text()), "plugin package.json");
+}
+
+test("the release manifest has one version and ships its license", async () => {
+  const pkg = await readPluginManifest();
+  expect(pkg.version).toBe("0.1.1");
+  // The host manager copies top-level version into the catalog entry; a second version here
+  // silently drifts from what actually gets installed.
+  const omp = requireObject(pkg.omp, "plugin omp manifest");
+  expect(omp).not.toHaveProperty("version");
+  expect(pkg.files).toContain("LICENSE");
+  const license = Bun.file(new URL("../LICENSE", import.meta.url));
+  expect(await license.exists()).toBe(true);
+  expect(await license.text()).toContain("MIT License");
+});
+
+test("gate scripts resolve pinned LOCAL tools, not unpinned downloads (R34)", async () => {
+  const pkg = await readPluginManifest();
+  const scripts = requireObject(pkg.scripts, "plugin scripts");
+  for (const name of ["typecheck", "lint", "lint:fix"]) {
+    expect(typeof scripts[name]).toBe("string");
+    expect(String(scripts[name])).not.toContain("bunx");
+  }
+  expect(String(scripts.typecheck)).toMatch(/^(?:\.\/node_modules\/\.bin\/)?tsc /);
+  expect(String(scripts.lint)).toMatch(/^(?:\.\/node_modules\/\.bin\/)?biome /);
+  const devDeps = requireObject(pkg.devDependencies, "plugin devDependencies");
+  expect(devDeps.typescript).toBe("7.0.2");
+  expect(devDeps["@biomejs/biome"]).toBe("2.6.6");
+  // bun.lock is JSONC (trailing commas); Bun.JSONC.parse is the matching Bun API.
+  const lock = requireObject(
+    Bun.JSONC.parse(await Bun.file(new URL("../bun.lock", import.meta.url)).text()),
+    "bun.lock",
+  );
+  const workspaces = requireObject(lock.workspaces, "bun.lock workspaces");
+  const rootWorkspace = requireObject(workspaces[""], "bun.lock root workspace");
+  const lockDeps = requireObject(rootWorkspace.devDependencies, "bun.lock devDependencies");
+  expect(lockDeps.typescript).toBe("7.0.2");
+});

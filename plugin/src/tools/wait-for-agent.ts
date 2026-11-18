@@ -37,6 +37,59 @@ export const WAIT_MAX_MS = 1_800_000; // §4.2 = omp WAIT_MAX_MS
 export const WAIT_MIN_MS = 1_000;
 export const WAIT_HEARTBEAT_MS = 500; // §4.2 [invented]
 
+/** The two observer waits differ only in what they observe; their lifecycle is identical. */
+interface ObserverWaitSpec<TDetails extends { outcome: WaitOutcome }> {
+  ctx: ExtensionContext;
+  timeoutMs: number;
+  startedAt: number;
+  signal?: AbortSignal;
+  onUpdate?: AgentToolUpdateCallback<TDetails>;
+  listen(settle: (result: AgentToolResult<TDetails>) => void): () => void;
+  timeout(): AgentToolResult<TDetails>;
+  abort(): AgentToolResult<TDetails>;
+  heartbeat(elapsedSeconds: number): AgentToolResult<TDetails>;
+  onSettled?(outcome: WaitOutcome): void;
+  check?(): AgentToolResult<TDetails> | undefined;
+  cleanup?(): void;
+}
+
+/** Shared settle-once lifecycle: listener, timer, abort, heartbeat and teardown. */
+export async function observeWait<TDetails extends { outcome: WaitOutcome }>(
+  spec: ObserverWaitSpec<TDetails>,
+): Promise<AgentToolResult<TDetails>> {
+  const { promise: done, resolve: settle } = Promise.withResolvers<AgentToolResult<TDetails>>();
+  let finished = false;
+  const finish = (result: AgentToolResult<TDetails>): void => {
+    if (finished) return;
+    finished = true;
+    spec.onSettled?.(result.details?.outcome ?? "aborted");
+    settle(result);
+  };
+
+  const unsubscribe = spec.listen(finish);
+  const timer = spec.ctx.setTimeout(() => finish(spec.timeout()), spec.timeoutMs);
+  const onAbort = (): void => finish(spec.abort());
+  spec.signal?.addEventListener("abort", onAbort, { once: true });
+  const heartbeat =
+    spec.onUpdate === undefined
+      ? undefined
+      : spec.ctx.setInterval(() => {
+          spec.onUpdate?.(spec.heartbeat(Math.round((Date.now() - spec.startedAt) / 1000)));
+        }, WAIT_HEARTBEAT_MS);
+
+  try {
+    const immediate = spec.check?.();
+    if (immediate !== undefined) finish(immediate);
+    return await done;
+  } finally {
+    spec.cleanup?.();
+    unsubscribe();
+    spec.ctx.clearTimer(timer);
+    if (heartbeat !== undefined) spec.ctx.clearTimer(heartbeat);
+    spec.signal?.removeEventListener("abort", onAbort);
+  }
+}
+
 export interface WaitForAgentParams {
   // SCAFFOLD-DEFINED (derived from §4.2; K13)
   agents: string[];
@@ -173,6 +226,7 @@ async function waitForAgent(
           agentId,
           ids.map((id) => ({ kind: "agent", agentId: id }) as const),
           (resource) => store!.claims.get(resource)?.holder,
+          require,
         );
   if (cycle !== null) {
     recordWait("aborted");
@@ -194,18 +248,6 @@ async function waitForAgent(
     };
   }
 
-  let settle!: (result: WaitForAgentResult) => void;
-  const done = new Promise<WaitForAgentResult>((resolve) => {
-    settle = resolve;
-  });
-  let finished = false;
-  const finish = (result: WaitForAgentResult): void => {
-    if (finished) return;
-    finished = true;
-    recordWait(result.details?.outcome ?? "aborted");
-    settle(result);
-  };
-
   // §4.2 — "block until a named agent changes status or leaves". The baseline is the status at
   // wait start, so an id that was never registered (or was already idle) is NOT an instant event:
   // `require:"any"` resolves on the first named agent whose status differs from its baseline (or
@@ -223,45 +265,33 @@ async function waitForAgent(
     );
   }
 
-  const unsubscribe = registry.onChange((event) => {
-    if (event.type !== "status_changed" && event.type !== "removed") return;
-    if (!ids.includes(event.ref.id)) return;
-    if (satisfied()) finish(eventResult(registry, ids, startedAt));
-  });
-  const timer = ctx.setTimeout(
-    () => finish(timeoutResult(snapshot(registry, ids), timeoutMs)),
-    timeoutMs,
-  );
-  const onAbort = (): void => finish(abortResult(snapshot(registry, ids)));
-  signal?.addEventListener("abort", onAbort, { once: true });
-
   // U5 heartbeat — the TUI repaints "Waiting for … (elapsed Ns)" without the tool resolving.
-  const heartbeat = onUpdate
-    ? ctx.setInterval(() => {
-        onUpdate({
-          content: [
-            {
-              type: "text",
-              text: `wait_for_agent → waiting ${Math.round((Date.now() - startedAt) / 1000)}s`,
-            },
-          ],
-          details: { ok: true, outcome: "timeout", agents: snapshot(registry, ids) },
-        });
-      }, WAIT_HEARTBEAT_MS)
-    : undefined;
-
-  try {
-    // The event may have fired between the caller's decision and the subscription; the state
-    // check closes that race so a wait can never hang on an already-satisfied condition.
-    if (satisfied()) finish(eventResult(registry, ids, startedAt));
-    return await done;
-  } finally {
-    if (store !== undefined) clearWaitEdges(store.root, agentId);
-    unsubscribe();
-    ctx.clearTimer(timer);
-    if (heartbeat !== undefined) ctx.clearTimer(heartbeat);
-    signal?.removeEventListener("abort", onAbort);
-  }
+  // The event may have fired between the caller's decision and the subscription; `check` closes
+  // that race so a wait can never hang on an already-satisfied condition.
+  return await observeWait<WaitForAgentDetails>({
+    ctx,
+    timeoutMs,
+    startedAt,
+    signal,
+    onUpdate,
+    listen: (finish) =>
+      registry.onChange((event) => {
+        if (event.type !== "status_changed" && event.type !== "removed") return;
+        if (!ids.includes(event.ref.id)) return;
+        if (satisfied()) finish(eventResult(registry, ids, startedAt));
+      }),
+    timeout: () => timeoutResult(snapshot(registry, ids), timeoutMs),
+    abort: () => abortResult(snapshot(registry, ids)),
+    heartbeat: (elapsedSeconds) => ({
+      content: [{ type: "text", text: `wait_for_agent → waiting ${elapsedSeconds}s` }],
+      details: { ok: true, outcome: "timeout", agents: snapshot(registry, ids) },
+    }),
+    onSettled: recordWait,
+    check: () => (satisfied() ? eventResult(registry, ids, startedAt) : undefined),
+    cleanup: () => {
+      if (store !== undefined) clearWaitEdges(store.root, agentId);
+    },
+  });
 }
 
 function eventResult(

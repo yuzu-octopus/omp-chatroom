@@ -3,7 +3,6 @@ import { recordLine } from "../attention/delivery";
 import { resourceKey } from "../ids";
 import { safeRoomText } from "../onboarding/escape";
 import { openRoomPanel } from "../panel/panel";
-import { grant, reclaimIfStale, release, renew } from "../store/claims";
 import {
   coerceConfigValue,
   configPath,
@@ -13,10 +12,7 @@ import {
   saveRoomConfig,
 } from "../store/config";
 import { cursorFor, initCursor } from "../store/cursors";
-// §3.4 — the canonical lease bounds, shared with the tool and with replay, so a widened command
-// cannot mint a lease the log validator would quarantine on the next open.
-import { CLAIM_TTL_MAX_MS, CLAIM_TTL_MIN_MS } from "../store/log";
-import { appendedSince, type RoomStore, roomStoreFor, viewerStateFor } from "../store/room-store";
+import { type RoomStore, roomStoreFor, viewerStateFor } from "../store/room-store";
 import type { RoomRecord } from "../store/schema";
 import {
   COVER_BUDGET_LINES,
@@ -28,9 +24,9 @@ import {
 } from "../store/tree-store";
 import {
   buildBoard,
-  DEPENDS_ON_MAX_BYTES,
-  notifyRecipients,
-  overListCap,
+  mutateClaim,
+  mutatePost,
+  mutateRelease,
   RECALL_LIMIT_MAX,
   RECALL_PATTERN_MAX,
   recallMissRate,
@@ -252,152 +248,107 @@ export function registerRoomCommand(pi: ExtensionAPI): void {
 
         case "claim": {
           const [topic, key, ttlArg, ...dependsOn] = rest.split(/\s+/).filter(Boolean);
-          if (!topic || !key) {
-            report(ctx, pi, "claim requires <topic> <key> [ttlMs] [dependsOn...]", "warning");
-            return;
-          }
-          // Dependencies ride after the lease (the tool path's `dependsOn: string[]`, same rule).
-          const dependsError =
-            dependsOn.length > 0 ? overListCap("dependsOn", dependsOn, DEPENDS_ON_MAX_BYTES) : null;
-          if (dependsError !== null) {
-            report(ctx, pi, `claim: ${dependsError}`, "warning");
-            return;
-          }
-          const resource = resourceKey(topic, key);
-          const requested = ttlArg === undefined ? store.config.claimTtlMs : Number(ttlArg);
-          // Math.max/Math.min propagate NaN instead of clamping it: without this guard a typo'd
-          // TTL appends a NaN lease, which JSON persists as ttlMs:null and replay quarantines as
-          // gap{reason:"invalid"} — the claim silently never existed after a restart.
-          if (!Number.isFinite(requested)) {
-            report(
-              ctx,
-              pi,
-              `claim: bad ttlMs "${ttlArg}" — expected a number of milliseconds`,
-              "warning",
-            );
-            return;
-          }
-          const ttlMs = Math.min(
-            CLAIM_TTL_MAX_MS,
-            Math.max(CLAIM_TTL_MIN_MS, Math.trunc(requested)),
+          const resource = resourceKey(topic ?? "", key ?? "");
+          const result = await mutateClaim(
+            { pi, ctx, store, agentId, ensureMember: true },
+            {
+              topic,
+              key,
+              ttl: ttlArg === undefined ? undefined : Number(ttlArg),
+              ttlText: ttlArg,
+              dependsOn,
+            },
           );
-          const before = store.seq;
-          const result = grant(store, resource, agentId, ttlMs, dependsOn);
           if (!result.ok) {
-            if (result.holder === agentId) {
-              const renewed = renew(store, resource, agentId, ttlMs);
-              if (renewed.ok) {
-                store.members.get(agentId)?.heldTopics.add(topic);
-                const failure = await notifyRecipients(
-                  pi,
-                  ctx,
-                  store,
-                  appendedSince(store, before),
-                  agentId,
-                );
+            switch (result.code) {
+              case "missingTopic":
+              case "missingKey":
+                report(ctx, pi, "claim requires <topic> <key> [ttlMs] [dependsOn...]", "warning");
+                return;
+              case "badTtl":
                 report(
                   ctx,
                   pi,
-                  `room claim ${safe(resource)} → renewed, expires in ${Math.round(ttlMs / 1000)}s`,
+                  `claim: bad ttlMs "${result.raw}" — expected a number of milliseconds`,
+                  "warning",
                 );
-                if (failure !== undefined) report(ctx, pi, `delivery: ${safe(failure)}`, "warning");
+                return;
+              case "validation":
+                report(ctx, pi, `claim: ${result.error}`, "warning");
+                return;
+              case "claimBlocked":
+                report(
+                  ctx,
+                  pi,
+                  `room claim ${safe(resource)} → blocked — depends on ${safe(result.blockers)}`,
+                  "warning",
+                );
+                return;
+              case "claimDenied":
+              case "claimRenewDenied": {
+                const holder =
+                  result.code === "claimDenied" ? result.holder : result.fallbackHolder;
+                report(
+                  ctx,
+                  pi,
+                  `room claim ${safe(resource)} → denied, held by ${safe(holder)}`,
+                  "warning",
+                );
                 return;
               }
+              default:
+                report(ctx, pi, "claim failed", "warning");
+                return;
             }
-            // R5 — a lost claim is a measurement, not a silent no-op.
-            store.append({
-              kind: "contended",
-              from: agentId,
-              resource,
-              holder: result.holder,
-            });
-            // R3 — the same refusal as the tool path: name every blocker and its holder.
-            if ("blockedBy" in result && result.blockedBy.length > 0) {
-              const blockers = result.blockedBy
-                .map((b) => `${b.resource} (held by ${b.holder})`)
-                .join(", ");
-              report(
-                ctx,
-                pi,
-                `room claim ${safe(resource)} → blocked — depends on ${safe(blockers)}`,
-                "warning",
-              );
-              return;
-            }
-            report(
-              ctx,
-              pi,
-              `room claim ${safe(resource)} → denied, held by ${safe(result.holder)}`,
-              "warning",
-            );
-            return;
           }
-          // Same delivery pass as the tool path (room.ts claim): waiters wake, recipients notify.
-          store.members.get(agentId)?.heldTopics.add(topic);
-          const failure = await notifyRecipients(
-            pi,
-            ctx,
-            store,
-            appendedSince(store, before),
-            agentId,
-          );
           report(
             ctx,
             pi,
-            `room claim ${safe(resource)} → granted, expires in ${Math.round(ttlMs / 1000)}s`,
+            `room claim ${safe(resource)} → ${result.kind === "renewed" ? "renewed" : "granted"}, expires in ${Math.round(result.ttlMs / 1000)}s`,
           );
-          if (failure !== undefined) report(ctx, pi, `delivery: ${safe(failure)}`, "warning");
+          if (result.deliveryError !== undefined)
+            report(ctx, pi, `delivery: ${safe(result.deliveryError)}`, "warning");
           return;
         }
 
         case "release": {
           const [topic, key] = rest.split(/\s+/).filter(Boolean);
-          if (!topic || !key) {
-            report(ctx, pi, "release requires <topic> <key>", "warning");
-            return;
-          }
-          const resource = resourceKey(topic, key);
-          const held = store.claims.get(resource);
-          if (!held) {
-            report(ctx, pi, `room release ${safe(resource)} → unknown resource`, "warning");
-            return;
-          }
-          const before = store.seq;
-          if (held.holder !== agentId) {
-            // §4.1 — a reclaim against a stale claim is explicit, never silent.
-            const outcome = reclaimIfStale(store, resource, Date.now());
-            if (outcome.reclaimed) {
-              const failure = await notifyRecipients(
-                pi,
-                ctx,
-                store,
-                appendedSince(store, before),
-                agentId,
-              );
-              const successor =
-                outcome.holder === null ? " (lease dropped)" : ` → ${safe(outcome.holder)}`;
-              report(ctx, pi, `room release ${safe(resource)} → reclaimed (was stale)${successor}`);
-              if (failure !== undefined) report(ctx, pi, `delivery: ${safe(failure)}`, "warning");
-              return;
+          const resource = resourceKey(topic ?? "", key ?? "");
+          const result = await mutateRelease({ pi, ctx, store, agentId }, { topic, key });
+          if (!result.ok) {
+            switch (result.code) {
+              case "missingTopic":
+              case "missingKey":
+                report(ctx, pi, "release requires <topic> <key>", "warning");
+                return;
+              case "validation":
+                report(ctx, pi, `release: ${result.error}`, "warning");
+                return;
+              case "releaseUnknown":
+                report(ctx, pi, `room release ${safe(resource)} → unknown resource`, "warning");
+                return;
+              case "releaseDenied":
+                report(
+                  ctx,
+                  pi,
+                  `room release ${safe(resource)} → denied, held by ${safe(result.holder)}`,
+                  "warning",
+                );
+                return;
+              default:
+                report(ctx, pi, "release failed", "warning");
+                return;
             }
-            report(
-              ctx,
-              pi,
-              `room release ${safe(resource)} → denied, held by ${safe(held.holder)}`,
-              "warning",
-            );
-            return;
           }
-          release(store, resource, agentId, "released");
-          const failure = await notifyRecipients(
-            pi,
-            ctx,
-            store,
-            appendedSince(store, before),
-            agentId,
-          );
-          report(ctx, pi, `room release ${safe(resource)} → released`);
-          if (failure !== undefined) report(ctx, pi, `delivery: ${safe(failure)}`, "warning");
+          if (result.kind === "reclaimed") {
+            const successor =
+              result.successor === null ? " (lease dropped)" : ` → ${safe(result.successor)}`;
+            report(ctx, pi, `room release ${safe(resource)} → reclaimed (was stale)${successor}`);
+          } else {
+            report(ctx, pi, `room release ${safe(resource)} → released`);
+          }
+          if (result.deliveryError !== undefined)
+            report(ctx, pi, `delivery: ${safe(result.deliveryError)}`, "warning");
           return;
         }
 
@@ -405,26 +356,30 @@ export function registerRoomCommand(pi: ExtensionAPI): void {
           const bodyGap = rest.search(/\s/);
           const topic = bodyGap < 0 ? rest : rest.slice(0, bodyGap);
           const body = bodyGap < 0 ? "" : rest.slice(bodyGap + 1);
-          if (!topic || body === "") {
-            report(ctx, pi, "post requires <topic> <body>", "warning");
-            return;
+          const result = await mutatePost(
+            { pi, ctx, store, agentId, ensureMember: true },
+            { topic, body, requireNonemptyBody: true },
+          );
+          if (!result.ok) {
+            switch (result.code) {
+              case "missingTopic":
+              case "missingBody":
+                report(ctx, pi, "post requires <topic> <body>", "warning");
+                return;
+              case "bodyTooLarge":
+                report(ctx, pi, `body exceeds maxBodyBytes (${result.max})`, "error");
+                return;
+              case "validation":
+                report(ctx, pi, `post: ${result.error}`, "warning");
+                return;
+              default:
+                report(ctx, pi, "post failed", "warning");
+                return;
+            }
           }
-          // K19 — the cap is enforced before the record is drafted; never truncated silently.
-          // 027 — the live value: `/room config set` refreshes `store.config` below.
-          const maxBodyBytes = store.config.maxBodyBytes;
-          if (Buffer.byteLength(body, "utf-8") > maxBodyBytes) {
-            report(ctx, pi, `body exceeds maxBodyBytes (${maxBodyBytes})`, "error");
-            return;
-          }
-          const record = store.append({ kind: "msg", from: agentId, topic, body });
-          const member = store.members.get(agentId);
-          if (member) {
-            member.lastMessageId = record.id;
-            member.topics.add(topic);
-          }
-          const failure = await notifyRecipients(pi, ctx, store, [record], agentId);
-          report(ctx, pi, `room post → ${safe(topic)} · seq ${record.seq}`);
-          if (failure !== undefined) report(ctx, pi, `delivery: ${safe(failure)}`, "warning");
+          report(ctx, pi, `room post → ${safe(topic)} · seq ${result.record.seq}`);
+          if (result.kind === "posted" && result.deliveryError !== undefined)
+            report(ctx, pi, `delivery: ${safe(result.deliveryError)}`, "warning");
           return;
         }
 

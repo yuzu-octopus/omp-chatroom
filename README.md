@@ -122,10 +122,11 @@ Gates, all green:
 
 | Gate | Result |
 |---|---|
-| `bun test tests/` | **646 pass / 1 skip / 0 fail**, 647 run, 18 files |
+| `bun test tests/` | **19 test files** (last full measurement 2026-11-11: 646 pass / 1 skip / 0 fail, 647 run across 18 files, before `wait-claim-regression.test.ts` landed) |
 | `bun check` (native, ~95 ms) | **0 errors**, 55 files |
-| `bunx --bun tsc --noEmit -p tsconfig.json` | **0 errors** |
-| `bunx --bun @biomejs/biome check src tests` | **0 errors, 0 warnings** |
+| `bun run typecheck` | **0 errors** (pinned local `tsc` via the script) |
+| `bun run lint` | **0 errors, 0 warnings** (pinned local `biome` via the script) |
+| `bun ci --frozen-lockfile` (CI install step) | lockfile clean |
 | Remaining `not implemented` stubs | **0** |
 
 Verified **live** against host 18.12.3 (and re-gated on 18.18.1 — see below) — every surface was exercised by a real model in a real

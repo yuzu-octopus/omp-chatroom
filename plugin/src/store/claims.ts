@@ -196,7 +196,13 @@ export function renew(
       expiresAt: existing === undefined ? 0 : existing.acquiredAt + existing.ttlMs,
     };
   }
-  store.append({ kind: "claim", from: holder, resource, ttlMs });
+  store.append({
+    kind: "claim",
+    from: holder,
+    resource,
+    ttlMs,
+    dependsOn: [...existing.dependsOn],
+  });
   return { ok: true, claim: store.claims.get(resource)! };
 }
 

@@ -4,7 +4,6 @@ import * as path from "node:path";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent";
 import { recordFields } from "../attention/delivery";
 import { globalMap } from "../globals";
-import { DEFAULT_ROOM_CONFIG } from "../store/config";
 import { cursorFor, lagFor } from "../store/cursors";
 import type { MemberState, RoomStore } from "../store/room-store";
 import type { RoomRecord } from "../store/schema";
@@ -71,10 +70,11 @@ function oneLine(body: string): string {
 // reads: the room root + viewer (identity), the budget, the claims generation vector (any
 // grant/release/renew/expiry changes a gen or the size), the store seq (any append bumps it), the
 // census fingerprint (the registry is NOT projected — joins/leaves/status flips must invalidate),
-// and the TTL minute bucket (claim lines render a whole-minute bucket, so a render stays valid
-// only inside its bucket). A minute-boundary crossing changes the bucket and re-renders — the
-// line content the new bucket produces is still byte-identical to a fresh build, so correctness
-// never depends on the clock staying put. New digest inputs MUST join this key (maintenance note).
+// and the live cap values the footer prints (claimTtlMs, maxBodyBytes). Claim lines render a
+// whole-minute TTL bucket, so a render stays valid only inside its bucket: a minute-boundary
+// crossing changes the bucket and re-renders — the line content the new bucket produces is still
+// byte-identical to a fresh build, so correctness never depends on the clock staying put.
+// New digest inputs MUST join this key (maintenance note).
 type DigestCacheEntry = { key: string; rendered: string };
 const DIGEST_CACHE = globalMap<string, DigestCacheEntry>("__roomDigestCache");
 
@@ -133,6 +133,8 @@ export function buildDigest(
     claimsFingerprint(store),
     censusFingerprint(),
     room(store.roomId),
+    store.config.claimTtlMs,
+    store.config.maxBodyBytes,
     Math.floor(now / TTL_BUCKET_MS),
   ].join("|");
   const cacheKey = `${store.root}::${viewer.agentId}`;
@@ -198,7 +200,7 @@ function renderDigest(
   const footer = [
     `Your cursor: ${cursor} · lag: ${lag}`,
     `Caps: roster=${ROSTER_CAP} claims=${DIGEST_CLAIMS_CAP} digestBudgetTokens=${budgetTokens}` +
-      ` claimTtlMs=${DEFAULT_ROOM_CONFIG.claimTtlMs} maxBodyBytes=${DEFAULT_ROOM_CONFIG.maxBodyBytes}`,
+      ` claimTtlMs=${store.config.claimTtlMs} maxBodyBytes=${store.config.maxBodyBytes}`,
   ];
 
   // Highest expiry first, so the claims truncation drops the shortest-TTL claim first (§5.4 U8).

@@ -350,12 +350,10 @@ export function roomLogFd(root: string, roomId: string): number {
 export function appendLine(fd: number, line: string): void {
   // line MUST end "\n"
   const buf = Buffer.from(line.endsWith("\n") ? line : `${line}\n`, "utf-8");
-  let off = 0;
-  while (off < buf.length) {
-    const w = fs.writeSync(fd, buf, off, buf.length - off);
-    if (w === 0) throw new Error("Short write");
-    off += w;
-  }
+  // One writeSync for the whole newline-terminated line: O_APPEND makes that one write atomic.
+  // A fragmenting loop would let another writer's line land between this line's pieces.
+  const written = fs.writeSync(fd, buf);
+  if (written !== buf.length) throw new Error("Short write");
   // §1 "flush each write" — O_APPEND makes the write atomic, but only fsync makes it durable: a
   // crash (process or machine) can drop a page-cached write, and I5 claims each append survives
   // one. This is the expensive part of an append, deliberately kept here (and synchronous) so
@@ -521,6 +519,160 @@ export function closeRoomLog(root: string, roomId: string): void {
 // (claims.ts:36-40), so `grant` denies every later claimant for the life of the room.
 export const CLAIM_TTL_MIN_MS = 1_000;
 export const CLAIM_TTL_MAX_MS = 86_400_000;
+// A compact checkpoint rides on an existing record's optional `state` field: no new RecordKind,
+// no second append, and the JSONL stays append-only (K19). Old logs have no field and replay
+// exactly as before. On-disk state is untrusted, so every bound below rejects a record wholly;
+// replay turns that rejection into the usual `gap{reason:"invalid"}` quarantine.
+export const SNAPSHOT_INTERVAL = 32;
+export const SNAPSHOT_MAX_BYTES = 512 * 1024;
+export const SNAPSHOT_MAX_ENTRIES = 4096;
+export const SNAPSHOT_MAX_NAME_BYTES = 512;
+export const SNAPSHOT_MAX_SET = 256;
+export const SNAPSHOT_MAX_GEN = 1_000_000_000;
+
+export interface SnapshotClaim {
+  resource: string;
+  holder: string;
+  ttlMs: number;
+  acquiredAt: number;
+  seq: number;
+  gen: number;
+  dependsOn?: string[];
+}
+
+export interface SnapshotMember {
+  agentId: string;
+  joinedAtSeq: number;
+  topics: string[];
+  muted: string[];
+  threadRoots: string[];
+  heldTopics: string[];
+  lastMessageId?: string;
+  waitedResource?: string;
+}
+
+export interface RoomStateSnapshot {
+  v: 1;
+  /** Highest seq whose effects are already folded into these maps. */
+  seq: number;
+  /**
+   * True when this checkpoint deliberately omits older durable entries because an entry or byte
+   * cap was reached. Absent in pre-bound logs; their retained entries still replay, but anything
+   * beyond the durable window is intentionally not restored.
+   */
+  truncated?: boolean;
+  claimGens: Array<[string, number]>;
+  claims: SnapshotClaim[];
+  cursors: Array<[string, number]>;
+  members: SnapshotMember[];
+  idemKeys: Array<[string, string]>;
+}
+
+function snapshotText(value: unknown, max = SNAPSHOT_MAX_NAME_BYTES): value is string {
+  return typeof value === "string" && value.length <= max;
+}
+
+function snapshotTextArray(value: unknown, max = SNAPSHOT_MAX_SET): value is string[] {
+  return Array.isArray(value) && value.length <= max && value.every((v) => snapshotText(v));
+}
+
+function snapshotPair(value: unknown): value is [unknown, unknown] {
+  return Array.isArray(value) && value.length === 2;
+}
+
+function snapshotIndex(value: unknown, ceiling: number): value is number {
+  return Number.isInteger(value) && (value as number) >= 0 && (value as number) <= ceiling;
+}
+
+function snapshotGen(value: unknown): value is number {
+  return Number.isInteger(value) && (value as number) >= 1 && (value as number) <= SNAPSHOT_MAX_GEN;
+}
+
+function isSnapshotState(value: unknown, recordSeq: number): value is RoomStateSnapshot {
+  if (!isPlainObject(value) || value.v !== 1 || !snapshotIndex(value.seq, recordSeq)) return false;
+  if (value.truncated !== undefined && typeof value.truncated !== "boolean") return false;
+  const list = (key: string): unknown[] | null => {
+    const found = value[key];
+    return Array.isArray(found) && found.length <= SNAPSHOT_MAX_ENTRIES ? found : null;
+  };
+  const claimGens = list("claimGens");
+  const claims = list("claims");
+  const cursors = list("cursors");
+  const members = list("members");
+  const idemKeys = list("idemKeys");
+  if (
+    claimGens === null ||
+    claims === null ||
+    cursors === null ||
+    members === null ||
+    idemKeys === null
+  ) {
+    return false;
+  }
+  for (const entry of claimGens) {
+    if (!snapshotPair(entry) || !snapshotText(entry[0]) || !snapshotGen(entry[1])) return false;
+  }
+  for (const entry of cursors) {
+    if (!snapshotPair(entry) || !snapshotText(entry[0]) || !snapshotIndex(entry[1], recordSeq)) {
+      return false;
+    }
+  }
+  for (const entry of idemKeys) {
+    if (!snapshotPair(entry) || !snapshotText(entry[0]) || !snapshotText(entry[1])) return false;
+  }
+  for (const claim of claims) {
+    if (!isPlainObject(claim)) return false;
+    if (!snapshotText(claim.resource) || !snapshotText(claim.holder)) return false;
+    const ttl = claim.ttlMs;
+    if (
+      typeof ttl !== "number" ||
+      !Number.isFinite(ttl) ||
+      ttl < CLAIM_TTL_MIN_MS ||
+      ttl > CLAIM_TTL_MAX_MS
+    ) {
+      return false;
+    }
+    if (
+      typeof claim.acquiredAt !== "number" ||
+      !Number.isFinite(claim.acquiredAt) ||
+      claim.acquiredAt < 0 ||
+      !snapshotIndex(claim.seq, recordSeq) ||
+      !snapshotGen(claim.gen)
+    ) {
+      return false;
+    }
+    if (claim.dependsOn !== undefined && !snapshotTextArray(claim.dependsOn)) return false;
+  }
+  for (const member of members) {
+    if (!isPlainObject(member) || !snapshotText(member.agentId)) return false;
+    if (!snapshotIndex(member.joinedAtSeq, recordSeq)) return false;
+    if (
+      !snapshotTextArray(member.topics) ||
+      !snapshotTextArray(member.muted) ||
+      !snapshotTextArray(member.threadRoots) ||
+      !snapshotTextArray(member.heldTopics)
+    ) {
+      return false;
+    }
+    if (
+      (member.lastMessageId !== undefined && !snapshotText(member.lastMessageId)) ||
+      (member.waitedResource !== undefined && !snapshotText(member.waitedResource))
+    ) {
+      return false;
+    }
+  }
+  try {
+    return JSON.stringify(value).length <= SNAPSHOT_MAX_BYTES;
+  } catch {
+    return false;
+  }
+}
+
+/** The validated checkpoint on a record, or null for an ordinary snapshot-free record. */
+export function stateOf(record: RoomRecord): RoomStateSnapshot | null {
+  const state = (record as unknown as Record<string, unknown>).state;
+  return isSnapshotState(state, record.seq) ? (state as RoomStateSnapshot) : null;
+}
 
 // [invented] — §3.3's per-kind required-field table, as data (the validator's single source).
 export const LOG_VALIDATION_FIELDS: Readonly<Record<RecordKind, readonly string[]>> = {
@@ -630,6 +782,7 @@ export function validateRecord(value: unknown): RoomRecord | null {
   if (value.mention !== undefined && !isStringArray(value.mention)) return null;
   if (value.dependsOn !== undefined && !isStringArray(value.dependsOn)) return null;
   if (value.status !== undefined && !isStatusObject(value.status)) return null;
+  if (value.state !== undefined && !isSnapshotState(value.state, seq)) return null;
   if (
     kind === "msg" &&
     value.performative !== undefined &&

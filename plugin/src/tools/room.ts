@@ -32,9 +32,18 @@ import {
 } from "../cards/tool-cards";
 import { globalMap } from "../globals";
 import { hostSchema } from "../host-schema";
+import { resourceKey } from "../ids";
 import { buildDigest, DIGEST_CLAIMS_CAP, estimateTokens, ROSTER_CAP } from "../onboarding/digest";
 import { safeRoomText } from "../onboarding/escape";
-import { contended, grant, reclaimIfStale, release, renew, staleGen } from "../store/claims";
+import {
+  type ClaimState,
+  contended,
+  grant,
+  reclaimIfStale,
+  release,
+  renew,
+  staleGen,
+} from "../store/claims";
 import { clampNumber as clamp, type RoomConfig } from "../store/config";
 import {
   bumpCursor,
@@ -584,14 +593,14 @@ async function deliverToTarget(
     // The T2 slice above the cursor (muted out, GIVEN kept): `coalescePending`'s own filter has
     // no given check, so this must not either — it is fed in pre-partitioned below.
     const t2Above: RoomRecord[] = [];
-    // classify/isMuted per seq for this pass's batch lookups below (the T1-admit loop, the
-    // deliver loop and the T2 tail all re-asked for the same records).
-    const classBySeq = new Map<number, { tier: Tier; muted: boolean }>();
+    // classify/isMuted per record ID for this pass's batch lookups below. Replay can synthesize a
+    // gap with the SAME seq as its anchor, so seq is an ordering key, never an identity.
+    const classById = new Map<string, { tier: Tier; muted: boolean }>();
     for (const r of store.records) {
       if (r.seq <= cursor) continue;
       const muted = isMuted(store, viewer, r);
       const tier = classify(r, viewer);
-      classBySeq.set(r.seq, { tier, muted });
+      classById.set(r.id, { tier, muted });
       if (muted) continue;
       if (tier === "T2") {
         t2Above.push(r);
@@ -605,7 +614,7 @@ async function deliverToTarget(
     // A batch record missing from the map (not in the log above the cursor) is classified live —
     // the same predicates the stacked filters applied.
     const classOf = (record: RoomRecord): { tier: Tier; muted: boolean } =>
-      classBySeq.get(record.seq) ?? {
+      classById.get(record.id) ?? {
         tier: classify(record, viewer),
         muted: isMuted(store, viewer, record),
       };
@@ -633,7 +642,7 @@ async function deliverToTarget(
       const cls = classOf(record);
       if (cls.muted) continue;
       if (cls.tier !== "T1") continue;
-      if (!coalesced && t1.injected.some((r) => r.seq === record.seq)) admitted.push(record);
+      if (!coalesced && t1.injected.some((r) => r.id === record.id)) admitted.push(record);
     }
     // A `gap` record is a promised notify (T1 for every viewer) that the retention prune
     // appends OUTSIDE any op's batch — so it is never in `records`, and no delivery pass would
@@ -644,11 +653,11 @@ async function deliverToTarget(
     // by a busy turn.
     // `owedOthers` was the non-gap pending set minus admitted; only its MINIMUM is used (the
     // floor below the oldest still-owed record), computed here from the non-gap buckets.
-    const admittedSeqs = new Set<number>(admitted.map((a) => a.seq));
+    const admittedIds = new Set<string>(admitted.map((a) => a.id));
     let owedFloorOthers = Number.POSITIVE_INFINITY;
     for (const bucket of [t0Pending, t1Pending] as const) {
       for (const r of bucket) {
-        if (!admittedSeqs.has(r.seq) && r.seq < owedFloorOthers) owedFloorOthers = r.seq;
+        if (!admittedIds.has(r.id) && r.seq < owedFloorOthers) owedFloorOthers = r.seq;
       }
     }
     // The gap may only be carried when nothing the recipient still OWES sits BELOW it: telling
@@ -656,8 +665,8 @@ async function deliverToTarget(
     // `room{op:"read"}` (which starts at the cursor) could never return it. While a gap waits
     // behind a refusal it stays owed, but it never lowers the floor: the refusal below it
     // already sets a lower one.
-    const batchSeqs = new Set<number>(records.map((r) => r.seq));
-    const gaps = gapPending.filter((r) => !batchSeqs.has(r.seq) && r.seq < owedFloorOthers);
+    const batchIds = new Set<string>(records.map((r) => r.id));
+    const gaps = gapPending.filter((r) => !batchIds.has(r.id) && r.seq < owedFloorOthers);
     // Last in the batch: the T0/T1 deliveries go first, so a failed one aborts the pass before
     // the gap is told (the gap is retried on the next pass) and the gap's cursor bump never
     // crosses a record whose delivery just failed.
@@ -672,14 +681,14 @@ async function deliverToTarget(
     // of `pending` above, so they never pin the floor — but the T0 batch `selectT0` is about to
     // collapse still counts as owed until its summary is ISSUED (below), so nothing bumps the
     // cursor past records the recipient has not been told about yet.
-    for (const g of gaps) admittedSeqs.add(g.seq);
+    for (const g of gaps) admittedIds.add(g.id);
     // `owed` was the pending set minus admitted; only its MINIMUM is used. A carried gap was
     // told, so it never pins the floor — which is exactly what removing it from the owed set
     // means here.
     let owedFloor = Number.POSITIVE_INFINITY;
     for (const bucket of [t0Pending, t1Pending, gapPending] as const) {
       for (const r of bucket) {
-        if (!admittedSeqs.has(r.seq) && r.seq < owedFloor) owedFloor = r.seq;
+        if (!admittedIds.has(r.id) && r.seq < owedFloor) owedFloor = r.seq;
       }
     }
     const cursorCap = owedFloor - 1;
@@ -738,6 +747,355 @@ function okWithDelivery<T extends RoomToolDetails>(
   failure?: string,
 ): AgentToolResult<T> {
   return ok(failure === undefined ? details : { ...details, deliveryError: failure }, text);
+}
+
+// --- one mutation layer for both surfaces -----------------------------------
+
+/**
+ * The command and the tool used to own separate copies of claim/post/release. Both now call
+ * these operations: they own validation, TTL clamping, the lease state machine and the delivery
+ * pass (the same `notifyRecipients` the claim sweep notifier uses). Each surface renders only
+ * its own report/details, so neither can drift on what a mutation actually does.
+ */
+export interface RoomMutationInput {
+  pi: ExtensionAPI;
+  ctx: ExtensionContext;
+  store: RoomStore;
+  agentId: string;
+  /** The tool's writer ops mint membership; the command never mints it. */
+  ensureMember?: boolean;
+}
+
+/** Failure facts, not surface text: a command warns, a tool returns `details.error`. */
+export type RoomMutationFailure =
+  | { ok: false; code: "validation"; error: string }
+  | { ok: false; code: "bodyTooLarge"; max: number }
+  | { ok: false; code: "badTtl"; raw: string }
+  | { ok: false; code: "missingTopic" | "missingKey" | "missingBody" }
+  | { ok: false; code: "claimDenied"; holder: string; expiresAt: number }
+  | {
+      ok: false;
+      code: "claimRenewDenied";
+      holder: string | undefined;
+      fallbackHolder: string;
+      expiresAt: number;
+    }
+  | { ok: false; code: "claimBlocked"; holder: string; expiresAt: number; blockers: string }
+  | { ok: false; code: "releaseUnknown" }
+  | { ok: false; code: "releaseDenied"; holder: string; expiresAt: number };
+
+export type ClaimMutation =
+  | RoomMutationFailure
+  | {
+      ok: true;
+      kind: "granted" | "renewed";
+      claim: ClaimState;
+      ttlMs: number;
+      deliveryError?: string;
+    };
+
+export type ReleaseMutation =
+  | RoomMutationFailure
+  | { ok: true; kind: "released"; deliveryError?: string }
+  | { ok: true; kind: "reclaimed"; successor: string | null; deliveryError?: string };
+
+export type PostMutation =
+  | RoomMutationFailure
+  | {
+      ok: true;
+      kind: "posted";
+      record: RoomRecord;
+      tier: Tier;
+      deliveryError?: string;
+    }
+  | { ok: true; kind: "idempotent"; record: RoomRecord; tier: Tier };
+
+/** The command's read-only surfaces never mint a member; the tool's writers do. */
+function mutationViewer(input: RoomMutationInput): MemberState {
+  if (input.ensureMember) return viewerFor(input.store, input.agentId);
+  return (
+    input.store.members.get(input.agentId) ?? {
+      agentId: input.agentId,
+      joinedAtSeq: input.store.seq,
+      topics: new Set<string>(),
+      muted: new Set<string>(),
+      threadRoots: new Set<string>(),
+      heldTopics: new Set<string>(),
+    }
+  );
+}
+
+async function deliverMutation(
+  input: RoomMutationInput,
+  before: number,
+): Promise<string | undefined> {
+  return notifyRecipients(
+    input.pi,
+    input.ctx,
+    input.store,
+    appendedSince(input.store, before),
+    input.agentId,
+  );
+}
+
+function mutationTtl(
+  store: RoomStore,
+  raw: number | undefined,
+  rawText: string | undefined,
+): { ttlMs: number } | { failure: RoomMutationFailure } {
+  const requested = raw ?? store.config.claimTtlMs;
+  // Math.min/Math.max propagate NaN; a NaN lease persists as null and replay quarantines it.
+  if (!Number.isFinite(requested)) {
+    return { failure: { ok: false, code: "badTtl", raw: rawText ?? String(requested) } };
+  }
+  return { ttlMs: clamp(requested, CLAIM_TTL_MIN_MS, CLAIM_TTL_MAX_MS) };
+}
+
+export async function mutateClaim(
+  input: RoomMutationInput,
+  fields: {
+    topic?: string;
+    key?: string;
+    ttl?: number;
+    ttlText?: string;
+    dependsOn?: readonly string[];
+    gen?: number;
+  },
+): Promise<ClaimMutation> {
+  const { topic, key } = fields;
+  if (!topic) return { ok: false, code: "missingTopic" };
+  if (!key) return { ok: false, code: "missingKey" };
+  const fieldError = overCap("topic", topic, TOPIC_MAX_BYTES) ?? overCap("key", key, KEY_MAX_BYTES);
+  if (fieldError !== null) return { ok: false, code: "validation", error: fieldError };
+  if (fields.dependsOn !== undefined) {
+    const dependsError = overListCap("dependsOn", fields.dependsOn, DEPENDS_ON_MAX_BYTES);
+    if (dependsError !== null) return { ok: false, code: "validation", error: dependsError };
+  }
+  const ttl = mutationTtl(input.store, fields.ttl, fields.ttlText);
+  if ("failure" in ttl) return ttl.failure;
+  const resource = resourceKey(topic, key);
+  const viewer = mutationViewer(input);
+  // R1 — the opt-in fence: a displaced caller presenting an old generation is a zombie.
+  if (staleGen(input.store, resource, fields.gen)) {
+    return {
+      ok: false,
+      code: "validation",
+      error:
+        `claim ${resource} refused — your generation ${fields.gen} is stale ` +
+        `(the resource has moved on)`,
+    };
+  }
+  const before = input.store.seq;
+  const result = grant(input.store, resource, input.agentId, ttl.ttlMs, fields.dependsOn);
+  if (!result.ok) {
+    // R3 — blocked is not a lost race: no contended record. A plain denial IS measured below.
+    if ("blockedBy" in result && result.blockedBy.length > 0) {
+      const blockers = result.blockedBy
+        .map((b) => `${b.resource} (held by ${b.holder})`)
+        .join(", ");
+
+      return {
+        ok: false,
+        code: "claimBlocked",
+        holder: result.holder,
+        expiresAt: result.expiresAt,
+        blockers,
+      };
+    }
+    if (result.holder === input.agentId) {
+      const renewed = renew(input.store, resource, input.agentId, ttl.ttlMs);
+      if (renewed.ok) {
+        viewer.heldTopics.add(topic);
+        const deliveryError = await deliverMutation(input, before);
+        return { ok: true, kind: "renewed", claim: renewed.claim, ttlMs: ttl.ttlMs, deliveryError };
+      }
+
+      return {
+        ok: false,
+        code: "claimRenewDenied",
+        holder: renewed.holder,
+        fallbackHolder: result.holder,
+        expiresAt: renewed.expiresAt,
+      };
+    }
+    // R5 — contention is a measurement, never a silent no-op.
+    input.store.append({
+      kind: "contended",
+      from: input.agentId,
+      resource,
+      holder: result.holder,
+    });
+    return {
+      ok: false,
+      code: "claimDenied",
+      holder: result.holder,
+      expiresAt: result.expiresAt,
+    };
+  }
+  viewer.heldTopics.add(topic);
+  const deliveryError = await deliverMutation(input, before);
+  return { ok: true, kind: "granted", claim: result.claim, ttlMs: ttl.ttlMs, deliveryError };
+}
+
+export async function mutateRelease(
+  input: RoomMutationInput,
+  fields: { topic?: string; key?: string },
+): Promise<ReleaseMutation> {
+  const { topic, key } = fields;
+  if (!topic) return { ok: false, code: "missingTopic" };
+  if (!key) return { ok: false, code: "missingKey" };
+  const fieldError = overCap("topic", topic, TOPIC_MAX_BYTES) ?? overCap("key", key, KEY_MAX_BYTES);
+  if (fieldError !== null) return { ok: false, code: "validation", error: fieldError };
+  const resource = resourceKey(topic, key);
+  const held = input.store.claims.get(resource);
+  if (!held) return { ok: false, code: "releaseUnknown" };
+  const before = input.store.seq;
+  if (held.holder !== input.agentId) {
+    const outcome = reclaimIfStale(input.store, resource, Date.now());
+    if (!outcome.reclaimed) {
+      return {
+        ok: false,
+        code: "releaseDenied",
+        holder: held.holder,
+        expiresAt: held.acquiredAt + held.ttlMs,
+      };
+    }
+    const deliveryError = await deliverMutation(input, before);
+    return { ok: true, kind: "reclaimed", successor: outcome.holder, deliveryError };
+  }
+  release(input.store, resource, input.agentId, "released");
+  const deliveryError = await deliverMutation(input, before);
+  return { ok: true, kind: "released", deliveryError };
+}
+
+export async function mutatePost(
+  input: RoomMutationInput,
+  fields: {
+    topic?: string;
+    body?: string;
+    mention?: readonly string[];
+    replyTo?: string;
+    performative?: Performative;
+    idemKey?: string;
+    status?: StatusObject;
+    gen?: number;
+    /** The command's text parser has no empty body; the tool accepts one. */
+    requireNonemptyBody?: boolean;
+  },
+): Promise<PostMutation> {
+  const topic = fields.topic;
+  if (!topic) return { ok: false, code: "missingTopic" };
+  const topicError = overCap("topic", topic, TOPIC_MAX_BYTES);
+  if (topicError !== null) return { ok: false, code: "validation", error: topicError };
+  const body = fields.body;
+  if (body === undefined || (fields.requireNonemptyBody && body === "")) {
+    return { ok: false, code: "missingBody" };
+  }
+  if (Buffer.byteLength(body, "utf-8") > input.store.config.maxBodyBytes) {
+    return { ok: false, code: "bodyTooLarge", max: input.store.config.maxBodyBytes };
+  }
+  if (fields.idemKey !== undefined) {
+    const idemError = overCap("idemKey", fields.idemKey, IDEM_KEY_MAX_BYTES);
+    if (idemError !== null) return { ok: false, code: "validation", error: idemError };
+  }
+  if (fields.mention !== undefined) {
+    const mentionError = overListCap("mention", fields.mention, MENTION_ID_MAX_BYTES);
+    if (mentionError !== null) return { ok: false, code: "validation", error: mentionError };
+  }
+  const { head, handle } = truncateOversized(body, input.store.config.maxT1Tokens);
+  const storedBody = handle !== "" ? `${head}${handle}` : head;
+  const viewer = mutationViewer(input);
+  if (fields.status !== undefined) {
+    const missing = STATUS_KEYS.filter((key) => {
+      const answer = fields.status?.[key];
+      return (
+        answer === undefined ||
+        typeof answer.reason !== "string" ||
+        typeof answer.answer !== "string"
+      );
+    });
+    if (missing.length > 0) {
+      return {
+        ok: false,
+        code: "validation",
+        error:
+          `status is missing or malformed: ${missing.join(", ")} (each key needs ` +
+          `{reason, answer})`,
+      };
+    }
+    for (const key of STATUS_KEYS) {
+      const entry = fields.status[key]!;
+      const reasonError = overCap(`status.${key}.reason`, entry.reason, STATUS_FIELD_MAX_BYTES);
+      if (reasonError !== null) return { ok: false, code: "validation", error: reasonError };
+      const answerError = overCap(`status.${key}.answer`, entry.answer, STATUS_FIELD_MAX_BYTES);
+      if (answerError !== null) return { ok: false, code: "validation", error: answerError };
+    }
+    const holds = [...input.store.claims.values()].some(
+      (claim) => claim.holder === input.agentId && claim.resource.startsWith(`${topic}/`),
+    );
+    if (!holds) {
+      return {
+        ok: false,
+        code: "validation",
+        error: `status is written by the agent holding the topic's claim — claim ${topic}/… first`,
+      };
+    }
+  }
+  if (fields.gen !== undefined) {
+    const stale = [...input.store.claims.values()].find(
+      (claim) => claim.holder === input.agentId && claim.resource.startsWith(`${topic}/`),
+    );
+    if (stale !== undefined && stale.gen !== fields.gen) {
+      return {
+        ok: false,
+        code: "validation",
+        error:
+          `post refused — your claim on ${stale.resource} is at generation ${stale.gen}, ` +
+          `not ${fields.gen}`,
+      };
+    }
+  }
+  if (fields.idemKey !== undefined) {
+    const priorId = input.store.idemKeys.get(idemIndexKey(input.agentId, fields.idemKey));
+    const prior = priorId === undefined ? undefined : input.store.byId.get(priorId);
+    if (priorId !== undefined && (prior === undefined || prior.kind !== "msg")) {
+      return {
+        ok: false,
+        code: "validation",
+        error: `idemKey ${fields.idemKey} was already used but its post is gone — retry with a fresh key`,
+      };
+    }
+    if (prior !== undefined && prior.kind === "msg") {
+      if (prior.topic !== topic || prior.body !== storedBody) {
+        return {
+          ok: false,
+          code: "validation",
+          error: `idemKey ${fields.idemKey} was already used for a different post`,
+        };
+      }
+      return { ok: true, kind: "idempotent", record: prior, tier: classify(prior, viewer) };
+    }
+  }
+  const parent = fields.replyTo ? input.store.byId.get(fields.replyTo) : undefined;
+  const threadRoot = parent?.kind === "msg" ? (parent.threadRoot ?? parent.id) : undefined;
+  const before = input.store.seq;
+  const record = input.store.append({
+    kind: "msg",
+    from: input.agentId,
+    topic,
+    body: storedBody,
+    ...(fields.mention ? { mention: fields.mention.slice() } : {}),
+    ...(fields.replyTo ? { replyTo: fields.replyTo } : {}),
+    ...(threadRoot ? { threadRoot } : {}),
+    ...(fields.performative ? { performative: fields.performative } : {}),
+    ...(fields.idemKey !== undefined ? { idemKey: fields.idemKey } : {}),
+    ...(fields.status !== undefined ? { status: fields.status } : {}),
+  });
+  viewer.lastMessageId = record.id;
+  viewer.topics.add(topic);
+  if (threadRoot) viewer.threadRoots.add(threadRoot);
+  const deliveryError = await deliverMutation(input, before);
+  return { ok: true, kind: "posted", record, tier: classify(record, viewer), deliveryError };
 }
 
 export function registerRoomTool(pi: ExtensionAPI): void {
@@ -996,317 +1354,173 @@ export function registerRoomTool(pi: ExtensionAPI): void {
           }
 
           case "post": {
-            const topic = p.topic;
-            if (!topic) return fail("post requires a topic");
-            const topicError = overCap("topic", topic, TOPIC_MAX_BYTES);
-            if (topicError !== null) return fail(topicError);
-            const body = p.body;
-            if (body === undefined) return fail("post requires a body");
-            // K19 — the body cap is enforced here, before the record is drafted; never truncated silently.
-            const bytes = Buffer.byteLength(body, "utf-8");
-            if (bytes > config.maxBodyBytes) {
-              return fail(`body exceeds maxBodyBytes (${config.maxBodyBytes})`);
-            }
-            // S3 — the fields the body cap never covered, capped before the record is drafted: the
-            // log is append-only, so an oversized one is paid for on every later read and digest.
-            if (p.idemKey !== undefined) {
-              const idemError = overCap("idemKey", p.idemKey, IDEM_KEY_MAX_BYTES);
-              if (idemError !== null) return fail(idemError);
-            }
-            if (p.mention !== undefined) {
-              const mentionError = overListCap("mention", p.mention, MENTION_ID_MAX_BYTES);
-              if (mentionError !== null) return fail(mentionError);
-            }
-            // N7 — a body over the T1 token budget is truncated to a head + a read handle.
-            const { head, handle } = truncateOversized(body, config.maxT1Tokens);
-            const storedBody = handle !== "" ? `${head}${handle}` : head;
-            const viewer = viewerFor(store, agentId);
-            // R6 — the topic's status ledger. The writer is the agent that HOLDS the topic's
-            // claim: in a flat room that is the coordination role, without a hierarchy (the
-            // report's synthesis: give the flat room the protocol a router provides, not the
-            // router itself). The shape is Magentic-One's five keys, each {reason, answer}, and
-            // it is checked on write the way that ledger is checked at runtime.
-            if (p.status !== undefined) {
-              const missing = STATUS_KEYS.filter((key) => {
-                const answer = p.status?.[key];
-                return (
-                  answer === undefined ||
-                  typeof answer.reason !== "string" ||
-                  typeof answer.answer !== "string"
-                );
-              });
-              if (missing.length > 0) {
-                return fail(
-                  `status is missing or malformed: ${missing.join(", ")} (each key needs ` +
-                    `{reason, answer})`,
-                );
+            const result = await mutatePost(
+              { pi, ctx, store, agentId, ensureMember: true },
+              {
+                topic: p.topic,
+                body: p.body,
+                mention: p.mention,
+                replyTo: p.replyTo,
+                performative: p.performative,
+                idemKey: p.idemKey,
+                status: p.status as unknown as StatusObject,
+                gen: p.gen,
+              },
+            );
+            if (!result.ok) {
+              switch (result.code) {
+                case "missingTopic":
+                  return fail("post requires a topic");
+                case "missingBody":
+                  return fail("post requires a body");
+                case "bodyTooLarge":
+                  return fail(`body exceeds maxBodyBytes (${result.max})`);
+                case "validation":
+                  return fail(result.error);
+                default:
+                  return fail("post failed");
               }
-              // S3 — the ledger is persisted verbatim and injected to every recipient; cap each
-              // string before the shape check's `holds` gate, so the cap is what refuses it.
-              for (const key of STATUS_KEYS) {
-                const entry = p.status[key]!;
-                const reasonError = overCap(
-                  `status.${key}.reason`,
-                  entry.reason,
-                  STATUS_FIELD_MAX_BYTES,
-                );
-                if (reasonError !== null) return fail(reasonError);
-                const answerError = overCap(
-                  `status.${key}.answer`,
-                  entry.answer,
-                  STATUS_FIELD_MAX_BYTES,
-                );
-                if (answerError !== null) return fail(answerError);
-              }
-              const holds = [...store.claims.values()].some(
-                (claim) => claim.holder === agentId && claim.resource.startsWith(`${topic}/`),
+            }
+            const topic = p.topic!;
+            if (result.kind === "idempotent") {
+              return ok(
+                {
+                  ok: true,
+                  op: "post",
+                  id: result.record.id,
+                  seq: result.record.seq,
+                  tier: result.tier,
+                  idempotent: true,
+                },
+                `room post ${safe(topic)} → already posted (seq ${result.record.seq})`,
               );
-              if (!holds) {
-                return fail(
-                  `status is written by the agent holding the topic's claim — claim ${topic}/… first`,
-                );
-              }
             }
-            // R1 — the write-path fence. A post into a topic the poster CLAIMS must carry that
-            // claim's current generation: a holder whose lease was reclaimed and re-granted is
-            // behind, and its late write is refused instead of landing on top of the new holder's
-            // work. The room can fence its own operations; it cannot fence a raw `edit` on a file
-            // (agents write files outside the room), so this is the enforcement point, not a
-            // complete one.
-            if (p.gen !== undefined) {
-              const stale = [...store.claims.values()].find(
-                (claim) => claim.holder === agentId && claim.resource.startsWith(`${topic}/`),
-              );
-              if (stale !== undefined && stale.gen !== p.gen) {
-                return fail(
-                  `post refused — your claim on ${stale.resource} is at generation ${stale.gen}, ` +
-                    `not ${p.gen}`,
-                );
-              }
-            }
-            // R7 — idempotency. A retry with the same key returns the FIRST post instead of
-            // appending a second: a retried post would double-wake every mentioned peer, and a T0
-            // is a wake+steer. Stripe's contract, copyable: the saved response is returned, and a
-            // key reused for DIFFERENT parameters is an error rather than a silent second post.
-            if (p.idemKey !== undefined) {
-              const priorId = store.idemKeys.get(idemIndexKey(agentId, p.idemKey));
-              const prior = priorId === undefined ? undefined : store.byId.get(priorId);
-              // A dangling key (record pruned by retention, projection reset) must NOT append a
-              // same-key duplicate: the retry mints a fresh key, like the parameters-mismatch arm.
-              if (priorId !== undefined && (prior === undefined || prior.kind !== "msg")) {
-                return fail(
-                  `idemKey ${p.idemKey} was already used but its post is gone — retry with a fresh key`,
-                );
-              }
-              if (prior !== undefined && prior.kind === "msg") {
-                if (prior.topic !== topic || prior.body !== storedBody) {
-                  return fail(`idemKey ${p.idemKey} was already used for a different post`);
-                }
-                return okWithDelivery(
-                  {
-                    ok: true,
-                    op: "post",
-                    id: prior.id,
-                    seq: prior.seq,
-                    tier: classify(prior, viewer),
-                    idempotent: true,
-                  },
-                  `room post ${safe(topic)} → already posted (seq ${prior.seq})`,
-                );
-              }
-            }
-            // §5.1 N1 — replying subscribes the poster to the thread: resolve the parent's root
-            // (or the parent itself when it starts the thread) and stamp it on the new record. An
-            // unknown replyTo is ignored, never a failure — the reply still posts.
-            const parent = p.replyTo ? store.byId.get(p.replyTo) : undefined;
-            const threadRoot =
-              parent?.kind === "msg" ? (parent.threadRoot ?? parent.id) : undefined;
-            const record = store.append({
-              kind: "msg",
-              from: agentId, // S4 — `from` is always the authenticated caller id
-              topic,
-              body: storedBody,
-              ...(p.mention ? { mention: p.mention } : {}),
-              ...(p.replyTo ? { replyTo: p.replyTo } : {}),
-              ...(threadRoot ? { threadRoot } : {}),
-              ...(p.performative ? { performative: p.performative } : {}),
-              ...(p.idemKey !== undefined ? { idemKey: p.idemKey } : {}),
-              ...(p.status !== undefined ? { status: p.status as unknown as StatusObject } : {}),
-            });
-            viewer.lastMessageId = record.id;
-            viewer.topics.add(topic);
-            if (threadRoot) viewer.threadRoots.add(threadRoot);
-            const failure = await notifyRecipients(pi, ctx, store, [record], agentId);
             return okWithDelivery(
               {
                 ok: true,
                 op: "post",
-                id: record.id,
-                seq: record.seq,
-                tier: classify(record, viewer),
+                id: result.record.id,
+                seq: result.record.seq,
+                tier: result.tier,
               },
-              `room post → ${safe(topic)} · seq ${record.seq}`,
-              failure,
+              `room post → ${safe(topic)} · seq ${result.record.seq}`,
+              result.deliveryError,
             );
           }
 
           case "claim": {
-            const topic = p.topic;
-            const key = p.key;
-            if (!topic || !key) return fail("claim requires topic and key");
-            // S3 — `<topic>/<key>` is persisted on the claim record and every board/read line.
-            const fieldError =
-              overCap("topic", topic, TOPIC_MAX_BYTES) ?? overCap("key", key, KEY_MAX_BYTES);
-            if (fieldError !== null) return fail(fieldError);
-            if (p.dependsOn !== undefined) {
-              const dependsError = overListCap("dependsOn", p.dependsOn, DEPENDS_ON_MAX_BYTES);
-              if (dependsError !== null) return fail(dependsError);
-            }
-            const resource = `${topic}/${key}`;
-            const viewer = viewerFor(store, agentId);
-            const ttlMs = clamp(p.ttl ?? config.claimTtlMs, CLAIM_TTL_MIN_MS, CLAIM_TTL_MAX_MS);
-            const before = store.seq;
-            // R1 — the fencing token. A caller that was displaced (its lease was reclaimed) still
-            // holds the generation it was given; presenting it says "I am a zombie". The fence is
-            // opt-in: a claim without a generation is the ordinary path.
-            if (staleGen(store, resource, p.gen)) {
-              return fail(
-                `claim ${resource} refused — your generation ${p.gen} is stale (the resource has ` +
-                  `moved on)`,
-              );
-            }
-            const result = grant(store, resource, agentId, ttlMs, p.dependsOn);
-            if (!result.ok) {
-              // R3 — the claim depends on a resource that is still held. Say WHO holds it, so the
-              // agent can wait for it (wait_for_claim) instead of duplicating the work.
-              if ("blockedBy" in result && result.blockedBy.length > 0) {
-                const blockers = result.blockedBy
-                  .map((b) => `${b.resource} (held by ${b.holder})`)
-                  .join(", ");
-                return fail(
-                  `claim ${resource} blocked — depends on ${blockers}`,
-                  result.holder,
-                  result.expiresAt,
-                );
-              }
-              // The holder's own lease: RENEW it rather than reporting "denied — held by <me>".
-              // A TTL is a guess about how long the work takes; renewing is how a slow-but-alive
-              // agent keeps a live lease.
-              if (result.holder === agentId) {
-                const renewed = renew(store, resource, agentId, ttlMs);
-                if (!renewed.ok) {
-                  return fail(
-                    `claim ${resource} denied — held by ${renewed.holder ?? "?"}`,
-                    renewed.holder,
-                    renewed.expiresAt,
-                  );
-                }
-                viewer.heldTopics.add(topic);
-                const renewalFailure = await notifyRecipients(
-                  pi,
-                  ctx,
-                  store,
-                  appendedSince(store, before),
-                  agentId,
-                );
-                return okWithDelivery(
-                  {
-                    ok: true,
-                    op: "claim",
-                    holder: renewed.claim.holder,
-                    expiresAt: renewed.claim.acquiredAt + renewed.claim.ttlMs,
-                    renewed: true,
-                  },
-                  `room claim ${safe(resource)} → renewed, expires in ${Math.round(ttlMs / 1000)}s`,
-                  renewalFailure,
-                );
-              }
-              // R5 — contention must be VISIBLE. A denied claim used to append nothing, so duplicate
-              // work and contention were structurally unmeasurable. The record says who wanted
-              // what and who had it.
-              store.append({
-                kind: "contended",
-                from: agentId,
-                resource,
-                holder: result.holder,
-              });
-              return fail(
-                `claim ${resource} denied — held by ${result.holder}`,
-                result.holder,
-                result.expiresAt,
-              );
-            }
-            viewer.heldTopics.add(topic);
-            const failure = await notifyRecipients(
-              pi,
-              ctx,
-              store,
-              appendedSince(store, before),
-              agentId,
+            const resource = resourceKey(p.topic ?? "", p.key ?? "");
+            const result = await mutateClaim(
+              { pi, ctx, store, agentId, ensureMember: true },
+              {
+                topic: p.topic,
+                key: p.key,
+                ttl: p.ttl,
+                dependsOn: p.dependsOn,
+                gen: p.gen,
+              },
             );
+            if (!result.ok) {
+              switch (result.code) {
+                case "missingTopic":
+                case "missingKey":
+                  return fail("claim requires topic and key");
+                case "validation":
+                  return fail(result.error);
+                case "badTtl":
+                  return fail(
+                    `claim: bad ttlMs "${result.raw}" — expected a number of milliseconds`,
+                  );
+                case "claimBlocked":
+                  return fail(
+                    `claim ${resource} blocked — depends on ${result.blockers}`,
+                    result.holder,
+                    result.expiresAt,
+                  );
+                case "claimDenied":
+                  return fail(
+                    `claim ${resource} denied — held by ${result.holder}`,
+                    result.holder,
+                    result.expiresAt,
+                  );
+                case "claimRenewDenied":
+                  return fail(
+                    `claim ${resource} denied — held by ${result.holder ?? "?"}`,
+                    result.holder,
+                    result.expiresAt,
+                  );
+                default:
+                  return fail("claim failed");
+              }
+            }
+            const expiresAt = result.claim.acquiredAt + result.claim.ttlMs;
+            if (result.kind === "renewed") {
+              return okWithDelivery(
+                {
+                  ok: true,
+                  op: "claim",
+                  holder: result.claim.holder,
+                  expiresAt,
+                  renewed: true,
+                },
+                `room claim ${safe(resource)} → renewed, expires in ${Math.round(result.ttlMs / 1000)}s`,
+                result.deliveryError,
+              );
+            }
             return okWithDelivery(
               {
                 ok: true,
                 op: "claim",
                 holder: result.claim.holder,
-                expiresAt: result.claim.acquiredAt + result.claim.ttlMs,
+                expiresAt,
                 gen: result.claim.gen,
               },
-              `room claim ${safe(resource)} → granted, expires in ${Math.round(ttlMs / 1000)}s`,
-              failure,
+              `room claim ${safe(resource)} → granted, expires in ${Math.round(result.ttlMs / 1000)}s`,
+              result.deliveryError,
             );
           }
 
           case "release": {
-            const topic = p.topic;
-            const key = p.key;
-            if (!topic || !key) return fail("release requires topic and key");
-            // S3 — the release record persists the resource too.
-            const fieldError =
-              overCap("topic", topic, TOPIC_MAX_BYTES) ?? overCap("key", key, KEY_MAX_BYTES);
-            if (fieldError !== null) return fail(fieldError);
-            const resource = `${topic}/${key}`;
-            const held = store.claims.get(resource);
-            if (!held) return fail("unknown resource");
-            const before = store.seq;
-            if (held.holder !== agentId) {
-              // §4.1 — a reclaim against a stale claim is explicit and logged, never silent.
-              const outcome = reclaimIfStale(store, resource, Date.now());
-              if (outcome.reclaimed) {
-                const failure = await notifyRecipients(
-                  pi,
-                  ctx,
-                  store,
-                  appendedSince(store, before),
-                  agentId,
-                );
-                // The lease WAS freed — say so, and name the successor when a waiter took it.
-                const successor =
-                  outcome.holder === null ? " (lease dropped)" : ` → ${outcome.holder}`;
-                return okWithDelivery(
-                  { ok: true, op: "release" },
-                  `room release ${safe(resource)} → reclaimed (was stale)${successor}`,
-                  failure,
-                );
+            const resource = resourceKey(p.topic ?? "", p.key ?? "");
+            const result = await mutateRelease(
+              { pi, ctx, store, agentId },
+              {
+                topic: p.topic,
+                key: p.key,
+              },
+            );
+            if (!result.ok) {
+              switch (result.code) {
+                case "missingTopic":
+                case "missingKey":
+                  return fail("release requires topic and key");
+                case "validation":
+                  return fail(result.error);
+                case "releaseUnknown":
+                  return fail("unknown resource");
+                case "releaseDenied":
+                  return fail(
+                    `release ${resource} denied — not holder`,
+                    result.holder,
+                    result.expiresAt,
+                  );
+                default:
+                  return fail("release failed");
               }
-              return fail(
-                `release ${resource} denied — not holder`,
-                held.holder,
-                held.acquiredAt + held.ttlMs,
+            }
+            if (result.kind === "reclaimed") {
+              const successor =
+                result.successor === null ? " (lease dropped)" : ` → ${result.successor}`;
+              return okWithDelivery(
+                { ok: true, op: "release" },
+                `room release ${safe(resource)} → reclaimed (was stale)${successor}`,
+                result.deliveryError,
               );
             }
-            release(store, resource, agentId, "released");
-            const failure = await notifyRecipients(
-              pi,
-              ctx,
-              store,
-              appendedSince(store, before),
-              agentId,
-            );
             return okWithDelivery(
               { ok: true, op: "release" },
               `room release ${safe(resource)} → released`,
-              failure,
+              result.deliveryError,
             );
           }
 

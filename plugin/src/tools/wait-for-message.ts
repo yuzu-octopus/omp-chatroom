@@ -18,12 +18,7 @@ import { clampTimeout } from "../store/config";
 import { type RoomStore, roomStoreFor } from "../store/room-store";
 import type { RoomRecord } from "../store/schema";
 import { clearWaitEdges, findWaitCycle, setWaitEdges, type WaitTarget } from "../store/wait-graph";
-import {
-  WAIT_DEFAULT_TIMEOUT_MS,
-  WAIT_HEARTBEAT_MS,
-  WAIT_MAX_MS,
-  WAIT_MIN_MS,
-} from "./wait-for-agent";
+import { observeWait, WAIT_DEFAULT_TIMEOUT_MS, WAIT_MAX_MS, WAIT_MIN_MS } from "./wait-for-agent";
 import type { WaitOutcome } from "./wait-for-claim"; // K11 — declared once, there
 
 export const WAIT_FOR_MESSAGE_NAME = "wait_for_message";
@@ -156,6 +151,7 @@ async function waitForMessage(
     agentId,
     waitTargets,
     (resource) => store.claims.get(resource)?.holder,
+    from === undefined ? "any" : "all",
   );
   if (cycle !== null) {
     store.append({
@@ -195,18 +191,6 @@ async function waitForMessage(
     });
   };
 
-  let settle!: (result: WaitForMessageResult) => void;
-  const done = new Promise<WaitForMessageResult>((resolve) => {
-    settle = resolve;
-  });
-  let finished = false;
-  const finish = (result: WaitForMessageResult): void => {
-    if (finished) return;
-    finished = true;
-    recordWait(result.details?.outcome ?? "aborted");
-    settle(result);
-  };
-
   // A message matches on the two filters the params expose: the sender, and "mentions me". With
   // neither filter set, any new `msg` satisfies the wait.
   const matches = (record: Extract<RoomRecord, { kind: "msg" }>): boolean => {
@@ -225,37 +209,26 @@ async function waitForMessage(
   // filterless wait is recorded in the same form the cycle check uses (no `from`).
   setWaitEdges(store.root, agentId, waitTargets);
 
-  const unsubscribe = store.addListener((record) => {
-    if (record.kind === "msg" && matches(record)) finish(eventResult(record));
-  });
-  const timer = ctx.setTimeout(() => finish(timeoutResult(timeoutMs)), timeoutMs);
-  const onAbort = (): void => finish(abortResult());
-  signal?.addEventListener("abort", onAbort, { once: true });
-
   // U5 heartbeat — the TUI repaints "Waiting for … (elapsed Ns)" without the tool resolving.
-  const heartbeat = onUpdate
-    ? ctx.setInterval(() => {
-        onUpdate({
-          content: [
-            {
-              type: "text",
-              text: `wait_for_message → waiting ${Math.round((Date.now() - startedAt) / 1000)}s`,
-            },
-          ],
-          details: { ok: true, outcome: "timeout" },
-        });
-      }, WAIT_HEARTBEAT_MS)
-    : undefined;
-
-  try {
-    return await done;
-  } finally {
-    clearWaitEdges(store.root, agentId);
-    unsubscribe();
-    ctx.clearTimer(timer);
-    if (heartbeat !== undefined) ctx.clearTimer(heartbeat);
-    signal?.removeEventListener("abort", onAbort);
-  }
+  return await observeWait<WaitForMessageDetails>({
+    ctx,
+    timeoutMs,
+    startedAt,
+    signal,
+    onUpdate,
+    listen: (finish) =>
+      store.addListener((record) => {
+        if (record.kind === "msg" && matches(record)) finish(eventResult(record));
+      }),
+    timeout: () => timeoutResult(timeoutMs),
+    abort: () => abortResult(),
+    heartbeat: (elapsedSeconds) => ({
+      content: [{ type: "text", text: `wait_for_message → waiting ${elapsedSeconds}s` }],
+      details: { ok: true, outcome: "timeout" },
+    }),
+    onSettled: recordWait,
+    cleanup: () => clearWaitEdges(store.root, agentId),
+  });
 }
 
 export function registerWaitForMessage(pi: ExtensionAPI): void {
