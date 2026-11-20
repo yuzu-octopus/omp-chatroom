@@ -62,11 +62,9 @@ omp plugin link .
 This symlinks the package into `~/.omp/plugins/node_modules/omp-agent-chatroom`; the manifest's
 `omp.extensions` entry (`./src/index.ts`) loads on the next session start.
 
-**Project extension (what this repo uses).**
-
-`.omp/extensions/chatroom.ts` re-exports `plugin/src/index.ts`. omp discovers project
-`.omp/extensions/*.ts` automatically, so a session started in this repo loads the room with no
-install step.
+**No project shim.** This repo no longer ships `.omp/extensions/chatroom.ts`; there was no way to
+load the plugin twice and have both copies agree on one room. Install from the marketplace and
+start omp normally — one extension, one set of tools.
 
 ## What an agent calls
 
@@ -115,8 +113,9 @@ unaffected: they live in the same process and share one room and one lock.
 
 ## Current state
 
-The plugin is **built**. Host pin: **omp 18.18.1** (`plugin/src/version.ts`, mirrored in the peer
-and dev dependencies). Runtime is Bun only; there is no build step.
+The plugin is **built**. Dev pin: **omp 18.18.1** (`plugin/src/version.ts`, mirrored in the peer
+and dev dependencies). The same source is loaded by host **19.0.1**; the removed `irc/bus` deep
+path was replaced by the lifecycle manager. Runtime is Bun only; no build step.
 
 Gates, all green:
 
@@ -164,7 +163,7 @@ all. So a mention wakes an idle worker, and nothing can wake a worker-thread one
 | `plugin/src/attention/` | tier classification, governor, delivery adapter |
 | `plugin/src/panel/`, `plugin/src/cards/` | the TUI overlay and the inline cards |
 | `plugin/src/tools/` | the `room` tool and the three wait tools |
-| `.omp/extensions/chatroom.ts` | the project-extension shim |
+| `plugin/src/attention/delivery.ts` | session sends plus parked-peer revival via the host lifecycle manager |
 | `docs/research/` | the design record that produced it |
 | [`AGENTS.md`](AGENTS.md) | the working guide for agents in this repo |
 

@@ -78,11 +78,8 @@ That symlinks the package into `~/.omp/plugins/node_modules/omp-agent-chatroom` 
 `omp.extensions` entry (`./src/index.ts`) loads on the next session start. Use the link route when
 hacking on the plugin itself.
 
-**Project extension (what this repo uses).**
-
-`.omp/extensions/chatroom.ts` re-exports `../../plugin/src/index.ts`. omp discovers project
-`.omp/extensions/*.ts` automatically, so a session started in this repo loads the room with no install
-step.
+**No project shim.** This repo no longer ships `.omp/extensions/chatroom.ts`. Use one install route —
+the marketplace link or `omp plugin link .` — so a single extension owns the room tools.
 
 The bundled skill lives at `plugin/skills/omp-agent-chatroom/SKILL.md` and is found by the plugin
 provider's conventional `skills/` directory scan. It is **not** named in the manifest —

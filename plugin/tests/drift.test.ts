@@ -89,10 +89,10 @@ test("DEEP_SPECIFIERS lists the Option A four plus the Option B surface", () => 
   // `deliverIrcMessage`, and that message's shape is `IrcMessage` from this subpath: if a bump
   // moves it, the room's peer delivery must fail here rather than when the 9th subagent spawns.
   expect(DEEP_SPECIFIERS).toContain("@oh-my-pi/pi-tui/tools/irc");
-  // 18.18.1 — the bus that REVIVES a parked peer. `IrcBus.send` calls `lifecycle.ensureLive` for a
-  // parked/aborted ref, and it is the only way a mention reaches an idle worker (which has no
-  // session to hand a message to). A bump that moves the subpath must fail here.
-  expect(DEEP_SPECIFIERS).toContain("@oh-my-pi/pi-coding-agent/irc/bus");
+  // Host 19 removed `irc/bus`; `registry/agent-lifecycle` owns `ensureLive`, the supported way to
+  // revive a parked peer before the normal session send. A bump that moves it must fail here.
+  expect(DEEP_SPECIFIERS).toContain("@oh-my-pi/pi-coding-agent/registry/agent-lifecycle");
+  expect(DEEP_SPECIFIERS).not.toContain("@oh-my-pi/pi-coding-agent/irc/bus");
 });
 
 test("each Option A deep specifier exports something, with no undefined members", () => {
@@ -133,7 +133,7 @@ async function readPluginManifest(): Promise<Record<string, unknown>> {
 
 test("the release manifest has one version and ships its license", async () => {
   const pkg = await readPluginManifest();
-  expect(pkg.version).toBe("0.1.1");
+  expect(pkg.version).toBe("0.1.2");
   // The host manager copies top-level version into the catalog entry; a second version here
   // silently drifts from what actually gets installed.
   const omp = requireObject(pkg.omp, "plugin omp manifest");

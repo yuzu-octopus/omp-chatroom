@@ -9,7 +9,7 @@ import {
   zod,
 } from "@oh-my-pi/pi-coding-agent";
 import { resolveLocalRoot } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
-import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import {
   deliver,
   escapeForDelivery,
@@ -663,11 +663,9 @@ function registerSession(id: string, calls: Send[], result: boolean | "never" = 
   });
 }
 
-test("deliver: a parked target is revived through the host bus, not skipped", async () => {
-  // 18.18.1 — a parked ref has no session, so a mention cannot use a session handle; the host's
-  // IrcBus.send calls `lifecycle.ensureLive` for exactly that ref and revives it from its
-  // transcript. Skipping instead meant a mention to an idle worker vanished in silence — the
-  // common case in a long-running swarm.
+test("deliver: a parked target is revived through the lifecycle manager, not skipped", async () => {
+  // Host 19 removed the IrcBus subpath; revival lives in `lifecycle.ensureLive`. A parked ref has
+  // no session, so a mention must revive it from its transcript before the normal send path runs.
   const root = tempRoot();
   const { pi, sends } = fakePi();
   const ctx = fakeCtx(root, "Sender");
@@ -681,11 +679,14 @@ test("deliver: a parked target is revived through the host bus, not skipped", as
     session: null,
   });
   const busSends: Array<{ from: string; to: string; body: string }> = [];
-  IrcBus.installGlobal({
-    send: async (m: { from: string; to: string; body: string }) => {
+  const revivedSession = {
+    async deliverIrcMessage(m: { from: string; to: string; body: string }) {
       busSends.push(m);
-      return { to: m.to, outcome: "revived" };
+      return "woken" as const;
     },
+  };
+  AgentLifecycleManager.installGlobal({
+    ensureLive: async () => revivedSession,
   } as never);
   try {
     const record = msg(1, { from: "Other", topic: "build", mention: [parked] });
@@ -696,7 +697,7 @@ test("deliver: a parked target is revived through the host bus, not skipped", as
     expect(store.cursors.get(parked)).toBe(record.seq); // a revival IS a delivery
     expect(sends.length).toBe(0);
   } finally {
-    IrcBus.resetGlobalForTests();
+    AgentLifecycleManager.resetGlobalForTests();
   }
 });
 

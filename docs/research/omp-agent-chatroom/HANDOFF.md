@@ -318,10 +318,10 @@ documented rather than tested.
 ## What to run
 
 ```sh
-cd /home/yuzu/projects/omp-chatroom
-
-# the plugin loads as a PROJECT extension — no install step needed
-omp                    # from this directory; .omp/extensions/chatroom.ts is picked up
+# install once from the shared marketplace, then start omp from any project
+omp plugin marketplace add https://github.com/yuzu-octopus/omp-marketplace
+omp plugin install omp-agent-chatroom@yuzus-plugins
+omp
 
 # then, inside omp:
 #   /room              — opens the TUI panel
@@ -331,8 +331,10 @@ omp                    # from this directory; .omp/extensions/chatroom.ts is pic
 #   ask the agent to use the room tool
 ```
 
-The `.omp/extensions/chatroom.ts` shim re-exports `plugin/src/index.ts`, so edits to the plugin are
-picked up on the next session (no hot reload — restart omp).
+The former `.omp/extensions/chatroom.ts` project shim was removed: a second loader for the same
+room produced duplicate tool registrations and incompatible module instances. The marketplace
+extension is now the only load route. Host 19 removed `irc/bus`; parked-peer revival uses
+`registry/agent-lifecycle`'s `ensureLive`, proven with `omp models -e` against host 19.0.1.
 
 The room itself now lives **outside the project tree**, in the global omp session store:
 `getSessionsDir()/rooms/<16 hex of the project path>` (`~/.omp/agent/sessions/rooms/<hash>`, or

@@ -1,5 +1,5 @@
 import { AgentRegistry, type ExtensionAPI, type ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { IrcBus, type IrcBusApi } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { cardTypeFor } from "../cards/message-cards";
 import { safeRoomText } from "../onboarding/escape";
@@ -160,16 +160,14 @@ export async function sendToTarget(
  * Send one room message to a peer whose ref has NO live session — a parked (kept-alive but
  * detached) or aborted subagent.
  *
- * The host's own `agent://<id>` path reaches those peers by REVIVING them from their transcript,
- * and that revival lives in `IrcBus.#deliver` (`lifecycle.ensureLive` for a `parked`/`aborted`
- * ref), not in the session handle we otherwise use: a parked ref has no session to call. Without
- * this edge a mention to a parked peer was skipped in silence — the common case in a long-running
- * swarm, where every idle worker is parked and only the busy ones have a session.
+ * Host 19 removed the `irc/bus` subpath, so revival now goes through the lifecycle manager's
+ * `ensureLive` — the same operation the host's own bus used internally. Once it returns a session,
+ * the normal capability-dispatched send path applies. Without this edge a mention to a parked
+ * peer was skipped in silence — the common case in a long-running swarm, where every idle worker
+ * is parked and only the busy ones have a session.
  *
- * The receipt is the host's own verdict: `revived`, `injected` and `woken` all mean the message
- * reached the peer (a revival starts a turn); `failed` means it did not, and names why (an
- * unknown id, a read-only advisor, a revive that could not be rebuilt) — which must surface as a
- * `deliveryError` rather than a quiet drop.
+ * Any thrown revival error, or a revived session with no message capability, is a delivery
+ * failure: it must surface as `deliveryError`, never as a quiet drop.
  */
 export async function sendToParkedPeer(
   ctx: ExtensionContext,
@@ -177,24 +175,21 @@ export async function sendToParkedPeer(
   to: string,
   content: string,
 ): Promise<SendOutcome> {
-  const bus = (IrcBus as { global?: () => IrcBusApi }).global?.();
-  if (bus === undefined) {
-    return {
-      ok: false,
-      error: new Error("no IRC bus is installed, so a parked peer cannot be reached"),
-    };
-  }
-  const settled = Promise.resolve(bus.send({ from, to, body: content, broadcast: false })).then(
-    (receipt) =>
-      receipt.outcome === "failed"
-        ? {
-            ok: false as const,
-            error: new Error(receipt.error ?? "the host could not reach the peer"),
-          }
-        : { ok: true as const, accepted: true },
-    (error: unknown) => ({ ok: false as const, error }),
+  let session: unknown;
+  const revived = await sendBounded(
+    ctx,
+    Promise.resolve(AgentLifecycleManager.global().ensureLive(to)).then((live) => {
+      session = live;
+      return true;
+    }),
   );
-  return await sendBounded(ctx, settled);
+  if (!revived.ok) return revived;
+  return await sendToTarget(ctx, session, to, {
+    from,
+    content,
+    payload: { customType: "room:board-delta", content, display: true },
+    options: { deliverAs: "steer", triggerTurn: true },
+  });
 }
 
 // §5.3 — verbatim, plus `extra` — the optional digest lines (the T2 coalescing digest) that ride

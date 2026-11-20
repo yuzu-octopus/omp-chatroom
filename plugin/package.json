@@ -1,6 +1,6 @@
 {
   "name": "omp-agent-chatroom",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "In-process multi-agent chatroom: claim board, bounded chat, blocking waits",
   "license": "MIT",
   "scripts": {

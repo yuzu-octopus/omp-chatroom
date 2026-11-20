@@ -96,9 +96,9 @@ bun test tests/room-command.test.ts tests/room-root.test.ts tests/room-root-e2e.
   tests/tree.test.ts tests/wait-claim-regression.test.ts tests/wait-tools.test.ts
 ```
 
-**There is no build step** — Bun runs the TypeScript directly and omp loads it in-process. Two load
-routes reach `plugin/src/index.ts`: the project shim `.omp/extensions/chatroom.ts` (what this repo
-uses, auto-discovered) and `omp plugin link .` (packaged, verified with `omp plugin doctor`).
+**There is no build step** — Bun runs the TypeScript directly and omp loads it in-process. The
+shipped extension loads as a marketplace/plugin link from `plugin/src/index.ts`; this repo no longer
+ships a project `.omp/extensions/chatroom.ts` shim (a duplicate loader for one room).
 
 ## Agent hygiene: scratch, cleanup, and how we verify
 
@@ -221,19 +221,21 @@ Detailed conventions and the not-covered list: `docs/research/omp-agent-notes/te
 ## Runtime/Tooling Preferences
 
 - **Bun only** — `bun` 1.4.4 (`engines.bun` >=1.4.4, the host's own floor). Package manager, runner, and runtime. No `node`, `npm`, or `npx`.
-- **Host: omp 18.18.1.** The plugin pins it exactly in both `peerDependencies` and
-  `devDependencies` — `@oh-my-pi/pi-coding-agent`, `@oh-my-pi/pi-tui`, `@oh-my-pi/pi-ai` and
-  `@oh-my-pi/pi-utils` — because the twelve deep subpath imports (`DEEP_SPECIFIERS`) are
-  wildcard-only, not public API. The twelve are
-  `@oh-my-pi/pi-coding-agent/{internal-urls/local-protocol,irc/bus,registry/agent-registry,session/harness-tags,utils/event-bus}`
+- **Dev pin: omp 18.18.1.** The plugin pins it exactly in both `peerDependencies` and
+  `devDependencies` for development (`@oh-my-pi/pi-coding-agent`, `@oh-my-pi/pi-tui`,
+  `@oh-my-pi/pi-ai`, `@oh-my-pi/pi-utils`). The same source loads on host **19.0.1**: host 19
+  removed the `irc/bus` deep path, so parked-peer revival now imports
+  `@oh-my-pi/pi-coding-agent/registry/agent-lifecycle` and calls `ensureLive`. The twelve deep
+  subpath imports (`DEEP_SPECIFIERS`) are wildcard-only, not public API:
+  `@oh-my-pi/pi-coding-agent/{internal-urls/local-protocol,registry/agent-lifecycle,registry/agent-registry,session/harness-tags,utils/event-bus}`
   and
   `@oh-my-pi/pi-tui/{chat/messages,chrome/overlay-box,render/render-utils,render/status-line,theme/active-symbols,tools/irc,tools/renderer}`
   — `theme/active-symbols` is the tenth (it is the host's own symbol lookup, which the plugin's
   theme shim resolves through rather than copying). `tools/irc` is the eleventh, and it is the
   cross-agent delivery contract: a worker-thread peer session accepts only `deliverIrcMessage`,
-  whose message is that type. `irc/bus` is the twelfth and the reason a mention to an IDLE worker
-  works at all: `IrcBus.send` calls `lifecycle.ensureLive` for a parked/aborted ref, so it is the
-  only transport that can revive a peer with no session. Two of the twelve are imported by the
+  whose message is that type. `registry/agent-lifecycle` is the twelfth: a mention to an IDLE
+  worker works because `ensureLive` revives a parked/aborted ref from its transcript before the
+  normal session send. Two of the twelve are imported by the
   TESTS only (`pi-coding-agent/internal-urls/local-protocol` and `pi-coding-agent/utils/event-bus`): no
   source file imports them, but they are still subpaths the plugin resolves, so they belong in the
   list a host bump is audited against.
